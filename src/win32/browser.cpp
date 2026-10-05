@@ -31,6 +31,7 @@ const wchar_t kMainClass[] = L"KiteBrowserWindow";
 const wchar_t kViewClass[] = L"KitePageView";
 const UINT_PTR kTimerRelayout = 1;
 const UINT_PTR kTimerResize = 2;
+const UINT_PTR kTimerImageAnim = 3;  // animated GIF/WebP/AVIF frames
 const UINT_PTR kTimerStyleFallbackBase = 0x1000;
 const UINT_PTR kTimerRefreshBase = 0x2000;
 const UINT_PTR kTimerScriptBase = 0x3000;
@@ -210,6 +211,8 @@ class Browser {
   void PumpScripts(Tab* t);
   void ScheduleScriptTimer(Tab* t);
   void ScheduleAnimation(Tab* t);
+  void ScheduleImageAnimation();
+  bool imageAnimArmed_ = false;
   bool DispatchJs(Tab* t, Node* target, const char* type);
   void RunJavaScriptUrl(Tab* t, const std::string& url);
   void ShowConsole();
@@ -2113,6 +2116,12 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         SetTimer(hwnd_, id, 100, 0);
         return 0;
       }
+      if (id == kTimerImageAnim) {
+        KillTimer(hwnd_, kTimerImageAnim);
+        imageAnimArmed_ = false;
+        ScheduleImageAnimation();
+        return 0;
+      }
       if (id == kTimerRelayout) {
         KillTimer(hwnd_, kTimerRelayout);
         relayoutPending_ = false;
@@ -2453,6 +2462,27 @@ void Browser::ScheduleAnimation(Tab* t) {
     KillTimer(hwnd_, kTimerAnimBase + t->id);
 }
 
+// Shows the due frame of every animated image on the current page and arms
+// a timer for the next frame change. Repainting re-arms it, so animations
+// stop while the window is hidden.
+void Browser::ScheduleImageAnimation() {
+  Tab* t = current_;
+  if (!t || !t->rendered || IsIconic(hwnd_)) return;
+  std::set<std::string> urls;
+  const std::vector<DisplayItem>& items = t->page->display().items;
+  for (size_t i = 0; i < items.size(); ++i)
+    if (items[i].type == DisplayItem::kImage) urls.insert(items[i].imageUrl);
+  if (urls.empty()) return;
+  int next = -1;
+  if (Images().AdvanceAnimations(urls, next)) {
+    InvalidateRect(view_, 0, FALSE);  // painting re-arms the timer
+    return;
+  }
+  if (next < 0) return;
+  SetTimer(hwnd_, kTimerImageAnim, (UINT)std::max(next, 20), 0);
+  imageAnimArmed_ = true;
+}
+
 void Browser::ScheduleScriptTimer(Tab* t) {
   ScriptEngine* js = t->page->script();
   int delay = js ? js->NextTimerDelay() : -1;
@@ -2599,6 +2629,7 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       if (t && t->rendered) {
         renderer_.Paint(dc, t->page->display(), rc.right, rc.bottom, t->scrollX, t->scrollY, ZoomF(),
                         t->highlights, t->selection);
+        if (!imageAnimArmed_) ScheduleImageAnimation();
       } else {
         FillRect(dc, &rc, (HBRUSH)GetStockObject(WHITE_BRUSH));
       }

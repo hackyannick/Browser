@@ -13,6 +13,16 @@ bool LooksLikeAvif(const std::string& data);
 bool DecodeAvif(const std::string& data, int& width, int& height, std::vector<uint32_t>& pixels,
                 bool& hasAlpha);
 
+// Image sequences ("avis"): the colour track (with its alpha track, if any)
+// decoded frame by frame. Stops once |maxBytes| of frames are decoded.
+struct AvifAnimation {
+  int width = 0, height = 0;
+  bool hasAlpha = false;
+  std::vector<std::vector<uint32_t> > frames;  // premultiplied BGRA
+  std::vector<int> delays;                     // milliseconds
+};
+bool DecodeAvifSequence(const std::string& data, AvifAnimation& out, size_t maxBytes);
+
 }  // namespace kite
 
 #endif

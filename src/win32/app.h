@@ -7,6 +7,7 @@
 
 #include <list>
 #include <map>
+#include <set>
 #include <memory>
 #include <string>
 #include <vector>
@@ -101,6 +102,8 @@ class ImageCache : public ImageProvider {
     State state;
     DecodedImage image;
     unsigned lastUse;
+    unsigned started = 0;  // animations: GetTickCount() when loaded
+    int shown = 0;         // animations: frame currently in image.pixels
   };
   State GetImage(const std::string& url, int& width, int& height);
   const DecodedImage* Find(const std::string& url);
@@ -113,6 +116,10 @@ class ImageCache : public ImageProvider {
   void Trim();
   // Scaled copy cache for fast repainting.
   const DecodedImage* Scaled(const std::string& url, int w, int h);
+  // Animated images: shows the frame due now for each of |urls|. Returns
+  // true if one of them changed; |nextMs| receives the time until the next
+  // frame change (-1 if none of them animates).
+  bool AdvanceAnimations(const std::set<std::string>& urls, int& nextMs);
 
  private:
   std::map<std::string, Entry> entries_;

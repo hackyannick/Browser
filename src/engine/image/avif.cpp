@@ -279,68 +279,88 @@ struct Frame {
 
 void NoFree(const uint8_t*, void*) {}
 
-bool DecodeAv1(const std::vector<uint8_t>& obu, Frame& out) {
-  Dav1dSettings s;
-  dav1d_default_settings(&s);
-  s.n_threads = 1;
-  s.max_frame_delay = 1;
-  s.frame_size_limit = 8192 * 8192;
-  Dav1dContext* ctx = 0;
-  if (dav1d_open(&ctx, &s) < 0) return false;
-  Dav1dData data;
-  memset(&data, 0, sizeof data);
-  if (dav1d_data_wrap(&data, obu.data(), obu.size(), NoFree, 0) < 0) {
-    dav1d_close(&ctx);
-    return false;
+void PictureToFrame(const Dav1dPicture& pic, Frame& out) {
+  out.w = pic.p.w;
+  out.h = pic.p.h;
+  out.bpc = pic.p.bpc;
+  out.layout = pic.p.layout;
+  if (pic.seq_hdr) {
+    out.matrix = pic.seq_hdr->mtrx;
+    out.fullRange = pic.seq_hdr->color_range;
   }
-  Dav1dPicture pic;
-  memset(&pic, 0, sizeof pic);
-  bool got = false;
-  for (int guard = 0; guard < 64 && !got; ++guard) {
-    if (data.sz > 0) {
-      int r = dav1d_send_data(ctx, &data);
-      if (r < 0 && r != DAV1D_ERR(EAGAIN)) break;
+  int ssx = out.layout == DAV1D_PIXEL_LAYOUT_I420 || out.layout == DAV1D_PIXEL_LAYOUT_I422;
+  int ssy = out.layout == DAV1D_PIXEL_LAYOUT_I420;
+  out.cw = (out.w + ssx) >> ssx;
+  out.ch = (out.h + ssy) >> ssy;
+  int planes = out.layout == DAV1D_PIXEL_LAYOUT_I400 ? 1 : 3;
+  for (int p = 0; p < planes; ++p) {
+    int pw = p ? out.cw : out.w, ph = p ? out.ch : out.h;
+    ptrdiff_t stride = pic.stride[p ? 1 : 0];
+    const uint8_t* src = (const uint8_t*)pic.data[p];
+    out.planes[p].resize((size_t)pw * ph);
+    for (int y = 0; y < ph; ++y) {
+      const uint8_t* row = src + y * stride;
+      uint16_t* dst = &out.planes[p][(size_t)y * pw];
+      if (out.bpc == 8)
+        for (int x = 0; x < pw; ++x) dst[x] = row[x];
+      else
+        for (int x = 0; x < pw; ++x) dst[x] = ((const uint16_t*)row)[x];
     }
-    int r = dav1d_get_picture(ctx, &pic);
-    if (r == 0) got = true;
-    else if (r != DAV1D_ERR(EAGAIN)) break;
-    else if (data.sz == 0 && guard > 4) break;
   }
-  if (data.sz > 0) dav1d_data_unref(&data);
-  bool ok = false;
-  if (got && pic.p.w > 0 && pic.p.h > 0) {
-    out.w = pic.p.w;
-    out.h = pic.p.h;
-    out.bpc = pic.p.bpc;
-    out.layout = pic.p.layout;
-    if (pic.seq_hdr) {
-      out.matrix = pic.seq_hdr->mtrx;
-      out.fullRange = pic.seq_hdr->color_range;
-    }
-    int ssx = out.layout == DAV1D_PIXEL_LAYOUT_I420 || out.layout == DAV1D_PIXEL_LAYOUT_I422;
-    int ssy = out.layout == DAV1D_PIXEL_LAYOUT_I420;
-    out.cw = (out.w + ssx) >> ssx;
-    out.ch = (out.h + ssy) >> ssy;
-    int planes = out.layout == DAV1D_PIXEL_LAYOUT_I400 ? 1 : 3;
-    for (int p = 0; p < planes; ++p) {
-      int pw = p ? out.cw : out.w, ph = p ? out.ch : out.h;
-      ptrdiff_t stride = pic.stride[p ? 1 : 0];
-      const uint8_t* src = (const uint8_t*)pic.data[p];
-      out.planes[p].resize((size_t)pw * ph);
-      for (int y = 0; y < ph; ++y) {
-        const uint8_t* row = src + y * stride;
-        uint16_t* dst = &out.planes[p][(size_t)y * pw];
-        if (out.bpc == 8)
-          for (int x = 0; x < pw; ++x) dst[x] = row[x];
-        else
-          for (int x = 0; x < pw; ++x) dst[x] = ((const uint16_t*)row)[x];
+}
+
+// A dav1d decoder fed one temporal unit (still item or sequence sample) at
+// a time.
+class Av1Stream {
+ public:
+  Av1Stream() : ctx_(0) {
+    Dav1dSettings s;
+    dav1d_default_settings(&s);
+    s.n_threads = 1;
+    s.max_frame_delay = 1;
+    s.frame_size_limit = 8192 * 8192;
+    if (dav1d_open(&ctx_, &s) < 0) ctx_ = 0;
+  }
+  ~Av1Stream() {
+    if (ctx_) dav1d_close(&ctx_);
+  }
+  // Returns true if the unit produced a picture.
+  bool Decode(const uint8_t* p, size_t n, Frame& out) {
+    if (!ctx_ || !n) return false;
+    Dav1dData data;
+    memset(&data, 0, sizeof data);
+    if (dav1d_data_wrap(&data, p, n, NoFree, 0) < 0) return false;
+    bool got = false;
+    for (int guard = 0; guard < 64; ++guard) {
+      if (data.sz > 0) {
+        int r = dav1d_send_data(ctx_, &data);
+        if (r < 0 && r != DAV1D_ERR(EAGAIN)) break;
+      }
+      Dav1dPicture pic;
+      memset(&pic, 0, sizeof pic);
+      int r = dav1d_get_picture(ctx_, &pic);
+      if (r == 0) {
+        if (pic.p.w > 0 && pic.p.h > 0) {
+          PictureToFrame(pic, out);
+          got = true;
+        }
+        dav1d_picture_unref(&pic);
+        if (data.sz == 0) break;
+      } else if (r != DAV1D_ERR(EAGAIN) || (data.sz == 0 && guard > 4)) {
+        break;
       }
     }
-    ok = true;
+    if (data.sz > 0) dav1d_data_unref(&data);
+    return got;
   }
-  if (got) dav1d_picture_unref(&pic);
-  dav1d_close(&ctx);
-  return ok;
+
+ private:
+  Dav1dContext* ctx_;
+};
+
+bool DecodeAv1(const std::vector<uint8_t>& obu, Frame& out) {
+  Av1Stream s;
+  return s.Decode(obu.data(), obu.size(), out);
 }
 
 // Matrix coefficients (H.273): returns Kr, Kb.
@@ -541,6 +561,167 @@ bool DecodeAvif(const std::string& data, int& width, int& height, std::vector<ui
   pixels.swap(px);
   hasAlpha = haveAlpha;
   return true;
+}
+
+namespace {
+
+struct Track {
+  uint32_t id = 0, timescale = 1000, handler = 0, auxlFor = 0;
+  bool av01 = false;
+  std::vector<uint8_t> config;  // av1C configOBUs
+  int matrix = -1, range = -1;
+  std::vector<std::pair<uint32_t, uint32_t> > samples;  // file offset, size
+  std::vector<uint32_t> durations;
+};
+
+std::vector<Box> Children(const Box& b, size_t skip = 0) {
+  std::vector<Box> out;
+  if (b.size >= skip) ReadBoxes(b.data + skip, b.size - skip, out);
+  return out;
+}
+
+bool ParseStbl(const Box& stbl, Track& t) {
+  std::vector<Box> boxes = Children(stbl);
+  if (const Box* stsd = Find(boxes, "stsd")) {
+    std::vector<Box> entries = Children(*stsd, 8);
+    if (!entries.empty() && entries[0].type == Tag("av01") && entries[0].size >= 78) {
+      t.av01 = true;
+      std::vector<Box> sub = Children(entries[0], 78);
+      if (const Box* av1c = Find(sub, "av1C"))
+        if (av1c->size > 4) t.config.assign(av1c->data + 4, av1c->data + av1c->size);
+      if (const Box* colr = Find(sub, "colr"))
+        if (colr->size >= 11 && Be(colr->data, 4) == Tag("nclx")) {
+          t.matrix = (int)Be(colr->data + 8, 2);
+          t.range = colr->data[10] >> 7;
+        }
+    }
+  }
+  const Box* stsz = Find(boxes, "stsz");
+  const Box* stsc = Find(boxes, "stsc");
+  const Box* stco = Find(boxes, "stco");
+  const Box* co64 = Find(boxes, "co64");
+  if (!stsz || !stsc || (!stco && !co64) || stsz->size < 12 || stsc->size < 8) return false;
+  uint32_t fixed = Be(stsz->data + 4, 4), count = Be(stsz->data + 8, 4);
+  if (count > 100000 || (!fixed && stsz->size < 12 + (size_t)count * 4)) return false;
+  std::vector<uint32_t> sizes(count);
+  for (uint32_t i = 0; i < count; ++i) sizes[i] = fixed ? fixed : Be(stsz->data + 12 + i * 4, 4);
+  std::vector<uint32_t> chunks;
+  const Box* co = stco ? stco : co64;
+  int osize = stco ? 4 : 8;
+  if (co->size < 8) return false;
+  uint32_t nchunks = Be(co->data + 4, 4);
+  if (nchunks > 100000 || co->size < 8 + (size_t)nchunks * osize) return false;
+  for (uint32_t i = 0; i < nchunks; ++i) chunks.push_back(Be(co->data + 8 + i * osize + (osize - 4), 4));
+  uint32_t nsc = Be(stsc->data + 4, 4);
+  if (nsc > 100000 || stsc->size < 8 + (size_t)nsc * 12) return false;
+  size_t sample = 0;
+  for (uint32_t c = 0; c < nchunks && sample < count; ++c) {
+    uint32_t perChunk = 0;
+    for (uint32_t e = 0; e < nsc; ++e)
+      if (Be(stsc->data + 8 + e * 12, 4) <= c + 1) perChunk = Be(stsc->data + 8 + e * 12 + 4, 4);
+    uint32_t off = chunks[c];
+    for (uint32_t k = 0; k < perChunk && sample < count; ++k, ++sample) {
+      t.samples.push_back(std::make_pair(off, sizes[sample]));
+      off += sizes[sample];
+    }
+  }
+  if (const Box* stts = Find(boxes, "stts")) {
+    if (stts->size >= 8) {
+      uint32_t n = Be(stts->data + 4, 4);
+      for (uint32_t e = 0; e < n && stts->size >= 8 + (size_t)(e + 1) * 8; ++e) {
+        uint32_t c = Be(stts->data + 8 + e * 8, 4), d = Be(stts->data + 12 + e * 8, 4);
+        for (uint32_t k = 0; k < c && t.durations.size() < t.samples.size(); ++k) t.durations.push_back(d);
+      }
+    }
+  }
+  return !t.samples.empty();
+}
+
+bool ParseTrak(const Box& trak, Track& t) {
+  std::vector<Box> boxes = Children(trak);
+  if (const Box* tkhd = Find(boxes, "tkhd")) {
+    size_t at = tkhd->size && tkhd->data[0] == 1 ? 20 : 12;
+    if (tkhd->size >= at + 4) t.id = Be(tkhd->data + at, 4);
+  }
+  if (const Box* tref = Find(boxes, "tref")) {
+    std::vector<Box> refs = Children(*tref);
+    if (const Box* auxl = Find(refs, "auxl"))
+      if (auxl->size >= 4) t.auxlFor = Be(auxl->data, 4);
+  }
+  const Box* mdia = Find(boxes, "mdia");
+  if (!mdia) return false;
+  std::vector<Box> m = Children(*mdia);
+  if (const Box* mdhd = Find(m, "mdhd")) {
+    size_t at = mdhd->size && mdhd->data[0] == 1 ? 20 : 12;
+    if (mdhd->size >= at + 4) t.timescale = std::max(1u, Be(mdhd->data + at, 4));
+  }
+  if (const Box* hdlr = Find(m, "hdlr"))
+    if (hdlr->size >= 12) t.handler = Be(hdlr->data + 8, 4);
+  const Box* minf = Find(m, "minf");
+  if (!minf) return false;
+  std::vector<Box> mi = Children(*minf);
+  const Box* stbl = Find(mi, "stbl");
+  return stbl && ParseStbl(*stbl, t);
+}
+
+}  // namespace
+
+bool DecodeAvifSequence(const std::string& data, AvifAnimation& out, size_t maxBytes) {
+  if (!LooksLikeAvif(data)) return false;
+  const uint8_t* file = (const uint8_t*)data.data();
+  std::vector<Box> top;
+  if (!ReadBoxes(file, data.size(), top)) return false;
+  const Box* moov = Find(top, "moov");
+  if (!moov) return false;
+  std::vector<Box> mb = Children(*moov);
+  std::vector<Track> tracks;
+  for (size_t i = 0; i < mb.size(); ++i) {
+    if (mb[i].type != Tag("trak")) continue;
+    Track t;
+    if (ParseTrak(mb[i], t) && t.av01) tracks.push_back(t);
+  }
+  const Track* color = 0;
+  const Track* alpha = 0;
+  for (size_t i = 0; i < tracks.size() && !color; ++i)
+    if (!tracks[i].auxlFor) color = &tracks[i];
+  if (!color) return false;
+  for (size_t i = 0; i < tracks.size() && !alpha; ++i)
+    if (tracks[i].auxlFor == color->id && tracks[i].samples.size() == color->samples.size()) alpha = &tracks[i];
+  Av1Stream cs, as;
+  Frame f, af;
+  bool haveAlpha = false;
+  size_t bytes = 0;
+  for (size_t i = 0; i < color->samples.size(); ++i) {
+    std::pair<uint32_t, uint32_t> s = color->samples[i];
+    if ((uint64_t)s.first + s.second > data.size()) break;
+    std::vector<uint8_t> unit;
+    if (i == 0) unit = color->config;  // sequence header, in case samples lack it
+    unit.insert(unit.end(), file + s.first, file + s.first + s.second);
+    bool got = cs.Decode(unit.data(), unit.size(), f);
+    if (alpha) {
+      std::pair<uint32_t, uint32_t> a = alpha->samples[i];
+      if ((uint64_t)a.first + a.second <= data.size()) {
+        std::vector<uint8_t> au;
+        if (i == 0) au = alpha->config;
+        au.insert(au.end(), file + a.first, file + a.first + a.second);
+        if (as.Decode(au.data(), au.size(), af)) haveAlpha = true;
+      }
+    }
+    if (!got && out.frames.empty()) continue;
+    if (got && out.frames.empty()) {
+      out.width = f.w;
+      out.height = f.h;
+    }
+    if (f.w != out.width || f.h != out.height) break;
+    out.frames.push_back(std::vector<uint32_t>());
+    ToRgb(f, haveAlpha ? &af : 0, color->matrix, color->range, out.frames.back());
+    uint32_t d = i < color->durations.size() ? color->durations[i] : color->timescale / 10;
+    out.delays.push_back((int)((uint64_t)d * 1000 / color->timescale));
+    bytes += out.frames.back().size() * 4;
+    if (bytes > maxBytes || out.frames.size() >= 2000) break;
+  }
+  out.hasAlpha = haveAlpha;
+  return !out.frames.empty();
 }
 
 }  // namespace kite

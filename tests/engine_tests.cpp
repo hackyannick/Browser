@@ -873,6 +873,34 @@ std::string Hex(const char* hex) {
   return out;
 }
 
+void TestAnimatedImages() {
+  // Two-frame GIF (red 50 ms, blue 120 ms).
+  std::string gif = Hex(
+      "47494638396104000400810000ff000000000000000000000021ff0b4e45545343415045322e30030100000021f904000500"
+      "00002c00000000040004000008090001081c48b02080800021f904010c0001002c0000000004000400810000ff000000000000"
+      "00000008090001081c48b0208080003b");
+  DecodedImage img;
+  CHECK(DecodeImage(gif, img));
+  CHECK(img.animated());
+  CHECK_EQ(img.frames.size(), 2u);
+  if (img.frames.size() == 2) {
+    CHECK_EQ(img.delays[0], 50);
+    CHECK_EQ(img.delays[1], 120);
+    CHECK_EQ(img.frames[0][0], 0xFFFF0000u);
+    CHECK_EQ(img.frames[1][0], 0xFF0000FFu);
+    CHECK_EQ(img.pixels[0], 0xFFFF0000u);
+  }
+  int wait = 0;
+  CHECK_EQ(AnimationFrameAt(img, 0, &wait), 0);
+  CHECK_EQ(wait, 50);
+  CHECK_EQ(AnimationFrameAt(img, 60, &wait), 1);
+  CHECK_EQ(wait, 110);
+  CHECK_EQ(AnimationFrameAt(img, 175, &wait), 0);  // looped
+  img.loops = 1;
+  CHECK_EQ(AnimationFrameAt(img, 175, &wait), 1);  // finished: last frame
+  CHECK_EQ(wait, -1);
+}
+
 void TestHpack() {
   // RFC 7541 C.4: requests with Huffman coding and a shared dynamic table.
   HpackDecoder d;
@@ -952,6 +980,7 @@ int main() {
   TestAnimations();
   TestTransforms();
   TestHpack();
+  TestAnimatedImages();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

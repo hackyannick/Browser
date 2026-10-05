@@ -51,6 +51,11 @@ void ImageCache::SetLoaded(const std::string& url, DecodedImage& img) {
   e.image.hasAlpha = img.hasAlpha;
   e.image.density = img.density;
   e.image.pixels.swap(img.pixels);
+  e.image.frames.swap(img.frames);
+  e.image.delays.swap(img.delays);
+  e.image.loops = img.loops;
+  e.started = GetTickCount();
+  e.shown = 0;
   e.lastUse = ++clock_;
   Trim();
 }
@@ -70,8 +75,10 @@ void ImageCache::SetUnsupported(const std::string& url) {
 void ImageCache::Trim() {
   // Keep decoded images below ~96 MB.
   size_t total = 0;
-  for (std::map<std::string, Entry>::iterator it = entries_.begin(); it != entries_.end(); ++it)
+  for (std::map<std::string, Entry>::iterator it = entries_.begin(); it != entries_.end(); ++it) {
     total += it->second.image.pixels.size() * 4;
+    for (size_t f = 0; f < it->second.image.frames.size(); ++f) total += it->second.image.frames[f].size() * 4;
+  }
   const size_t limit = 96u * 1024 * 1024;
   while (total > limit) {
     std::map<std::string, Entry>::iterator oldest = entries_.end();
@@ -81,6 +88,8 @@ void ImageCache::Trim() {
         oldest = it;
     if (oldest == entries_.end()) break;
     total -= oldest->second.image.pixels.size() * 4;
+    for (size_t f = 0; f < oldest->second.image.frames.size(); ++f)
+      total -= oldest->second.image.frames[f].size() * 4;
     entries_.erase(oldest);  // will be fetched again if needed
   }
 }
@@ -157,6 +166,7 @@ const DecodedImage* ImageCache::Scaled(const std::string& url, int w, int h) {
   if (src->width == w && src->height == h) return src;
   if ((long long)w * h > 4096LL * 4096) return 0;
   std::string key = url + "|" + IntToString(w) + "x" + IntToString(h);
+  if (src->animated()) key += "#" + IntToString(entries_[url].shown);
   std::map<std::string, DecodedImage>::iterator it = scaled_.find(key);
   if (it != scaled_.end()) return &it->second;
   DecodedImage& dst = scaled_[key];
@@ -173,6 +183,26 @@ const DecodedImage* ImageCache::Scaled(const std::string& url, int w, int h) {
     }
   }
   return &dst;
+}
+
+bool ImageCache::AdvanceAnimations(const std::set<std::string>& urls, int& nextMs) {
+  bool changed = false;
+  nextMs = -1;
+  unsigned now = GetTickCount();
+  for (std::set<std::string>::const_iterator u = urls.begin(); u != urls.end(); ++u) {
+    std::map<std::string, Entry>::iterator it = entries_.find(*u);
+    if (it == entries_.end() || it->second.state != kLoaded || !it->second.image.animated()) continue;
+    Entry& e = it->second;
+    int wait = -1;
+    int frame = AnimationFrameAt(e.image, now - e.started, &wait);
+    if (frame != e.shown && frame < (int)e.image.frames.size()) {
+      e.image.pixels = e.image.frames[frame];
+      e.shown = frame;
+      changed = true;
+    }
+    if (wait >= 0 && (nextMs < 0 || wait < nextMs)) nextMs = wait;
+  }
+  return changed;
 }
 
 }  // namespace kite
