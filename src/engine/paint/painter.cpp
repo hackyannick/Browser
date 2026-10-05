@@ -694,6 +694,22 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   int transformItem = -1;
   size_t hitStart = out_->hits.size();
   float tm[6];
+  float savedFacing = facing_;
+  if (s->HasLinearTransform()) {
+    float lin0[6];
+    TransformMatrix(*s, b->w, b->h, lin0);
+    facing_ *= lin0[0] * lin0[3] - lin0[1] * lin0[2] < 0 ? -1.0f : 1.0f;
+  }
+  if (s->backfaceHidden && facing_ < 0) {
+    facing_ = savedFacing;
+    if (fixed) {
+      DisplayItem fe;
+      fe.type = DisplayItem::kEndFixed;
+      out_->items.push_back(fe);
+      --fixedDepth_;
+    }
+    return;  // turned away from the viewer
+  }
   if (s->HasLinearTransform()) {
     float lin[6];
     TransformMatrix(*s, b->w, b->h, lin);
@@ -713,6 +729,7 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
         out_->items.push_back(fe);
         --fixedDepth_;
       }
+      facing_ = savedFacing;
       return;  // degenerate (e.g. scale(0)): nothing visible
     }
     DisplayItem ti;
@@ -765,6 +782,7 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     out_->items.push_back(it);
     clipStack_.pop_back();
   }
+  facing_ = savedFacing;
   if (transformItem >= 0) {
     // Bounds of the untransformed content.
     Rect bounds(ax, ay, b->w, b->h);

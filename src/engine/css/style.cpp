@@ -64,6 +64,7 @@ ComputedStyle::ComputedStyle()
       translateY(Length::Px(0)),
       transformHidden(false),
       rotateRad(0),
+      backfaceHidden(false),
       scaleX(1),
       scaleY(1),
       originX(Length::Pct(50)),
@@ -197,6 +198,7 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   translateX = o.translateX;
   transformOps = o.transformOps;
   rotateRad = o.rotateRad;
+  backfaceHidden = o.backfaceHidden;
   scaleX = o.scaleX;
   scaleY = o.scaleY;
   originX = o.originX;
@@ -731,6 +733,12 @@ void TransformMatrix(const ComputedStyle& s, float w, float h, float out[6]) {
         r[0] = r[3] = std::cos(op.v[0]);
         r[1] = std::sin(op.v[0]);
         r[2] = -r[1];
+        break;
+      case TransformOp::kRotateX:
+        r[3] = std::cos(op.v[0]);
+        break;
+      case TransformOp::kRotateY:
+        r[0] = std::cos(op.v[0]);
         break;
       case TransformOp::kSkew:
         r[2] = std::tan(op.v[0]);

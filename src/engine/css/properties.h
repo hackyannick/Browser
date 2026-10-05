@@ -113,6 +113,7 @@ namespace kite {
   X(Rotate, "rotate", false)                               \
   X(Scale, "scale", false)                                 \
   X(TransformOrigin, "transform-origin", false)            \
+  X(BackfaceVisibility, "backface-visibility", false)      \
   X(AnimationName, "animation-name", false)               \
   X(AnimationDuration, "animation-duration", false)       \
   X(AnimationDelay, "animation-delay", false)             \

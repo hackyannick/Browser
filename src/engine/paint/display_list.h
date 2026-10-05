@@ -109,6 +109,7 @@ class Painter {
   LayoutBox* skipBackgroundOf_;
   std::vector<Rect> clipStack_;
   int fixedDepth_;
+  float facing_ = 1;  // sign of the accumulated transform determinant (backface culling)
   void AddHit(const Rect& r, Node* n) {
     HitRegion h;
     h.rect = r;

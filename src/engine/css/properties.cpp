@@ -363,6 +363,7 @@ void CopyPropertyImpl(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropRotate: d.rotateRad = s.rotateRad; break;
     case kPropScale: d.scaleX = s.scaleX; d.scaleY = s.scaleY; d.transformHidden = s.transformHidden; break;
     case kPropTransformOrigin: d.originX = s.originX; d.originY = s.originY; break;
+    case kPropBackfaceVisibility: d.backfaceHidden = s.backfaceHidden; break;
     case kPropAnimationName: d.hasAnimation = s.hasAnimation; d.animName = s.animName; break;
     case kPropAnimationDuration: d.animDuration = s.animDuration; break;
     case kPropAnimationDelay: d.animDelay = s.animDelay; break;
@@ -988,8 +989,30 @@ bool ParseTransformList(const std::string& v, const LengthContext& lc, std::vect
       const int idx[6] = {0, 1, 4, 5, 12, 13};
       for (int k = 0; k < 6; ++k)
         if (!ParseNumber(a[idx[k]], op.v[k])) return false;
-    } else if (fn == "rotatex" || fn == "rotatey" || fn == "translatez" || fn == "perspective" ||
-               fn == "rotate3d" || fn == "scalez") {
+    } else if (fn == "rotatex" || fn == "rotatey") {
+      op.kind = fn == "rotatex" ? TransformOp::kRotateX : TransformOp::kRotateY;
+      if (a.empty() || !ParseAngle(a[0], f)) return false;
+      op.v[0] = f;
+    } else if (fn == "rotate3d" && a.size() == 4) {
+      // Rotation about an arbitrary axis, projected onto the screen plane.
+      float x, y, z, ang;
+      if (!ParseNumber(a[0], x) || !ParseNumber(a[1], y) || !ParseNumber(a[2], z) || !ParseAngle(a[3], ang))
+        return false;
+      float len = std::sqrt(x * x + y * y + z * z);
+      if (len <= 0) {
+        p = close + 1;
+        continue;
+      }
+      x /= len;
+      y /= len;
+      z /= len;
+      float c = std::cos(ang), sn = std::sin(ang), t = 1 - c;
+      op.kind = TransformOp::kMatrix;
+      op.v[0] = t * x * x + c;      // m11
+      op.v[1] = t * x * y + sn * z;  // m12
+      op.v[2] = t * x * y - sn * z;  // m21
+      op.v[3] = t * y * y + c;      // m22
+    } else if (fn == "translatez" || fn == "perspective" || fn == "scalez") {
       // 3D: ignored (flat projection).
       p = close + 1;
       continue;
@@ -1577,6 +1600,9 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       s.transformHidden = s.scaleX == 0 || s.scaleY == 0;
       return;
     }
+    case kPropBackfaceVisibility:
+      s.backfaceHidden = v == "hidden";
+      return;
     case kPropTransformOrigin: {
       std::vector<std::string> a = SplitValueTokens(v);
       Length x = Length::Pct(50), y = Length::Pct(50);

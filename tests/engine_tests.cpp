@@ -805,6 +805,18 @@ void TestTransforms() {
   CHECK(above == r || (above && above->parent == r));
   CHECK(p.page.HitTest(box.x + 5, box.y + 25) != r);    // corner rotated away
 
+  // 3D rotations are projected; turned-away backfaces disappear.
+  TestPage f("<style>div{width:100px;height:50px}#x{transform:rotateY(60deg)}"
+             "#y{transform:rotateY(180deg);backface-visibility:hidden}#y2{transform:rotateY(180deg)}</style>"
+             "<div id=x>x</div><div id=y>y</div><div id=y2>y2</div>");
+  TransformMatrix(*f.ById("x")->style, 100, 50, m);
+  CHECK_NEAR(m[0], 0.5f, 1e-4f);
+  CHECK_NEAR(m[3], 1.0f, 1e-4f);
+  int painted = 0;
+  for (size_t i = 0; i < f.page.display().items.size(); ++i)
+    if (f.page.display().items[i].type == DisplayItem::kText) ++painted;
+  CHECK_EQ(painted, 2);  // y is hidden, y2 shows mirrored
+
   // Spinner-style animation interpolates the rotation.
   SetAnimationClockForTesting(FakeClock);
   g_fakeNow = 0;
@@ -816,6 +828,18 @@ void TestTransforms() {
   CHECK_EQ(a.ById("k")->style->transformOps.size(), 1u);
   if (a.ById("k")->style->transformOps.size() == 1)
     CHECK_NEAR(a.ById("k")->style->transformOps[0].v[0], 3.14159f / 2, 1e-3f);
+  // Different function lists interpolate via matrix decomposition.
+  g_fakeNow = 0;
+  TestPage d("<style>#q{transform:translateX(100px);transition:transform 1s linear}#q.r{transform:rotate(90deg)}</style>"
+             "<div id=q></div>");
+  d.ById("q")->SetAttr("class", "r");
+  d.page.Restyle(800, 600);
+  g_fakeNow = 500;
+  d.page.TickAnimations();
+  float qm[6];
+  TransformMatrix(*d.ById("q")->style, 0, 0, qm);
+  CHECK_NEAR(qm[4], 50.0f, 0.01f);
+  CHECK_NEAR(std::atan2(qm[1], qm[0]), 3.14159f / 4, 1e-3f);
   SetAnimationClockForTesting(0);
 }
 

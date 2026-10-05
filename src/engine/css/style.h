@@ -109,7 +109,8 @@ struct BoxShadow {
 
 // One function of a CSS transform list (2D).
 struct TransformOp {
-  enum Kind { kTranslate, kScale, kRotate, kSkew, kMatrix };
+  // kRotateX/kRotateY: 3D rotations, projected orthographically (v[0] = angle).
+  enum Kind { kTranslate, kScale, kRotate, kSkew, kMatrix, kRotateX, kRotateY };
   Kind kind;
   Length tx, ty;    // kTranslate (percentages refer to the border box)
   float v[6];       // kScale: sx, sy; kRotate: radians; kSkew: ax, ay (radians); kMatrix: a..f
@@ -186,6 +187,7 @@ struct ComputedStyle {
   float rotateRad;
   float scaleX, scaleY;
   Length originX, originY;
+  bool backfaceHidden;  // backface-visibility: hidden
   bool HasLinearTransform() const { return !transformOps.empty() || rotateRad != 0 || scaleX != 1 || scaleY != 1; }
   bool hasAnimation;  // animation-name is set
   // Animations and transitions (raw, comma separated lists).

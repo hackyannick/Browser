@@ -281,6 +281,64 @@ const int kTransitionable[] = {
     kPropBorderTopWidth, kPropBorderRightWidth, kPropBorderBottomWidth, kPropBorderLeftWidth,
     kPropBackgroundPositionX, kPropBackgroundPositionY, kPropRotate, kPropScale, kPropTransformOrigin};
 
+const float kPiF = 3.14159265358979f;
+
+std::vector<float> OpsMatrix(const std::vector<TransformOp>& ops) {
+  ComputedStyle tmp;
+  tmp.transformOps = ops;
+  float m[6];
+  TransformMatrix(tmp, 0, 0, m);
+  return std::vector<float>(m, m + 6);
+}
+
+struct Decomposed {
+  float tx = 0, ty = 0, sx = 1, sy = 1, angle = 0, skew = 0;
+};
+
+Decomposed Decompose(const std::vector<float>& m) {
+  // Columns of the linear part: (a, b) and (c, d).
+  Decomposed d;
+  d.tx = m[4];
+  d.ty = m[5];
+  float r0x = m[0], r0y = m[1], r1x = m[2], r1y = m[3];
+  d.sx = std::sqrt(r0x * r0x + r0y * r0y);
+  if (d.sx != 0) {
+    r0x /= d.sx;
+    r0y /= d.sx;
+  }
+  d.skew = r0x * r1x + r0y * r1y;
+  r1x -= r0x * d.skew;
+  r1y -= r0y * d.skew;
+  d.sy = std::sqrt(r1x * r1x + r1y * r1y);
+  if (d.sy != 0) {
+    r1x /= d.sy;
+    r1y /= d.sy;
+    d.skew /= d.sy;
+  }
+  if (r0x * r1y - r0y * r1x < 0) {  // mirrored
+    d.sx = -d.sx;
+    d.skew = -d.skew;
+    r0x = -r0x;
+    r0y = -r0y;
+  }
+  d.angle = std::atan2(r0y, r0x);
+  return d;
+}
+
+TransformOp Recompose(const Decomposed& d) {
+  // translate * rotate(angle) * skewX(atan(skew)) * scale(sx, sy)
+  float c = std::cos(d.angle), sn = std::sin(d.angle);
+  TransformOp op;
+  op.kind = TransformOp::kMatrix;
+  op.v[0] = c * d.sx;
+  op.v[1] = sn * d.sx;
+  op.v[2] = (c * d.skew - sn) * d.sy;
+  op.v[3] = (sn * d.skew + c) * d.sy;
+  op.v[4] = d.tx;
+  op.v[5] = d.ty;
+  return op;
+}
+
 // Transform list as written (translate-only lists live in translateX/Y).
 std::vector<TransformOp> EffectiveOps(const ComputedStyle& s) {
   if (!s.transformOps.empty()) return s.transformOps;
@@ -315,7 +373,21 @@ void MixTransform(const ComputedStyle& a, const ComputedStyle& b, float t, Compu
   for (size_t i = 0; same && i < oa.size(); ++i) same = oa[i].kind == ob[i].kind;
   std::vector<TransformOp> res;
   if (!same) {
-    res = t < 0.5f ? oa : ob;  // different function lists: no smooth path
+    // Different function lists: interpolate the decomposed matrices
+    // (CSS Transforms "unmatrix" for 2D). Percent translations count as 0.
+    Decomposed da = Decompose(OpsMatrix(oa)), db = Decompose(OpsMatrix(ob));
+    if (std::fabs(da.angle - db.angle) > kPiF) {  // shortest way round
+      if (da.angle > db.angle) da.angle -= 2 * kPiF;
+      else db.angle -= 2 * kPiF;
+    }
+    Decomposed d;
+    d.tx = Mix(da.tx, db.tx, t);
+    d.ty = Mix(da.ty, db.ty, t);
+    d.sx = Mix(da.sx, db.sx, t);
+    d.sy = Mix(da.sy, db.sy, t);
+    d.angle = Mix(da.angle, db.angle, t);
+    d.skew = Mix(da.skew, db.skew, t);
+    res.push_back(Recompose(d));
   } else {
     for (size_t i = 0; i < oa.size(); ++i) {
       TransformOp r = oa[i];

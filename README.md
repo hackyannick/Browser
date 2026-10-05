@@ -52,7 +52,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
   nur ein Platzhalter, `localStorage` lebt nur bis zum Schließen des Tabs.
   Große Single-Page-Anwendungen (React, Angular …) laufen daher oft nur
   teilweise.
-- 3D-Transformationen (`perspective`, `rotateX` …) werden flach dargestellt;
+- 3D-Transformationen werden orthografisch projiziert (`rotateX/Y`, `rotate3d`, `backface-visibility` funktionieren, `perspective` fehlt);
   AVIF-Bilder werden nicht dekodiert,
   animierte GIF/WebP zeigen nur das erste Bild.
 - TLS 1.3 und HTTP/2 werden nicht unterstützt (alle gängigen Server sprechen
