@@ -37,6 +37,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 | Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, **2D- und 3D-Transformationen** (`translate`, `rotate`, `scale`, `skew`, `matrix`, `rotateX/Y`, `rotate3d`, `translateZ`, `matrix3d`, **`perspective`** und `perspective-origin`, `transform-style: preserve-3d` mit Tiefensortierung, `backface-visibility`, `transform-origin`, Einzeleigenschaften `rotate:`/`scale:`), PNG/JPEG/GIF/BMP/**WebP**/**AVIF** (auch `<picture>`; **animierte GIF, WebP und AVIF** werden abgespielt), **SVG** (Inline und als Bild, mit Kantenglättung, Verläufen, Masken und Clip-Pfaden) |
 | Animation | **CSS-Animationen** (`@keyframes`, alle `animation-*`-Eigenschaften, Timing-Funktionen inkl. `cubic-bezier()`/`steps()`) und **Transitions** für Deckkraft, Farben, Transformationen (auch Drehung und Skalierung), Schatten, Größen und Abstände; `animationend`/`transitionend`-Events |
 | Canvas | **`<canvas>` 2D** per Software-Rasterizer: Pfade, Bögen, Füllregeln, Linienstile und Strichelung, Transformationen, Clipping, lineare/radiale/konische Verläufe, Muster, Compositing-Modi, Schatten, Text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, `Path2D` |
+| Audio/Video | **`<video>` und `<audio>`** mit H.264, HEVC, VP8, VP9, Theora sowie AAC, MP3, Opus, Vorbis, FLAC und PCM in MP4, WebM/Matroska, Ogg, MP3, WAV und FLAC; Laden in Stücken per HTTP-Range-Anfragen mit Vorpuffer, Spulen, Schleife, Poster, eingebaute Bedienleiste (`controls`), stummes Autoplay; Tonausgabe über waveOut; vollständige `HTMLMediaElement`-API (`play()`-Promise, `currentTime`, `duration`, `buffered`, `volume`, `muted`, `canPlayType()`, Events von `loadedmetadata` bis `ended`, `new Audio()`) |
 | Schriften | **Webfonts** (`@font-face`, TTF/OTF/WOFF/WOFF2) werden geladen und prozesslokal installiert |
 | JavaScript | **QuickJS** (ES2023) mit eigener DOM-Anbindung: `document`/`window`, Elemente, `querySelector`, `innerHTML`, `classList`, `style`, `dataset`, Events mit Bubbling und `preventDefault`, Timer, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `localStorage`/`sessionStorage` (dauerhaft gespeichert), **ES-Module** (`type=module`, Import-Maps, dynamisches `import()`), `MutationObserver`, History-API (`pushState`, `popstate`), **Web Components** (Custom Elements mit Lebenszyklus-Callbacks, **Shadow DOM** mit Slots, gekapselten Styles, `:host`, `::slotted()`), `TreeWalker`, **Web Worker** (auch Modul-Worker), **WebSockets**, `Intl` (Zahlen, Datum, Plural, Listen, relative Zeiten), Streams (`ReadableStream`/`WritableStream`/`TransformStream`), `Blob`/`FileReader`/`FormData` mit Binärdaten, `crypto.getRandomValues`/`randomUUID`/`subtle.digest`, `structuredClone`, `URL`, `document.cookie`, `getBoundingClientRect`/`getComputedStyle`, `<noscript>` |
 | Netzwerk | HTTP/1.1, **HTTP/2** (ALPN, Multiplexing über eine Verbindung pro Server, HPACK, Flusskontrolle), **TLS 1.3** (eigene Implementierung: ChaCha20-Poly1305, AES-GCM, X25519/P-256, RSA-PSS/ECDSA) und **TLS 1.2** (BearSSL) mit Zertifikatsprüfung, gzip/deflate/Brotli, Weiterleitungen, Cookies, Proxy (CONNECT, lokale Adressen direkt), **WebSockets** (`ws:`/`wss:`), `data:`- und `file:`-URLs |
@@ -47,9 +48,14 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 
 ## Was (noch) nicht geht
 
-- JavaScript: WebGL und Medienwiedergabe fehlen; `Intl` kennt die gängigen
+- JavaScript: WebGL fehlt; `Intl` kennt die gängigen
   europäischen Sprachen, Zeitzonen außer UTC und der lokalen werden nicht umgerechnet. Große Single-Page-Anwendungen (React, Angular …)
   laufen daher oft nur teilweise.
+- Video: kein AV1, kein adaptives Streaming (Media Source Extensions, HLS,
+  DASH) und keine DRM – YouTube & Co. spielen daher nicht ab, eingebettete
+  MP4/WebM-Dateien dagegen schon. `playbackRate` wird ignoriert; die
+  Dekodierung läuft in Software auf einem Kern, auf alten Rechnern sind daher
+  eher SD-Videos flüssig (zu späte Bilder werden ausgelassen).
 - 3D-Szenen werden ebenenweise nach Tiefe sortiert, sich durchdringende Flächen
   werden nicht geschnitten; HDR-Tonemapping für AVIF fehlt.
 - HTTP/2 lässt sich mit `Http2=0`, TLS 1.3 mit `Tls13=0` in der `kite.ini` abschalten.
@@ -73,9 +79,15 @@ moderne Seiten profitieren deutlich von einem schnellen Prozessor.
 Gebaut wird mit MinGW-w64 als Cross-Compiler, z. B. unter Linux:
 
 ```sh
-sudo apt install cmake g++-mingw-w64-i686    # Debian/Ubuntu
-./build-win2k.sh                             # Ergebnis: dist/Kite/kite.exe
+sudo apt install cmake g++-mingw-w64-i686 nasm   # Debian/Ubuntu
+./build-win2k.sh                                  # Ergebnis: dist/Kite/kite.exe
 ```
+
+`build-win2k.sh` lädt beim ersten Mal die FFmpeg-Quellen (4.4.2, SHA-256
+geprüft) und baut daraus mit `tools/build-ffmpeg.sh` nur die benötigten
+Decoder als statische Bibliotheken (`third_party/ffmpeg/`, einige Minuten).
+Mit `KITE_NO_FFMPEG=1 ./build-win2k.sh` entsteht ein Kite ohne
+Medienwiedergabe.
 
 Unter Windows funktioniert dasselbe mit MSYS2 (Umgebung „MINGW32“):
 
@@ -98,6 +110,7 @@ Push automatisch `kite.exe` und stellt sie als Artefakt bereit.
 Die Engine ist plattformunabhängiges C++11 und lässt sich auch nativ bauen:
 
 ```sh
+sh tools/build-ffmpeg.sh native                   # optional: Mediendecoder
 cmake -S . -B build-linux && cmake --build build-linux
 ./build-linux/kite-tests                          # Unit-Tests
 ./build-linux/kite-dump --width 1024 seite.html   # Box-Baum ausgeben
@@ -118,17 +131,21 @@ src/engine/            plattformunabhängige Engine (C++11)
   image/               PNG/JPEG/GIF (stb_image), WebP, SVG und gemeinsamer
                        Vektor-Rasterizer (raster.cpp)
   canvas/              <canvas>-2D-Kontext
+  media/               <audio>/<video>: Datenquelle mit Range-Anfragen,
+                       Decoder-Thread (FFmpeg), Farbkonvertierung, Takt
   net/                 URL, Sockets, TLS (BearSSL), HTTP, Cookies
   script/              JavaScript: QuickJS-Anbindung (script.cpp) und
                        Web-API in JavaScript (dom_js.cpp)
   text/                Webfont-Konvertierung (WOFF/WOFF2 → TrueType)
   page/                Seite: verbindet DOM, Styles, Layout, Skripte und Painting;
                        CSS-Animationen und Transitions (animation.cpp)
-src/win32/             Windows-Oberfläche (Win32-API, GDI, Common Controls)
+src/win32/             Windows-Oberfläche (Win32-API, GDI, Common Controls),
+                       Tonausgabe über waveOut (audio.cpp)
 src/tools/kite_dump.cpp  Headless-Werkzeug zum Testen der Engine
 tests/                 Unit-Tests
 third_party/           BearSSL (MIT), QuickJS (MIT), libwebp (BSD), Brotli (MIT), dav1d (BSD),
-                       stb_image (Public Domain)
+                       stb_image (Public Domain); FFmpeg-Patches für Windows 2000
+tools/build-ffmpeg.sh  baut die FFmpeg-Decoder (LGPL) für MinGW bzw. nativ
 resources/cacert.pem   Mozilla-Stammzertifikate (MPL 2.0)
 ```
 
@@ -149,5 +166,13 @@ AlphaBlend und läuft auf einer unveränderten Windows-2000-Installation.
   BSD-2-Clause (`third_party/dav1d/COPYING`)
 - [Brotli](https://github.com/google/brotli) © Google – MIT-Lizenz
   (`third_party/brotli/LICENSE`)
+- [FFmpeg](https://ffmpeg.org) 4.4.2 (libavcodec, libavformat, libavutil,
+  libswresample) © FFmpeg-Entwickler – GNU LGPL 2.1 oder neuer
+  (`LICENSE-FFmpeg.txt`). Kite verwendet die unveränderten Quellen plus einen
+  kleinen Patch (`third_party/ffmpeg-patches/`) und linkt sie statisch; da der
+  vollständige Quelltext von Kite und das Bauskript `tools/build-ffmpeg.sh`
+  beiliegen, lässt sich `kite.exe` jederzeit mit einer anderen FFmpeg-Version
+  neu linken. Ob Patente für einzelne Codecs (z. B. H.264, HEVC, AAC) in
+  Ihrem Land eine Lizenz erfordern, müssen Sie selbst prüfen.
 - [stb_image](https://github.com/nothings/stb) von Sean Barrett – Public Domain
 - Stammzertifikate aus dem Mozilla-CA-Programm – Mozilla Public License 2.0

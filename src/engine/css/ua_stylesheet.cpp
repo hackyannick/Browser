@@ -76,7 +76,7 @@ th { font-weight: bold; text-align: center; }
 td { text-align: inherit; }
 img { display: inline; }
 iframe { border: 2px inset #c0c0c0; width: 300px; height: 150px; }
-video, canvas, object, embed { width: 300px; height: 150px; }
+canvas, object, embed { width: 300px; height: 150px; }
 input, select, textarea, button { display: inline-block; font-family: sans-serif; font-size: 13.33px; color: black; letter-spacing: normal; word-spacing: normal; line-height: normal; text-transform: none; text-indent: 0; text-align: start; vertical-align: baseline; }
 input, textarea { background-color: white; border: 2px inset #d4d0c8; padding: 1px 2px; cursor: text; }
 input { width: 150px; }

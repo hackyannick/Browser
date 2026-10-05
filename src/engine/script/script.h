@@ -102,7 +102,7 @@ class ScriptEngine {
   // delivers their events (call it when WakeUi() fired). Returns true if
   // any script ran.
   bool PumpAsync();
-  bool HasAsync() const { return !workers_.empty() || !sockets_.empty(); }
+  bool HasAsync() const;
   int StartWorker(const std::string& url, bool module, const std::string& name);
   void PostToWorker(int id, const std::string& data);
   void EndWorker(int id);

@@ -38,6 +38,7 @@ class Node {
   LayoutBox* layoutBox = nullptr;  // principal box (set by the box builder)
   int scriptHandle = 0;            // JavaScript wrapper id (0 = none)
   int canvasId = 0;                // <canvas> bitmap (see canvas/canvas.h)
+  int mediaId = 0;                 // <audio>/<video> player (see media/media.h)
   bool scriptDone = false;         // <script> already executed
   // Shadow DOM: the shadow tree attached to this element (a kShadowRoot
   // node whose |host| points back here).

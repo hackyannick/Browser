@@ -2,10 +2,14 @@
 
 #include "base/strings.h"
 #include "css/style.h"
+#include "media/media.h"
 
 namespace kite {
 
-Node::~Node() { delete style; }
+Node::~Node() {
+  delete style;
+  if (mediaId) DestroyMediaPlayer(mediaId);
+}
 
 const Node* Node::TreeRoot() const {
   const Node* n = this;

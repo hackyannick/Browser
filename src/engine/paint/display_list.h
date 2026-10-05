@@ -102,6 +102,7 @@ class Painter {
   void PaintLines(LayoutBox* b, float ax, float ay, float alpha);
   void PaintFloatsInInline(LayoutBox* container, LayoutBox* b, float ax, float ay, float alpha);
   void PaintReplaced(LayoutBox* b, float ax, float ay, float alpha);
+  void PaintMedia(LayoutBox* b, const Rect& content, float alpha);
   void PaintMarker(LayoutBox* b, float ax, float ay, float alpha);
   void PaintPositioned(LayoutBox* b, float ax, float ay, float alpha, bool negative);
   struct Context3d {

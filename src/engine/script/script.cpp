@@ -21,6 +21,7 @@
 #include "css/resolver.h"
 #include "css/stylesheet.h"
 #include "html/parser.h"
+#include "media/media.h"
 #include "net/url.h"
 #include "page/page.h"
 #include "script/common.h"
@@ -592,6 +593,65 @@ KITE_FN(Media) {
 KITE_FN(Dirty) {
   Engine(ctx)->MarkDirty();
   return JS_UNDEFINED;
+}
+
+// ---------------------------------------------------------------------------
+// <audio> / <video>
+
+KITE_FN(MdLoad) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  if (!n) return JS_NewInt32(ctx, 0);
+  Page* p = Engine(ctx)->page();
+  if (MediaSourceAttr(n).empty()) {
+    if (n->mediaId) {
+      DestroyMediaPlayer(n->mediaId);
+      n->mediaId = 0;
+    }
+    return JS_NewInt32(ctx, 0);
+  }
+  MediaPlayer* mp = EnsureMediaPlayer(n, p->ResolveUrl("").Spec(), p->document());
+  return JS_NewInt32(ctx, mp ? mp->id() : 0);
+}
+
+KITE_FN(MdCmd) {
+  ARGS_AT_LEAST(3);
+  Node* n = Arg(ctx, argv[0]);
+  MediaPlayer* mp = n ? FindMediaPlayer(n->mediaId) : 0;
+  if (!mp) return JS_FALSE;
+  double v = Num(ctx, argv[2]);
+  switch (Int(ctx, argv[1])) {
+    case 0: mp->Play(); break;
+    case 1: mp->Pause(); break;
+    case 2: mp->Seek(v); break;
+    case 3: mp->SetVolume(v); break;
+    case 4: mp->SetMuted(v != 0); break;
+    case 5: mp->SetLoop(v != 0); break;
+    case 6: mp->SetPlaybackRate(v); break;
+  }
+  return JS_TRUE;
+}
+
+KITE_FN(MdStatus) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  MediaPlayer* mp = n ? FindMediaPlayer(n->mediaId) : 0;
+  if (!mp) return JS_NULL;
+  MediaStatus st = mp->Status();
+  double nums[] = {st.currentTime, st.duration, (double)st.paused, (double)st.ended, (double)st.seeking,
+                   (double)st.readyState, (double)st.networkState, (double)st.error, (double)st.videoWidth,
+                   (double)st.videoHeight, st.bufferedEnd, mp->volume(), (double)mp->muted(), mp->playbackRate()};
+  JSValue arr = JS_NewArray(ctx);
+  uint32_t i = 0;
+  for (; i < sizeof nums / sizeof nums[0]; ++i) JS_SetPropertyUint32(ctx, arr, i, JS_NewFloat64(ctx, nums[i]));
+  JS_SetPropertyUint32(ctx, arr, i++, NewStr(ctx, mp->url()));
+  JS_SetPropertyUint32(ctx, arr, i++, NewStr(ctx, st.errorMessage));
+  return arr;
+}
+
+KITE_FN(MdCanPlay) {
+  ARGS_AT_LEAST(1);
+  return NewStr(ctx, MediaCanPlayType(Str(ctx, argv[0])));
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,6 +1337,7 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"wsOpen", WsOpen, 2}, {"wsSend", WsSend, 3}, {"wsClose", WsClose, 3}, {"wsBuffered", WsBuffered, 1},
       {"attachShadow", AttachShadow, 1}, {"shadow", ShadowOf, 1}, {"host", HostOf, 1},
       {"setDefined", SetDefined, 1}, {"customs", Customs, 1}, {"connected", Connected, 1}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
+      {"mdLoad", MdLoad, 1}, {"mdCmd", MdCmd, 3}, {"mdStatus", MdStatus, 1}, {"mdCanPlay", MdCanPlay, 1},
   };
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)
     JS_SetPropertyStr(ctx, k, fns[i].name, JS_NewCFunction(ctx, fns[i].fn, fns[i].name, fns[i].argc));
@@ -1941,7 +2002,24 @@ bool ScriptEngine::PumpAsync() {
       ran = true;
     }
   }
+  // Media element events.
+  if (page_->document()) {
+    std::vector<std::pair<Node*, std::string> > media = TakeMediaEvents(page_->document());
+    for (size_t i = 0; i < media.size(); ++i) {
+      deadline_ = NowMs() + timeLimit_;
+      JSValue args[2] = {JS_NewInt32(ctx, HandleOf(media[i].first)), NewStr(ctx, media[i].second)};
+      CallKiteHook(this, ctx, "__kiteMediaEvent", 2, args, 0);
+      JS_FreeValue(ctx, args[1]);
+      RunJobs();
+      deadline_ = 0;
+      ran = true;
+    }
+  }
   return ran;
+}
+
+bool ScriptEngine::HasAsync() const {
+  return !workers_.empty() || !sockets_.empty() || (page_->document() && MediaEventsPending(page_->document()));
 }
 
 }  // namespace kite

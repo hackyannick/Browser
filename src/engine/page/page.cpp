@@ -4,6 +4,7 @@
 
 #include "base/strings.h"
 #include "html/parser.h"
+#include "media/media.h"
 
 namespace kite {
 
@@ -482,12 +483,53 @@ int Page::TickAnimations() {
 
 void Page::Relayout(float viewportW, float viewportH) {
   if (!doc_) return;
+  UpdateMediaElements(doc_->root.get(), baseUrl_.Spec(), doc_.get());
   root_ = BuildLayoutTree(*doc_, baseUrl_.Spec());
   engine_.Layout(root_.get(), viewportW, viewportH);
   lastViewportW_ = viewportW;
   lastViewportH_ = viewportH;
   Painter p(&engine_, images_);
   p.Paint(root_.get(), viewportW, viewportH, display_);
+}
+
+int Page::TickMedia() {
+  unsigned gen = MediaGeneration();
+  if (gen == mediaGeneration_ || !root_) return 0;
+  mediaGeneration_ = gen;
+  // Video sizes that layout has not seen yet.
+  std::vector<Node*> stack(1, doc_->root.get());
+  std::map<int, std::pair<int, int> > sizes;
+  bool relayout = false;
+  while (!stack.empty()) {
+    Node* n = stack.back();
+    stack.pop_back();
+    for (size_t i = 0; i < n->children.size(); ++i) stack.push_back(n->children[i].get());
+    if (n->shadowRoot) stack.push_back(n->shadowRoot.get());
+    if (!n->mediaId || !n->layoutBox) continue;
+    MediaPlayer* p = FindMediaPlayer(n->mediaId);
+    if (!p) continue;
+    MediaStatus st = p->Status();
+    std::pair<int, int> sz(st.videoWidth, st.videoHeight);
+    sizes[n->mediaId] = sz;
+    std::map<int, std::pair<int, int> >::iterator it = mediaSizes_.find(n->mediaId);
+    if (it == mediaSizes_.end() || it->second != sz) relayout = true;
+  }
+  mediaSizes_.swap(sizes);
+  return relayout ? 2 : 1;
+}
+
+bool Page::MediaClick(Node* target, float x, float y) {
+  for (Node* n = target; n; n = n->parent) {
+    if (!n->IsElement() || (n->tag != "video" && n->tag != "audio")) continue;
+    if (!n->HasAttr("controls") || !n->layoutBox) return false;
+    LayoutBox* b = n->layoutBox;
+    float ax, ay;
+    b->AbsolutePosition(ax, ay);
+    Rect content(ax + b->ContentX(), ay + b->ContentY(), b->ContentW(), b->ContentH());
+    if (!FindMediaPlayer(n->mediaId)) EnsureMediaPlayer(n, baseUrl_.Spec(), doc_.get());
+    return MediaControlsClick(n, content, x, y);
+  }
+  return false;
 }
 
 void Page::Repaint() {

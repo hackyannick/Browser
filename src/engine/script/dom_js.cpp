@@ -73,7 +73,9 @@ const EVENT_PROPS = ['click', 'dblclick', 'mousedown', 'mouseup', 'mouseover', '
   'reset', 'load', 'error', 'scroll', 'resize', 'select', 'contextmenu', 'wheel', 'touchstart', 'touchend',
   'pointerdown', 'pointerup', 'animationend', 'transitionend', 'toggle', 'beforeunload', 'unload',
   'readystatechange', 'message', 'popstate', 'hashchange', 'DOMContentLoaded', 'abort', 'progress',
-  'loadend', 'loadstart', 'timeout', 'open', 'close', 'messageerror'];
+  'loadend', 'loadstart', 'timeout', 'open', 'close', 'messageerror', 'play', 'pause', 'playing', 'ended',
+  'timeupdate', 'durationchange', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough', 'seeking', 'seeked',
+  'volumechange', 'ratechange', 'waiting', 'emptied', 'stalled', 'suspend'];
 
 class EventTarget {
   addEventListener(type, fn, opts) {
@@ -833,17 +835,6 @@ class HTMLElement extends Element {
   showModal() { this.setAttribute('open', ''); }
   show() { this.setAttribute('open', ''); }
   close() { this.removeAttribute('open'); }
-  // Media elements
-  play() { return Promise.reject(new Error('Medienwiedergabe wird nicht unterstuetzt')); }
-  pause() {}
-  load() {}
-  canPlayType() { return ''; }
-  get paused() { return true; }
-  get muted() { return true; }
-  set muted(v) {}
-  get currentTime() { return 0; }
-  set currentTime(v) {}
-  get duration() { return NaN; }
   // Canvas
   getContext() { return null; }
   toDataURL() { return 'data:,'; }
@@ -929,14 +920,156 @@ defineTag('HTMLHeadingElement', ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']); defineTag
 defineTag('HTMLOListElement', ['ol']); defineTag('HTMLLIElement', ['li']); defineTag('HTMLTableElement', ['table']);
 defineTag('HTMLTableRowElement', ['tr']); defineTag('HTMLTableCellElement', ['td', 'th']);
 defineTag('HTMLTableSectionElement', ['tbody', 'thead', 'tfoot']); defineTag('HTMLLabelElement', ['label']);
-defineTag('HTMLIFrameElement', ['iframe']); defineTag('HTMLVideoElement', ['video']);
-defineTag('HTMLAudioElement', ['audio']); defineTag('HTMLTemplateElement', ['template']); defineTag('HTMLDetailsElement', ['details']);
+defineTag('HTMLIFrameElement', ['iframe']); defineTag('HTMLTemplateElement', ['template']); defineTag('HTMLDetailsElement', ['details']);
 defineTag('HTMLDialogElement', ['dialog']); defineTag('HTMLPreElement', ['pre']); defineTag('HTMLBRElement', ['br']);
 defineTag('HTMLHRElement', ['hr']); defineTag('HTMLTitleElement', ['title']); defineTag('HTMLFieldSetElement', ['fieldset']);
 defineTag('HTMLLegendElement', ['legend']); defineTag('HTMLPictureElement', ['picture']); defineTag('HTMLSourceElement', ['source']);
 defineTag('HTMLOutputElement', ['output']); defineTag('HTMLProgressElement', ['progress']); defineTag('HTMLDataListElement', ['datalist']);
 defineTag('HTMLObjectElement', ['object']); defineTag('HTMLEmbedElement', ['embed']); defineTag('HTMLSlotElement', ['slot']);
-G.HTMLMediaElement = HTMLElement;
+// ------------------------------------------------------------------ Media
+class TimeRanges {
+  constructor(r) { this._r = r; }
+  get length() { return this._r.length; }
+  start(i) { if (i >= this._r.length) throw new DOMException('Index out of range', 'IndexSizeError'); return this._r[i][0]; }
+  end(i) { if (i >= this._r.length) throw new DOMException('Index out of range', 'IndexSizeError'); return this._r[i][1]; }
+}
+class MediaError {
+  constructor(code, message) { this.code = code; this.message = message || ''; }
+}
+Object.assign(MediaError, { MEDIA_ERR_ABORTED: 1, MEDIA_ERR_NETWORK: 2, MEDIA_ERR_DECODE: 3, MEDIA_ERR_SRC_NOT_SUPPORTED: 4 });
+class TextTrackList extends EventTarget {
+  get length() { return 0; }
+  getTrackById() { return null; }
+  [Symbol.iterator]() { return [][Symbol.iterator](); }
+}
+class HTMLMediaElement extends HTMLElement {
+  _st() { return K.mdStatus(this._h); }
+  // Status, creating the player on first use.
+  _ld() {
+    let s = K.mdStatus(this._h);
+    if (!s && K.mdLoad(this._h)) {
+      if (this._vol !== undefined) K.mdCmd(this._h, 3, this._vol);
+      if (this._mut !== undefined) K.mdCmd(this._h, 4, this._mut ? 1 : 0);
+      if (this._ct) K.mdCmd(this._h, 2, this._ct);
+      s = K.mdStatus(this._h);
+    }
+    return s;
+  }
+  get src() { const v = this.getAttribute('src'); return v ? (K.resolve(v) || v) : ''; }
+  set src(v) { this.setAttribute('src', String(v)); this.load(); }
+  get currentSrc() { const s = this._st(); return s ? s[14] : ''; }
+  get srcObject() { return this._srcObj || null; }
+  set srcObject(v) {
+    this._srcObj = v || null;
+    if (v instanceof Blob) { this.setAttribute('src', URL.createObjectURL(v)); this.load(); }
+  }
+  load() {
+    this._rejectPlay('AbortError', 'The play() request was interrupted by a new load request.');
+    if (!K.mdLoad(this._h)) return;
+    if (this._vol !== undefined) K.mdCmd(this._h, 3, this._vol);
+    if (this._mut !== undefined) K.mdCmd(this._h, 4, this._mut ? 1 : 0);
+    if (this.autoplay) this.play().catch(() => {});
+  }
+  play() {
+    const s = this._ld();
+    if (!s || s[7] === 4) {
+      const p = Promise.reject(new DOMException('The element has no supported sources.', 'NotSupportedError'));
+      return p;
+    }
+    K.mdCmd(this._h, 5, this.loop ? 1 : 0);
+    const p = new Promise((resolve, reject) => { (this._playP || (this._playP = [])).push([resolve, reject]); });
+    const wasPaused = s[2];
+    K.mdCmd(this._h, 0, 0);
+    if (!wasPaused && s[5] >= 3) this._resolvePlay();
+    return p;
+  }
+  _resolvePlay() { const l = this._playP; this._playP = null; if (l) for (const x of l) x[0](); }
+  _rejectPlay(name, msg) { const l = this._playP; this._playP = null; if (l) for (const x of l) x[1](new DOMException(msg, name)); }
+  pause() {
+    if (!this._st()) this._ld();
+    K.mdCmd(this._h, 1, 0);
+  }
+  fastSeek(t) { this.currentTime = t; }
+  canPlayType(t) { return K.mdCanPlay(String(t)); }
+  get paused() { const s = this._st(); return s ? !!s[2] : true; }
+  get ended() { const s = this._st(); return s ? !!s[3] : false; }
+  get seeking() { const s = this._st(); return s ? !!s[4] : false; }
+  get readyState() { const s = this._st(); return s ? s[5] : 0; }
+  get networkState() { const s = this._st(); return s ? s[6] : (this.getAttribute('src') ? 0 : 3); }
+  get error() { const s = this._st(); return s && s[7] ? new MediaError(s[7], s[15]) : null; }
+  get currentTime() { const s = this._st(); return s ? s[0] : (this._ct || 0); }
+  set currentTime(v) {
+    v = +v;
+    if (!isFinite(v)) throw new TypeError('The provided double value is non-finite.');
+    const s = this._st();
+    if (s && s[5] >= 1) K.mdCmd(this._h, 2, v); else { this._ct = v; if (s) K.mdCmd(this._h, 2, v); }
+  }
+  get duration() { const s = this._st(); return s && s[5] >= 1 ? s[1] : NaN; }
+  get volume() { return this._vol === undefined ? 1 : this._vol; }
+  set volume(v) {
+    v = +v;
+    if (!(v >= 0 && v <= 1)) throw new DOMException('The volume provided (' + v + ') is outside the range [0, 1].', 'IndexSizeError');
+    const old = this.volume;
+    this._vol = v;
+    if (this._st()) K.mdCmd(this._h, 3, v);
+    else if (old !== v) this.dispatchEvent(new Event('volumechange'));
+  }
+  get muted() { return this._mut === undefined ? this.hasAttribute('muted') : this._mut; }
+  set muted(v) {
+    v = !!v;
+    const old = this.muted;
+    this._mut = v;
+    if (this._st()) K.mdCmd(this._h, 4, v ? 1 : 0);
+    else if (old !== v) this.dispatchEvent(new Event('volumechange'));
+  }
+  get playbackRate() { return this._rate || 1; }
+  set playbackRate(v) { this._rate = +v || 1; if (this._st()) K.mdCmd(this._h, 6, this._rate); }
+  get defaultPlaybackRate() { return this._drate || 1; }
+  set defaultPlaybackRate(v) { this._drate = +v || 1; }
+  get preservesPitch() { return true; }
+  set preservesPitch(v) {}
+  get buffered() { const s = this._st(); return new TimeRanges(s && s[5] >= 1 && s[10] > 0 ? [[0, s[10]]] : []); }
+  get seekable() { const s = this._st(); return new TimeRanges(s && s[5] >= 1 && isFinite(s[1]) ? [[0, s[1]]] : []); }
+  get played() { const s = this._st(); return new TimeRanges(s && s[0] > 0 ? [[0, s[0]]] : []); }
+  get textTracks() { return this._tt || (this._tt = new TextTrackList()); }
+  get audioTracks() { return this.textTracks; }
+  get videoTracks() { return this.textTracks; }
+  addTextTrack() { return { mode: 'disabled', cues: [], addCue() {}, removeCue() {}, addEventListener() {}, removeEventListener() {} }; }
+  setSinkId() { return Promise.resolve(); }
+  get sinkId() { return ''; }
+  get crossOrigin() { return this.getAttribute('crossorigin'); }
+  set crossOrigin(v) { if (v === null) this.removeAttribute('crossorigin'); else this.setAttribute('crossorigin', v); }
+}
+for (const [k, v] of Object.entries({ NETWORK_EMPTY: 0, NETWORK_IDLE: 1, NETWORK_LOADING: 2, NETWORK_NO_SOURCE: 3,
+  HAVE_NOTHING: 0, HAVE_METADATA: 1, HAVE_CURRENT_DATA: 2, HAVE_FUTURE_DATA: 3, HAVE_ENOUGH_DATA: 4 })) {
+  HTMLMediaElement[k] = v;
+  Object.defineProperty(HTMLMediaElement.prototype, k, { value: v });
+}
+class HTMLVideoElement extends HTMLMediaElement {
+  get videoWidth() { const s = this._st(); return s ? s[8] : 0; }
+  get videoHeight() { const s = this._st(); return s ? s[9] : 0; }
+  get width() { return parseInt(this.getAttribute('width'), 10) || 0; }
+  set width(v) { this.setAttribute('width', String(v | 0)); }
+  get height() { return parseInt(this.getAttribute('height'), 10) || 0; }
+  set height(v) { this.setAttribute('height', String(v | 0)); }
+  getVideoPlaybackQuality() { return { totalVideoFrames: 0, droppedVideoFrames: 0, corruptedVideoFrames: 0, creationTime: performance.now() }; }
+  requestPictureInPicture() { return Promise.reject(new DOMException('Picture-in-Picture is not supported', 'NotSupportedError')); }
+  get disablePictureInPicture() { return true; }
+  set disablePictureInPicture(v) {}
+  requestVideoFrameCallback(cb) { return requestAnimationFrame(t => cb(t, { mediaTime: this.currentTime, width: this.videoWidth, height: this.videoHeight })); }
+  cancelVideoFrameCallback(id) { cancelAnimationFrame(id); }
+}
+class HTMLAudioElement extends HTMLMediaElement {}
+G.HTMLMediaElement = HTMLMediaElement; G.HTMLVideoElement = HTMLVideoElement; G.HTMLAudioElement = HTMLAudioElement;
+G.TimeRanges = TimeRanges; G.MediaError = MediaError; G.TextTrackList = TextTrackList;
+TAG_CLASSES.video = HTMLVideoElement; TAG_CLASSES.audio = HTMLAudioElement;
+G.Audio = function Audio(src) {
+  const a = G.document.createElement('audio');
+  a.preload = 'auto';
+  if (src !== undefined) a.src = src;
+  return a;
+};
+G.Audio.prototype = HTMLAudioElement.prototype;
 G.HTMLUnknownElement = class extends HTMLElement {};
 class SVGElement extends Element {
   get ownerSVGElement() { return this.closest('svg'); }
@@ -2158,6 +2291,17 @@ G.__kiteDocEvent = function (type) {
   }
 };
 G.__kiteWinEvent = type => { G.dispatchEvent(new Event(type)); };
+G.__kiteMediaEvent = function (h, type) {
+  const el = W(h);
+  if (!el) return;
+  if (type === 'playing') el._resolvePlay();
+  else if (type === 'error') el._rejectPlay('NotSupportedError', 'Failed to load because no supported source was found.');
+  else if (type === 'pause' && !el.ended) el._rejectPlay('AbortError', 'The play() request was interrupted by a call to pause().');
+  else if (type === 'ended') el._resolvePlay();
+  const ev = new Event(type);
+  ev.isTrusted = true;
+  el.dispatchEvent(ev);
+};
 G.__kiteDispatch = function (h, type) {
   const target = W(h);
   if (!target) return true;

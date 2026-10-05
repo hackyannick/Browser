@@ -4,6 +4,7 @@
 #include <cmath>
 
 #include "base/strings.h"
+#include "media/media.h"
 
 namespace kite {
 
@@ -1380,9 +1381,19 @@ void LayoutEngine::ReplacedSize(LayoutBox* b, float cbW, float cbH, float& outW,
         ih = fontH + 2;
       }
     }
-    if (tag == "video" && !ratio) {
-      iw = 300;
-      ih = 150;
+    if (tag == "video") {
+      // The video's own size once known, else the poster's, else 300x150.
+      MediaPlayer* mp = FindMediaPlayer(el->mediaId);
+      MediaStatus st;
+      if (mp) st = mp->Status();
+      if (st.videoWidth > 0 && st.videoHeight > 0) {
+        iw = (float)st.videoWidth;
+        ih = (float)st.videoHeight;
+        ratio = true;
+      } else if (!ratio) {
+        iw = 300;
+        ih = 150;
+      }
     }
   } else if (tag == "input") {
     std::string type = AsciiLower(el->Attr("type"));

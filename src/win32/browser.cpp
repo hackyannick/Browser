@@ -1421,6 +1421,13 @@ void Browser::OnClick(int x, int y, bool newTab) {
   // Scripts see the click first and may cancel the default action.
   if (!DispatchJs(t, n, "click")) return;
   bool scripted = t->page->script() != 0;
+  // Built-in <video>/<audio> controls.
+  float z = ZoomF();
+  if (t->page->MediaClick(n, (x + t->scrollX) / z, (y + t->scrollY) / z)) {
+    t->page->Repaint();
+    InvalidateRect(view_, 0, FALSE);
+    return;
+  }
   // Form controls.
   for (Node* p = n; p; p = p->parent) {
     if (!p->IsElement()) continue;
@@ -2244,6 +2251,17 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         js->PumpAsync();
         EndScript(t);
       }
+      // New video frames, player state changes or a video size to lay out.
+      if (current_ && current_->rendered && TabIndex(current_) >= 0) {
+        int r = current_->page->TickMedia();
+        if (r == 2) {
+          current_->page->Relayout(ViewportWidth(), ViewportHeight());
+          UpdateScrollBars();
+        } else if (r == 1) {
+          current_->page->Repaint();
+        }
+        if (r) InvalidateRect(view_, 0, FALSE);
+      }
       return 0;
     case WM_KITE_HISTGO: {
       Tab* t = TabById((int)w);
@@ -2900,6 +2918,7 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       for (Node* p = n; p && !pointer; p = p->parent) {
         if (!p->IsElement()) continue;
         if (p->tag == "button" || p->tag == "select" || p->tag == "summary" ||
+            ((p->tag == "video" || p->tag == "audio") && p->HasAttr("controls")) ||
             (p->tag == "label") || (p->style && p->style->cursor == kCursorPointer))
           pointer = true;
         if (p->tag == "input") {

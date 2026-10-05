@@ -134,6 +134,8 @@ class ImageCache : public ImageProvider {
   unsigned clock_ = 0;
 };
 ImageCache& Images();
+// Installs the waveOut audio output for <audio>/<video> (audio.cpp).
+void InstallAudioOutput();
 
 // ---------------------------------------------------------------------------
 // Background network jobs. Results are posted to |notify| as WM_KITE_FETCHED.

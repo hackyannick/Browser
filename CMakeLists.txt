@@ -91,6 +91,24 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(kite_engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
 
+# FFmpeg decoders for <audio>/<video> (LGPL 2.1+, static, built by
+# tools/build-ffmpeg.sh). Without them media elements report an error.
+if(WIN32)
+  set(KITE_FFMPEG_DIR ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/win32 CACHE PATH "FFmpeg prefix")
+else()
+  set(KITE_FFMPEG_DIR ${CMAKE_SOURCE_DIR}/third_party/ffmpeg/native CACHE PATH "FFmpeg prefix")
+endif()
+if(EXISTS ${KITE_FFMPEG_DIR}/lib/libavformat.a)
+  message(STATUS "FFmpeg: ${KITE_FFMPEG_DIR}")
+  target_include_directories(kite_engine PRIVATE ${KITE_FFMPEG_DIR}/include)
+  target_compile_definitions(kite_engine PRIVATE KITE_HAVE_FFMPEG)
+  target_link_libraries(kite_engine PUBLIC
+    ${KITE_FFMPEG_DIR}/lib/libavformat.a ${KITE_FFMPEG_DIR}/lib/libavcodec.a
+    ${KITE_FFMPEG_DIR}/lib/libswresample.a ${KITE_FFMPEG_DIR}/lib/libavutil.a)
+else()
+  message(STATUS "FFmpeg nicht gefunden (tools/build-ffmpeg.sh): keine Medienwiedergabe")
+endif()
+
 if(WIN32)
   # Target Windows 2000 (NT 5.0) APIs only.
   target_compile_definitions(bearssl PRIVATE _WIN32_WINNT=0x0500 WINVER=0x0500)
@@ -100,7 +118,7 @@ if(WIN32)
   endforeach()
   target_compile_definitions(kite_engine PUBLIC
     _WIN32_WINNT=0x0500 WINVER=0x0500 _WIN32_IE=0x0501 UNICODE _UNICODE)
-  target_link_libraries(kite_engine PUBLIC ws2_32 advapi32)
+  target_link_libraries(kite_engine PUBLIC ws2_32 advapi32 winmm)
 
   file(GLOB KITE_WIN32_SOURCES ${CMAKE_SOURCE_DIR}/src/win32/*.cpp ${CMAKE_SOURCE_DIR}/src/win32/*.c)
   add_executable(kite WIN32 ${KITE_WIN32_SOURCES} ${CMAKE_SOURCE_DIR}/src/win32/kite.rc)

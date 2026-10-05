@@ -4,6 +4,7 @@
 #ifndef KITE_PAGE_PAGE_H
 #define KITE_PAGE_PAGE_H
 
+#include <map>
 #include <memory>
 #include <set>
 #include <string>
@@ -131,6 +132,12 @@ class Page {
   // Headless use: show the end state of animations immediately.
   void SetAnimationsInstant(bool on) { anim_.SetInstant(on); }
 
+  // <audio>/<video>: what changed since the last call (0 nothing, 1 repaint
+  // for a new frame or state, 2 relayout because a video size changed).
+  int TickMedia();
+  // Click inside a media element's built-in controls (document coordinates).
+  bool MediaClick(Node* target, float x, float y);
+
   // Plain text of the whole document (for "find in page").
   std::vector<std::pair<Rect, std::string> > TextRuns() const;
 
@@ -173,6 +180,8 @@ class Page {
   std::unique_ptr<LayoutBox> root_;
   LayoutEngine engine_;
   DisplayList display_;
+  std::map<int, std::pair<int, int> > mediaSizes_;  // player id -> video size at the last layout
+  unsigned mediaGeneration_ = 0;
   float lastViewportW_ = 800, lastViewportH_ = 600;
   std::set<std::string> requestedFonts_;
   int refreshDelay_;

@@ -125,3 +125,119 @@ void* kite_imp_WakeConditionVariable __asm__("__imp__WakeConditionVariable@4") =
 void* kite_imp_WakeAllConditionVariable __asm__("__imp__WakeAllConditionVariable@4") =
     (void*)KiteWakeAllConditionVariable;
 #endif
+
+/*
+ * C runtime functions FFmpeg uses that the msvcrt.dll of Windows 2000
+ * (version 6.x) does not export.
+ */
+#include <errno.h>
+#include <limits.h>
+#include <stdlib.h>
+#include <string.h>
+
+/* Aligned allocations: the original pointer and the size precede the block. */
+static void* __cdecl KiteAlignedMalloc(size_t size, size_t align) {
+  unsigned char* raw;
+  size_t a = align < sizeof(void*) ? sizeof(void*) : align;
+  if ((a & (a - 1)) != 0) {
+    errno = EINVAL;
+    return 0;
+  }
+  raw = (unsigned char*)malloc(size + a + 2 * sizeof(void*));
+  if (!raw) return 0;
+  {
+    ULONG_PTR p = ((ULONG_PTR)raw + 2 * sizeof(void*) + a - 1) & ~(ULONG_PTR)(a - 1);
+    ((void**)p)[-1] = raw;
+    ((size_t*)p)[-2] = size;
+    return (void*)p;
+  }
+}
+
+static void __cdecl KiteAlignedFree(void* p) {
+  if (p) free(((void**)p)[-1]);
+}
+
+static void* __cdecl KiteAlignedRealloc(void* p, size_t size, size_t align) {
+  void* n;
+  size_t old;
+  if (!p) return KiteAlignedMalloc(size, align);
+  if (size == 0) {
+    KiteAlignedFree(p);
+    return 0;
+  }
+  n = KiteAlignedMalloc(size, align);
+  if (!n) return 0;
+  old = ((size_t*)p)[-2];
+  memcpy(n, p, old < size ? old : size);
+  KiteAlignedFree(p);
+  return n;
+}
+
+static unsigned __int64 KiteParseU64(const char* s, char** end, int base, int* neg, int* overflow) {
+  const char* p = s;
+  unsigned __int64 v = 0;
+  int any = 0;
+  *neg = 0;
+  *overflow = 0;
+  while (*p == ' ' || (*p >= '\t' && *p <= '\r')) ++p;
+  if (*p == '+' || *p == '-') *neg = *p++ == '-';
+  if ((base == 0 || base == 16) && p[0] == '0' && (p[1] == 'x' || p[1] == 'X')) {
+    p += 2;
+    base = 16;
+  } else if (base == 0) {
+    base = p[0] == '0' ? 8 : 10;
+  }
+  for (;; ++p) {
+    int d;
+    if (*p >= '0' && *p <= '9') d = *p - '0';
+    else if (*p >= 'a' && *p <= 'z') d = *p - 'a' + 10;
+    else if (*p >= 'A' && *p <= 'Z') d = *p - 'A' + 10;
+    else break;
+    if (d >= base) break;
+    any = 1;
+    if (v > (~(unsigned __int64)0 - (unsigned)d) / (unsigned)base) *overflow = 1;
+    else v = v * base + d;
+  }
+  if (end) *end = (char*)(any ? p : s);
+  return v;
+}
+
+static __int64 __cdecl KiteStrtoi64(const char* s, char** end, int base) {
+  int neg, ovf;
+  unsigned __int64 v = KiteParseU64(s, end, base, &neg, &ovf);
+  if (ovf || (!neg && v > (unsigned __int64)_I64_MAX) || (neg && v > (unsigned __int64)_I64_MAX + 1)) {
+    errno = ERANGE;
+    return neg ? _I64_MIN : _I64_MAX;
+  }
+  return neg ? (__int64)(0 - v) : (__int64)v;
+}
+
+static unsigned __int64 __cdecl KiteStrtoui64(const char* s, char** end, int base) {
+  int neg, ovf;
+  unsigned __int64 v = KiteParseU64(s, end, base, &neg, &ovf);
+  if (ovf) {
+    errno = ERANGE;
+    return _UI64_MAX;
+  }
+  return neg ? 0 - v : v;
+}
+
+#if defined(__MINGW32__) && defined(_X86_)
+void* kite_imp_aligned_malloc __asm__("__imp___aligned_malloc") = (void*)KiteAlignedMalloc;
+void* kite_imp_aligned_free __asm__("__imp___aligned_free") = (void*)KiteAlignedFree;
+void* kite_imp_aligned_realloc __asm__("__imp___aligned_realloc") = (void*)KiteAlignedRealloc;
+void* kite_imp_strtoi64 __asm__("__imp___strtoi64") = (void*)KiteStrtoi64;
+void* kite_imp_strtoui64 __asm__("__imp___strtoui64") = (void*)KiteStrtoui64;
+/* Direct (non-dllimport) calls resolve to these. */
+__int64 __cdecl kite_strtoi64(const char* s, char** e, int b) __asm__("__strtoi64");
+__int64 __cdecl kite_strtoi64(const char* s, char** e, int b) { return KiteStrtoi64(s, e, b); }
+unsigned __int64 __cdecl kite_strtoui64(const char* s, char** e, int b) __asm__("__strtoui64");
+unsigned __int64 __cdecl kite_strtoui64(const char* s, char** e, int b) { return KiteStrtoui64(s, e, b); }
+/* mingw-w64 maps strtoll/strtoull to those two msvcrt exports. */
+__int64 __cdecl kite_strtoll(const char* s, char** e, int b) __asm__("_strtoll");
+__int64 __cdecl kite_strtoll(const char* s, char** e, int b) { return KiteStrtoi64(s, e, b); }
+unsigned __int64 __cdecl kite_strtoull(const char* s, char** e, int b) __asm__("_strtoull");
+unsigned __int64 __cdecl kite_strtoull(const char* s, char** e, int b) { return KiteStrtoui64(s, e, b); }
+void* kite_imp_strtoll __asm__("__imp__strtoll") = (void*)KiteStrtoi64;
+void* kite_imp_strtoull __asm__("__imp__strtoull") = (void*)KiteStrtoui64;
+#endif

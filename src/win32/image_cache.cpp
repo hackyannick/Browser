@@ -4,6 +4,7 @@
 
 #include "base/strings.h"
 #include "canvas/canvas.h"
+#include "media/media.h"
 
 namespace kite {
 
@@ -12,9 +13,19 @@ ImageCache& Images() {
   return *c;
 }
 
+// Bitmaps owned by the engine: canvases and the current video frames.
+static const DecodedImage* LiveBitmap(const std::string& url, unsigned* version) {
+  if (StartsWith(url, "kite-canvas:")) return CanvasPixelsForUrl(url, version);
+  return MediaFrameForUrl(url, version);
+}
+
+static bool IsLive(const std::string& url) {
+  return StartsWith(url, "kite-canvas:") || StartsWith(url, "kite-media:");
+}
+
 ImageProvider::State ImageCache::GetImage(const std::string& url, int& width, int& height) {
-  if (StartsWith(url, "kite-canvas:")) {
-    const DecodedImage* c = CanvasPixelsForUrl(url, 0);
+  if (IsLive(url)) {
+    const DecodedImage* c = LiveBitmap(url, 0);
     if (!c) return kFailed;
     width = c->width;
     height = c->height;
@@ -30,7 +41,7 @@ ImageProvider::State ImageCache::GetImage(const std::string& url, int& width, in
 }
 
 const DecodedImage* ImageCache::Find(const std::string& url) {
-  if (StartsWith(url, "kite-canvas:")) return CanvasPixelsForUrl(url, 0);
+  if (IsLive(url)) return LiveBitmap(url, 0);
   std::map<std::string, Entry>::iterator it = entries_.find(url);
   if (it == entries_.end() || it->second.state != kLoaded) return 0;
   it->second.lastUse = ++clock_;
@@ -147,13 +158,21 @@ void ScaleInto(const DecodedImage* src, DecodedImage& dst, int w, int h) {
 }  // namespace
 
 const DecodedImage* ImageCache::Scaled(const std::string& url, int w, int h) {
-  if (StartsWith(url, "kite-canvas:")) {
-    // Canvas bitmaps change; keep one scaled copy per size and version.
+  if (IsLive(url)) {
+    // Canvas bitmaps and videos change; keep one scaled copy per size and version.
     unsigned version = 0;
-    const DecodedImage* src = CanvasPixelsForUrl(url, &version);
+    const DecodedImage* src = LiveBitmap(url, &version);
     if (!src || w <= 0 || h <= 0 || src->width <= 0 || src->height <= 0) return 0;
     if (src->width == w && src->height == h) return src;
     if ((long long)w * h > 4096LL * 4096) return 0;
+    if (!canvasScaled_.count(url)) {
+      // Forget copies of canvases and players that are gone.
+      for (std::map<std::string, std::pair<unsigned, DecodedImage> >::iterator it = canvasScaled_.begin();
+           it != canvasScaled_.end();) {
+        if (!LiveBitmap(it->first, 0)) canvasScaled_.erase(it++);
+        else ++it;
+      }
+    }
     std::pair<unsigned, DecodedImage>& e = canvasScaled_[url];
     if (e.first != version || e.second.width != w || e.second.height != h) {
       ScaleInto(src, e.second, w, h);

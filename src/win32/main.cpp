@@ -165,6 +165,7 @@ int WINAPI WinMain(HINSTANCE inst, HINSTANCE, LPSTR, int) {
   InitCommonControlsEx(&icc);
 
   kite::App::Get().Init(inst);
+  kite::InstallAudioOutput();
 
   std::wstring start;
   int argc = 0;

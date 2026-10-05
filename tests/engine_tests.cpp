@@ -21,6 +21,7 @@
 #include "html/parser.h"
 #include "image/image.h"
 #include "image/svg.h"
+#include "media/media.h"
 #include "net/hpack.h"
 #include "net/tls13.h"
 #include "net/websocket.h"
@@ -1259,6 +1260,193 @@ void TestHpack() {
   CHECK_EQ(Http2Connection::Frame(4, 1, 0, "").size(), 9u);
 }
 
+void SleepMs(int ms) {
+#ifdef _WIN32
+  Sleep(ms);
+#else
+  usleep(ms * 1000);
+#endif
+}
+
+#include "media_fixtures.inc"
+
+bool HasEvent(const std::vector<std::string>& ev, const char* name) {
+  for (size_t i = 0; i < ev.size(); ++i)
+    if (ev[i] == name) return true;
+  return false;
+}
+
+// Waits until |done| holds (max ~6 s), collecting the player's events.
+template <class F>
+bool WaitMedia(MediaPlayer* p, std::vector<std::string>& ev, F done) {
+  for (int i = 0; i < 600; ++i) {
+    std::vector<std::string> e = p->TakeEvents();
+    ev.insert(ev.end(), e.begin(), e.end());
+    if (done()) return true;
+    SleepMs(10);
+  }
+  return false;
+}
+
+void TestMedia() {
+  // Colour conversion: BT.601 limited-range red, white and black.
+  {
+    uint8_t y[4] = {81, 235, 16, 81}, u[1] = {90}, v[1] = {240};
+    const uint8_t* planes[3] = {y, u, v};
+    int strides[3] = {2, 1, 1};
+    uint32_t out[4];
+    YuvToBgra(planes, strides, 2, 2, 1, 1, false, false, out);
+    CHECK(((out[0] >> 16) & 255) >= 250 && ((out[0] >> 8) & 255) <= 3 && (out[0] & 255) <= 3);
+    uint8_t gray[4] = {235, 235, 16, 16}, uc[1] = {128}, vc[1] = {128};
+    const uint8_t* p2[3] = {gray, uc, vc};
+    YuvToBgra(p2, strides, 2, 2, 1, 1, true, false, out);
+    CHECK_EQ(out[0], 0xFFFFFFFFu);
+    CHECK_EQ(out[2], 0xFF000000u);
+  }
+  if (!MediaSupported()) {
+    printf("(Medientests uebersprungen: ohne FFmpeg gebaut)\n");
+    return;
+  }
+  CHECK_EQ(MediaCanPlayType("video/mp4"), "maybe");
+  CHECK_EQ(MediaCanPlayType("video/mp4; codecs=\"avc1.42E01E, mp4a.40.2\""), "probably");
+  CHECK_EQ(MediaCanPlayType("video/webm; codecs=\"vp9, opus\""), "probably");
+  CHECK_EQ(MediaCanPlayType("video/webm; codecs=\"av01.0.05M.08\""), "");
+  CHECK_EQ(MediaCanPlayType("application/x-mpegURL"), "");
+  CHECK_EQ(MediaCanPlayType("audio/mpeg"), "maybe");
+
+  struct Case {
+    const char* url;
+    const char* tag;
+    uint32_t color;  // expected centre pixel (0 = audio only)
+  } cases[] = {{kRedMp4, "video", 0xFF0000}, {kBlueWebm, "video", 0x0000FF}, {kToneMp3, "audio", 0},
+               {kToneOgg, "audio", 0}};
+  int owner = 0;
+  for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); ++c) {
+    Node el(Node::kElement);
+    el.tag = cases[c].tag;
+    el.SetAttr("src", cases[c].url);
+    MediaPlayer* p = EnsureMediaPlayer(&el, "about:blank", &owner);
+    CHECK(p != 0);
+    if (!p) continue;
+    CHECK_EQ(el.mediaId, p->id());
+    std::vector<std::string> ev;
+    CHECK(WaitMedia(p, ev, [&] { return p->Status().readyState == 4 || p->Status().error; }));
+    MediaStatus st = p->Status();
+    CHECK_EQ(st.error, 0);
+    CHECK_NEAR(st.duration, 1.0, 0.1);
+    CHECK(st.hasAudio);
+    CHECK(HasEvent(ev, "loadedmetadata"));
+    CHECK(HasEvent(ev, "canplay"));
+    if (cases[c].color) {
+      CHECK(st.hasVideo);
+      CHECK_EQ(st.videoWidth, 64);
+      CHECK_EQ(st.videoHeight, 48);
+      unsigned version = 0;
+      const DecodedImage* f = MediaFrameForUrl(MediaUrl(p->id()), &version);
+      CHECK(f != 0);
+      if (f) {
+        uint32_t px = f->pixels[24 * 64 + 32] & 0xFFFFFF;
+        for (int k = 0; k < 3; ++k) {
+          int want = (cases[c].color >> (k * 8)) & 255, got = (px >> (k * 8)) & 255;
+          CHECK(std::abs(want - got) < 24);
+        }
+      }
+    } else {
+      CHECK(!st.hasVideo);
+    }
+    // Seek while paused.
+    ev.clear();
+    p->Seek(0.5);
+    CHECK(WaitMedia(p, ev, [&] { return HasEvent(ev, "seeked"); }));
+    CHECK_NEAR(p->Status().currentTime, 0.5, 0.15);
+    // Play to the end.
+    ev.clear();
+    p->Play();
+    CHECK(WaitMedia(p, ev, [&] { return p->Status().ended; }));
+    st = p->Status();
+    CHECK(st.paused);
+    CHECK_NEAR(st.currentTime, 1.0, 0.15);
+    CHECK(HasEvent(ev, "play"));
+    CHECK(HasEvent(ev, "playing"));
+    CHECK(HasEvent(ev, "ended"));
+    // Playing again restarts from the beginning.
+    ev.clear();
+    p->Play();
+    CHECK(WaitMedia(p, ev, [&] { return p->Status().currentTime > 0.05 && !p->Status().ended; }));
+    p->Pause();
+    CHECK(p->Status().paused);
+  }
+  // Players die with their element; the events of the owner are gone too.
+  CHECK(TakeMediaEvents(&owner).empty());
+
+  // Broken data.
+  {
+    Node el(Node::kElement);
+    el.tag = "video";
+    el.SetAttr("src", "data:video/mp4;base64,AAAAAAAA");
+    MediaPlayer* p = EnsureMediaPlayer(&el, "about:blank", &owner);
+    std::vector<std::string> ev;
+    CHECK(WaitMedia(p, ev, [&] { return p->Status().error != 0; }));
+    CHECK_EQ(p->Status().error, 4);
+    CHECK(HasEvent(ev, "error"));
+  }
+  // <source> selection skips unplayable types.
+  {
+    Node el(Node::kElement);
+    el.tag = "video";
+    std::unique_ptr<Node> a(new Node(Node::kElement)), b(new Node(Node::kElement));
+    a->tag = b->tag = "source";
+    a->SetAttr("src", "x.m3u8");
+    a->SetAttr("type", "application/x-mpegURL");
+    b->SetAttr("src", "x.mp4");
+    b->SetAttr("type", "video/mp4");
+    el.AppendChild(std::move(a));
+    el.AppendChild(std::move(b));
+    CHECK_EQ(MediaSourceAttr(&el), "x.mp4");
+  }
+  // HTMLMediaElement from script.
+  {
+    ScriptPage p("<div id=out></div><video id=v></video>");
+    p.page.script()->Execute(std::string("window.log = []; var v = document.getElementById('v');"
+        "['loadedmetadata','canplay','play','playing','timeupdate','pause','ended','seeked'].forEach(function (t) {"
+        "  v.addEventListener(t, function () { if (log[log.length - 1] !== t) log.push(t); }); });"
+        "window.res = '';"
+        "v.src = '") + kRedMp4 + "';"
+        "v.play().then(function () { res += 'resolved'; }, function (e) { res += 'rejected:' + e.name; });",
+        "test", 0);
+    for (int i = 0; i < 600 && p.Eval("log.indexOf('ended') >= 0") != "true"; ++i) {
+      p.page.script()->PumpAsync();
+      SleepMs(10);
+    }
+    CHECK_EQ(p.Eval("res"), "resolved");
+    CHECK_EQ(p.Eval("log.filter(function (t) { return t !== 'timeupdate'; }).join()"),
+             "play,loadedmetadata,canplay,playing,pause,ended");
+    CHECK_EQ(p.Eval("[v.videoWidth, v.videoHeight, Math.round(v.duration), v.paused, v.ended, v.readyState].join()"),
+             "64,48,1,true,true,4");
+    CHECK_EQ(p.Eval("v instanceof HTMLMediaElement && v instanceof HTMLVideoElement"), "true");
+    CHECK_EQ(p.Eval("v.canPlayType('video/webm; codecs=vp9') + '|' + v.canPlayType('video/x-flv')"), "probably|");
+    CHECK_EQ(p.Eval("v.buffered.length + ':' + v.buffered.end(0)"), "1:1");
+    CHECK_EQ(p.Eval("(v.currentTime = 0.25, v.seeking)"), "true");
+    for (int i = 0; i < 300 && p.Eval("v.seeking") == "true"; ++i) {
+      p.page.script()->PumpAsync();
+      SleepMs(10);
+    }
+    CHECK_EQ(p.Eval("Math.round(v.currentTime * 100)"), "25");
+    CHECK_EQ(p.Eval("(function () { try { v.volume = 2; return 'no'; } catch (e) { return e.name; } })()"), "IndexSizeError");
+    CHECK_EQ(p.Eval("(v.muted = true, v.muted) + ':' + v.volume"), "true:1");
+    // new Audio() with a broken source rejects play().
+    p.page.script()->Execute("window.ares = ''; var a = new Audio('data:audio/mpeg;base64,AAAA');"
+                             "a.play().catch(function (e) { ares = e.name + ares; });"
+                             "a.onerror = function () { ares += '+error:' + a.error.code; };", "test", 0);
+    for (int i = 0; i < 300 && p.Eval("ares.indexOf('error') >= 0") != "true"; ++i) {
+      p.page.script()->PumpAsync();
+      SleepMs(10);
+    }
+    CHECK_EQ(p.Eval("ares"), "NotSupportedError+error:4");
+    CHECK_EQ(p.Eval("a instanceof HTMLAudioElement"), "true");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1296,6 +1484,7 @@ int main() {
   TestWebComponents();
   TestAsyncApis();
   TestTls13();
+  TestMedia();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

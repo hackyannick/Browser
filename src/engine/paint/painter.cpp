@@ -5,6 +5,7 @@
 #include "layout/layout.h"
 #include "paint/display_list.h"
 #include "canvas/canvas.h"
+#include "media/media.h"
 
 namespace kite {
 
@@ -393,6 +394,138 @@ void Painter::PaintFloatsInInline(LayoutBox* container, LayoutBox* b, float ax, 
   }
 }
 
+// <video> picture (current frame or poster) and the built-in controls of
+// <video controls> / <audio controls>.
+void Painter::PaintMedia(LayoutBox* b, const Rect& content, float alpha) {
+  Node* el = b->node;
+  const ComputedStyle* s = b->style;
+  MediaPlayer* player = FindMediaPlayer(el->mediaId);
+  MediaStatus st;
+  if (player) st = player->Status();
+  bool audio = el->tag == "audio";
+  if (!audio) {
+    std::string url;
+    int iw = 0, ih = 0;
+    if (player && images_ && (st.started || b->imageUrl.empty()) &&
+        images_->GetImage(MediaUrl(player->id()), iw, ih) == ImageProvider::kLoaded && iw > 0 && ih > 0)
+      url = MediaUrl(player->id());
+    else if (!b->imageUrl.empty() && images_ && images_->GetImage(b->imageUrl, iw, ih) == ImageProvider::kLoaded &&
+             iw > 0 && ih > 0)
+      url = b->imageUrl;
+    if (!url.empty()) {
+      DisplayItem it;
+      it.type = DisplayItem::kImage;
+      it.imageUrl = url;
+      it.rect = content;
+      // Videos are letterboxed unless object-fit says otherwise.
+      float sx = content.w / iw, sy = content.h / ih;
+      float sc = s->objectFit == kFitCover ? std::max(sx, sy) : std::min(sx, sy);
+      if (s->objectFit == kFitScaleDown) sc = std::min(sc, 1.0f);
+      float tw = iw * sc, th = ih * sc;
+      if (s->objectFit == kFitNone) {
+        tw = (float)iw;
+        th = (float)ih;
+      }
+      it.tileX = content.x + (content.w - tw) / 2;
+      it.tileY = content.y + (content.h - th) / 2;
+      it.tileW = tw;
+      it.tileH = th;
+      if (s->objectFit == kFitFill && !st.hasVideo) {  // posters fill like images
+        it.tileX = content.x;
+        it.tileY = content.y;
+        it.tileW = content.w;
+        it.tileH = content.h;
+      }
+      it.alpha = alpha;
+      ResolveRadii(b, content, it.radii);
+      if (s->objectFit == kFitCover || s->objectFit == kFitNone) {
+        DisplayItem clip;
+        clip.type = DisplayItem::kPushClip;
+        clip.rect = content;
+        out_->items.push_back(clip);
+        out_->items.push_back(it);
+        DisplayItem pop;
+        pop.type = DisplayItem::kPopClip;
+        out_->items.push_back(pop);
+      } else {
+        out_->items.push_back(it);
+      }
+    } else if (st.error || (!player && MediaSourceAttr(el).empty() && !el->HasAttr("poster"))) {
+      // Nothing playable: a dark box with a play sign.
+      FillRect(content, Color(32, 32, 32), alpha);
+      float cx = content.x + content.w / 2, cy = content.y + content.h / 2;
+      for (int k = 0; k < 14; ++k)
+        FillRect(Rect(cx - 5 + k, cy - 8 + k * 8 / 14.0f, 1, 16 - k * 16 / 14.0f), Color(160, 160, 160), alpha);
+    }
+  }
+  if (!el->HasAttr("controls") || content.w < 40 || content.h < 16) return;
+
+  MediaControls m = LayoutMediaControls(content, audio);
+  Color fg = audio ? Color(32, 32, 32) : Color(255, 255, 255);
+  if (audio) {
+    DisplayItem bg;
+    bg.type = DisplayItem::kRoundRect;
+    bg.rect = m.bar;
+    bg.color = WithAlpha(Color(241, 243, 244), alpha);
+    for (int k = 0; k < 4; ++k) bg.radii[k] = std::min(m.bar.h / 2, 16.0f);
+    out_->items.push_back(bg);
+  } else {
+    FillRect(m.bar, Color(0, 0, 0, 140), alpha);
+  }
+  // Play triangle or pause bars.
+  float px = m.play.x + 7, py = m.play.y + 5;
+  if (st.paused || !player) {
+    for (int k = 0; k < 12; ++k) FillRect(Rect(px + k, py + k * 7 / 12.0f, 1, 14 - k * 14 / 12.0f), fg, alpha);
+  } else {
+    FillRect(Rect(px, py, 4, 14), fg, alpha);
+    FillRect(Rect(px + 7, py, 4, 14), fg, alpha);
+  }
+  ComputedStyle small;
+  small.CopyFrom(*s);
+  small.fontSize = 11;
+  small.fontWeight = 400;
+  small.italic = false;
+  small.underline = small.lineThrough = small.overline = false;
+  if (m.time.w > 0) {
+    std::string text = FormatMediaTime(st.currentTime) + " / " + FormatMediaTime(st.duration);
+    FontMetrics fm = engine_->Metrics(&small);
+    float base = m.time.y + (m.time.h - (fm.ascent + fm.descent)) / 2 + fm.ascent;
+    Text(m.time.x, base, text, &small, fg, alpha, false);
+  }
+  if (m.track.w > 8) {
+    Rect line(m.track.x, m.track.y + 4, m.track.w, 4);
+    FillRect(line, audio ? Color(200, 200, 200) : Color(255, 255, 255, 80), alpha);
+    double dur = st.duration > 0 && !std::isinf(st.duration) ? st.duration : 0;
+    if (dur > 0) {
+      float buf = (float)std::min(1.0, st.bufferedEnd / dur);
+      FillRect(Rect(line.x, line.y, line.w * buf, 4), audio ? Color(160, 160, 160) : Color(255, 255, 255, 140),
+               alpha);
+      float f = (float)std::min(1.0, std::max(0.0, st.currentTime / dur));
+      FillRect(Rect(line.x, line.y, line.w * f, 4), audio ? Color(26, 115, 232) : Color(255, 255, 255), alpha);
+      DisplayItem knob;
+      knob.type = DisplayItem::kEllipse;
+      knob.rect = Rect(line.x + line.w * f - 5, line.y - 3, 10, 10);
+      knob.color = WithAlpha(audio ? Color(26, 115, 232) : Color(255, 255, 255), alpha);
+      out_->items.push_back(knob);
+    }
+  }
+  if (m.mute.w > 0) {
+    // Loudspeaker; a cross when muted.
+    float mx = m.mute.x + 5, my = m.mute.y + 12;
+    FillRect(Rect(mx, my - 3, 4, 6), fg, alpha);
+    for (int k = 0; k < 5; ++k) FillRect(Rect(mx + 4 + k, my - 3 - k, 1, 6 + 2 * k), fg, alpha);
+    if (player && player->muted()) {
+      for (int k = 0; k < 7; ++k) {
+        FillRect(Rect(mx + 11 + k, my - 3 + k, 1.5f, 1.5f), fg, alpha);
+        FillRect(Rect(mx + 11 + k, my + 3 - k, 1.5f, 1.5f), fg, alpha);
+      }
+    } else {
+      FillRect(Rect(mx + 11, my - 3, 1.5f, 6), fg, alpha);
+      FillRect(Rect(mx + 14, my - 6, 1.5f, 12), fg, alpha);
+    }
+  }
+}
+
 void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
   Node* el = b->node;
   const ComputedStyle* s = b->style;
@@ -416,7 +549,11 @@ void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
     out_->items.push_back(it);
     return;
   }
-  if (tag == "img" || tag == "video" || (tag == "input" && AsciiLower(el->Attr("type")) == "image")) {
+  if (tag == "video" || tag == "audio") {
+    PaintMedia(b, content, alpha);
+    return;
+  }
+  if (tag == "img" || (tag == "input" && AsciiLower(el->Attr("type")) == "image")) {
     int iw = 0, ih = 0;
     ImageProvider::State st = b->imageUrl.empty() || !images_
                                   ? ImageProvider::kFailed
@@ -446,10 +583,6 @@ void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
       out_->items.push_back(it);
     } else if (st == ImageProvider::kUnsupported || st == ImageProvider::kLoading) {
       // Nothing to draw (yet).
-    } else if (tag == "video") {
-      FillRect(content, Color(32, 32, 32), alpha);
-      Text(content.x + content.w / 2 - 8, content.y + content.h / 2 + 6, "\xE2\x96\xB6", s,
-           Color(220, 220, 220), alpha, false);
     } else {
       std::string alt = el->Attr("alt");
       if (!alt.empty() && content.w > 4 && content.h > 4) {

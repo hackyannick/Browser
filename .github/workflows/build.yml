@@ -14,7 +14,21 @@ jobs:
       - name: Install toolchains
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends cmake g++ g++-mingw-w64-i686
+          sudo apt-get install -y --no-install-recommends cmake g++ g++-mingw-w64-i686 nasm
+
+      - name: Cache FFmpeg
+        uses: actions/cache@v4
+        with:
+          path: |
+            third_party/ffmpeg/ffmpeg-4.4.2.tar.xz
+            third_party/ffmpeg/native
+            third_party/ffmpeg/win32
+          key: ffmpeg-4.4.2-${{ hashFiles('tools/build-ffmpeg.sh', 'third_party/ffmpeg-patches/*') }}
+
+      - name: Build FFmpeg decoders
+        run: |
+          sh tools/build-ffmpeg.sh native
+          sh tools/build-ffmpeg.sh win32
 
       - name: Engine unit tests (Linux)
         run: |
