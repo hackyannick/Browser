@@ -274,9 +274,9 @@ class Builder {
         if (c == el) break;
         if (!c->Is("source") || c->HasAttr("media")) continue;
         std::string type = AsciiLower(Trim(c->Attr("type")));
-        if (!type.empty() && type != "image/webp" && type != "image/png" && type != "image/jpeg" &&
-            type != "image/gif" && type != "image/svg+xml" && type != "image/bmp")
-          continue;  // e.g. AVIF, JPEG XL
+        if (!type.empty() && type != "image/webp" && type != "image/avif" && type != "image/png" &&
+            type != "image/jpeg" && type != "image/gif" && type != "image/svg+xml" && type != "image/bmp")
+          continue;  // e.g. JPEG XL
         std::string set = c->Attr("srcset");
         if (set.empty()) set = c->Attr("data-srcset");
         std::vector<std::string> first = SplitWhitespace(Split(set, ',')[0]);

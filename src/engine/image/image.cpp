@@ -1,6 +1,9 @@
 #include "image/image.h"
 
 #include "src/webp/decode.h"
+#include "image/avif.h"
+
+#include <algorithm>
 
 #include <cstdlib>
 
@@ -49,6 +52,26 @@ static std::string FirstWebPFrame(const std::string& d) {
 
 bool DecodeImage(const std::string& data, DecodedImage& out, size_t maxPixels) {
   if (data.empty() || data.size() > 0x7fffffff) return false;
+  if (LooksLikeAvif(data)) {
+    int aw = 0, ah = 0;
+    std::vector<uint32_t> px;
+    bool alpha = false;
+    if (!DecodeAvif(data, aw, ah, px, alpha)) return false;
+    int step = 1;
+    while ((size_t)(aw / step) * (size_t)(ah / step) > maxPixels) ++step;
+    out.width = std::max(1, aw / step);
+    out.height = std::max(1, ah / step);
+    out.hasAlpha = alpha;
+    if (step == 1) {
+      out.pixels.swap(px);
+    } else {
+      out.pixels.resize((size_t)out.width * out.height);
+      for (int y = 0; y < out.height; ++y)
+        for (int x = 0; x < out.width; ++x)
+          out.pixels[(size_t)y * out.width + x] = px[(size_t)(y * step) * aw + x * step];
+    }
+    return true;
+  }
   int w = 0, h = 0, comp = 0;
   unsigned char* px = 0;
   bool webp = data.size() >= 12 && data.compare(0, 4, "RIFF") == 0 && data.compare(8, 4, "WEBP") == 0;

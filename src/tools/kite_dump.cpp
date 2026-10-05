@@ -50,7 +50,7 @@ class HeadlessImages : public ImageProvider {
     if (images.count(url) || failed.count(url)) return;
     FetchRequest req;
     req.url = url;
-    req.accept = "image/png,image/jpeg,image/gif,*/*;q=0.5";
+    req.accept = "image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.5";
     FetchResponse r = Network::Get().Fetch(req);
     DecodedImage img;
     if (r.ok && r.status == 200 && (DecodeImage(r.body, img) ||

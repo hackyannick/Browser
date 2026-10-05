@@ -16,4 +16,5 @@ cp third_party/quickjs/LICENSE dist/Kite/LICENSE-QuickJS.txt
 cp third_party/libwebp/COPYING dist/Kite/LICENSE-libwebp.txt
 cp third_party/libwebp/PATENTS dist/Kite/PATENTS-libwebp.txt
 cp third_party/brotli/LICENSE dist/Kite/LICENSE-Brotli.txt
+cp third_party/dav1d/COPYING dist/Kite/LICENSE-dav1d.txt
 echo "Fertig: dist/Kite/kite.exe"

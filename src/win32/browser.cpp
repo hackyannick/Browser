@@ -265,7 +265,7 @@ bool IsTextMime(const std::string& m) {
 bool IsImageMime(const std::string& m) {
   return m == "image/svg+xml" || m == "image/png" || m == "image/jpeg" || m == "image/jpg" || m == "image/gif" ||
          m == "image/bmp" || m == "image/x-ms-bmp" || m == "image/pjpeg" || m == "image/x-png" ||
-         m == "image/webp";
+         m == "image/webp" || m == "image/avif";
 }
 
 }  // namespace
@@ -1121,7 +1121,7 @@ void Browser::RequestImages(Tab* t) {
     job->notify = hwnd_;
     job->request.url = u;
     job->request.referrer = t->url;
-    job->request.accept = "image/webp,image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
+    job->request.accept = "image/avif,image/webp,image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
     job->request.maxBytes = 16 * 1024 * 1024;
     ++t->pendingImages;
     StartFetch(job);
@@ -2389,7 +2389,7 @@ void Browser::AfterScript(Tab* t) {
     job->scriptRequestId = -1;  // not counted as a page image
     job->request.url = imgs[i];
     job->request.referrer = t->url;
-    job->request.accept = "image/webp,image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
+    job->request.accept = "image/avif,image/webp,image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
     job->request.maxBytes = 16 * 1024 * 1024;
     StartFetch(job);
   }

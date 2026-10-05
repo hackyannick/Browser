@@ -475,6 +475,20 @@ void TestWebPAndWoff2() {
   }
   CHECK(DecodeImage(kAnimatedWebp, img));      // first frame
   if (img.pixels.size() == 64) CHECK_EQ(img.pixels[0], 0xFF00FF00u);
+  // AVIF: 8 bit with alpha (red | blue / transparent) and 10 bit 4:4:4.
+  CHECK(DecodeImage(kAvifAlpha, img));
+  CHECK_EQ(img.width, 64);
+  CHECK(img.hasAlpha);
+  if (img.pixels.size() == 64u * 48) {
+    uint32_t red = img.pixels[5 * 64 + 5], blue = img.pixels[5 * 64 + 40], clear = img.pixels[40 * 64 + 40];
+    CHECK((red >> 16 & 255) > 245 && (red & 255) < 10 && (red >> 24) == 255);
+    CHECK((blue & 255) > 245 && (blue >> 16 & 255) < 10);
+    CHECK_EQ(clear >> 24, 0u);
+  }
+  CHECK(DecodeImage(kAvif10Bit, img));
+  if (!img.pixels.empty()) CHECK_EQ(img.pixels[100], 0xFF00C800u);
+  CHECK(!DecodeImage(kAvifAlpha.substr(0, 200), img));
+  if (img.pixels.size() == 64) CHECK_EQ(img.pixels[0], 0xFF00FF00u);
 
   std::string sfnt;
   CHECK(FontToSfnt(kWoff2Font, sfnt));

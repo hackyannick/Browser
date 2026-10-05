@@ -34,7 +34,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 | HTML | HTML5-Tokenizer und Tree-Builder mit Fehlerkorrektur, Zeichenreferenzen, Zeichensatz-Erkennung (UTF-8, Windows-1252, ISO-8859-1/-15, UTF-16) |
 | CSS | Kaskade mit Spezifität und `!important`, Selektoren bis Level 4 (`:is()`, `:where()`, `:not()`, `:nth-child()`, Attributselektoren …), `@media` (inkl. Bereichs-Syntax), `@supports`, `@import`, `@layer`, CSS-Verschachtelung, Custom Properties (`var()`), `calc()`/`min()`/`max()`/`clamp()`, `::before`/`::after` |
 | Layout | Block- und Inline-Formatierung mit Zeilenumbruch, Margin-Collapsing, Floats und `clear`, Tabellen (colspan/rowspan, automatische Spaltenbreiten), **Flexbox**, **Grid** (Spalten, `repeat()`, `fr`, `minmax()`, `auto-fill`), relative und absolute Positionierung (`fixed` vereinfacht), `overflow`-Clipping, Listen |
-| Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, **2D-Transformationen** (`translate`, `rotate`, `scale`, `skew`, `matrix`, `transform-origin`, Einzeleigenschaften `rotate:`/`scale:`), PNG/JPEG/GIF/BMP/**WebP** (auch `<picture>`), **SVG** (Inline und als Bild, mit Kantenglättung, Verläufen, Masken und Clip-Pfaden) |
+| Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, **2D-Transformationen** (`translate`, `rotate`, `scale`, `skew`, `matrix`, `transform-origin`, Einzeleigenschaften `rotate:`/`scale:`), PNG/JPEG/GIF/BMP/**WebP**/**AVIF** (auch `<picture>`), **SVG** (Inline und als Bild, mit Kantenglättung, Verläufen, Masken und Clip-Pfaden) |
 | Animation | **CSS-Animationen** (`@keyframes`, alle `animation-*`-Eigenschaften, Timing-Funktionen inkl. `cubic-bezier()`/`steps()`) und **Transitions** für Deckkraft, Farben, Transformationen (auch Drehung und Skalierung), Schatten, Größen und Abstände; `animationend`/`transitionend`-Events |
 | Canvas | **`<canvas>` 2D** per Software-Rasterizer: Pfade, Bögen, Füllregeln, Linienstile und Strichelung, Transformationen, Clipping, lineare/radiale/konische Verläufe, Muster, Compositing-Modi, Schatten, Text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, `Path2D` |
 | Schriften | **Webfonts** (`@font-face`, TTF/OTF/WOFF/WOFF2) werden geladen und prozesslokal installiert |
@@ -53,7 +53,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
   Große Single-Page-Anwendungen (React, Angular …) laufen daher oft nur
   teilweise.
 - 3D-Transformationen werden orthografisch projiziert (`rotateX/Y`, `rotate3d`, `backface-visibility` funktionieren, `perspective` fehlt);
-  AVIF-Bilder werden nicht dekodiert,
+  AVIF-Animationen und HDR-Tonemapping fehlen,
   animierte GIF/WebP zeigen nur das erste Bild.
 - TLS 1.3 und HTTP/2 werden nicht unterstützt (alle gängigen Server sprechen
   noch TLS 1.2 und HTTP/1.1).
@@ -131,7 +131,7 @@ src/engine/            plattformunabhängige Engine (C++11)
 src/win32/             Windows-Oberfläche (Win32-API, GDI, Common Controls)
 src/tools/kite_dump.cpp  Headless-Werkzeug zum Testen der Engine
 tests/                 Unit-Tests
-third_party/           BearSSL (MIT), QuickJS (MIT), libwebp (BSD), Brotli (MIT),
+third_party/           BearSSL (MIT), QuickJS (MIT), libwebp (BSD), Brotli (MIT), dav1d (BSD),
                        stb_image (Public Domain)
 resources/cacert.pem   Mozilla-Stammzertifikate (MPL 2.0)
 ```
@@ -149,6 +149,8 @@ AlphaBlend und läuft auf einer unveränderten Windows-2000-Installation.
   – MIT-Lizenz (`third_party/quickjs/LICENSE`)
 - [libwebp](https://chromium.googlesource.com/webm/libwebp) © Google – BSD-Lizenz
   (`third_party/libwebp/COPYING`, `PATENTS`)
+- [dav1d](https://code.videolan.org/videolan/dav1d) © VideoLAN und dav1d-Autoren –
+  BSD-2-Clause (`third_party/dav1d/COPYING`)
 - [Brotli](https://github.com/google/brotli) © Google – MIT-Lizenz
   (`third_party/brotli/LICENSE`)
 - [stb_image](https://github.com/nothings/stb) von Sean Barrett – Public Domain
