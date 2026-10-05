@@ -67,8 +67,21 @@ class GdiFonts : public FontProvider {
   float MeasureText(const FontDesc& font, const std::string& utf8);
   // Returns a cached HFONT for drawing at |scale| (zoom).
   HFONT Get(const FontDesc& font, float scale);
+  // Installs a downloaded font (sfnt data) for this process only and maps the
+  // CSS family/weight/style to it.
+  bool RegisterWebFont(const std::string& cssFamily, int weight, bool italic,
+                       const std::string& sfnt, const std::string& internalName);
+  bool IsWebFont(const FontDesc& font);
 
  private:
+  struct WebFont {
+    int weight;
+    bool italic;
+    std::wstring face;
+  };
+  const WebFont* FindWebFont(const FontDesc& f);
+  std::map<std::string, std::vector<WebFont> > webFonts_;
+  std::vector<HANDLE> fontHandles_;
   std::wstring ResolveFamily(const std::string& cssFamilies);
   std::map<std::string, HFONT> fonts_;
   std::map<std::string, std::wstring> familyCache_;
@@ -111,7 +124,7 @@ ImageCache& Images();
 const UINT WM_KITE_FETCHED = WM_APP + 1;
 
 struct FetchJob {
-  enum Kind { kDocument, kStylesheet, kImage, kDownload };
+  enum Kind { kDocument, kStylesheet, kImage, kDownload, kFont };
   Kind kind;
   int tabId;
   int generation;
@@ -119,6 +132,10 @@ struct FetchJob {
   FetchResponse response;
   DecodedImage image;   // kImage: decoded in the worker thread
   bool imageOk;
+  // kFont: converted sfnt data and its internal family name.
+  std::string fontData, fontName, fontFamily;
+  int fontWeight = 400;
+  bool fontItalic = false;
   HWND notify;
   FetchJob() : kind(kDocument), tabId(0), generation(0), imageOk(false), notify(0) {}
 };

@@ -5,6 +5,7 @@
 #define KITE_PAGE_PAGE_H
 
 #include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,13 @@
 #include "paint/display_list.h"
 
 namespace kite {
+
+struct WebFontRequest {
+  std::string url;
+  std::string family;  // CSS family name (lower-case)
+  int weight;
+  bool italic;
+};
 
 struct FormSubmission {
   std::string method;  // "GET" or "POST"
@@ -42,6 +50,11 @@ class Page {
   std::vector<std::string> PendingStylesheets() const;
   void ProvideStylesheet(const std::string& url, const std::string& css, bool ok);
   bool HasPendingStylesheets() const { return !PendingStylesheets().empty(); }
+
+  // Web fonts used by the document that still need loading (each is
+  // returned once). Call after Restyle().
+  std::vector<WebFontRequest> PendingFonts();
+  void FontsChanged() { engine_.ClearFontCaches(); }
 
   // Recomputes styles (needed after stylesheets arrive or the viewport
   // width changes media query results).
@@ -106,6 +119,7 @@ class Page {
   LayoutEngine engine_;
   DisplayList display_;
   float lastViewportW_ = 800, lastViewportH_ = 600;
+  std::set<std::string> requestedFonts_;
   int refreshDelay_;
   std::string refreshUrl_;
 };

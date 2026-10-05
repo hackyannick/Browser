@@ -100,6 +100,55 @@ std::wstring GdiFonts::ResolveFamily(const std::string& css) {
   return result;
 }
 
+const GdiFonts::WebFont* GdiFonts::FindWebFont(const FontDesc& f) {
+  if (webFonts_.empty()) return 0;
+  std::vector<std::string> fams = Split(f.family, ',');
+  for (size_t i = 0; i < fams.size(); ++i) {
+    std::map<std::string, std::vector<WebFont> >::iterator it = webFonts_.find(Trim(fams[i]));
+    if (it == webFonts_.end()) {
+      // Stop at the first family that is installed locally or generic.
+      std::wstring w = Widen(Trim(fams[i]));
+      if (installed_.count(w)) return 0;
+      continue;
+    }
+    const WebFont* best = 0;
+    int bestScore = 1 << 30;
+    for (size_t k = 0; k < it->second.size(); ++k) {
+      const WebFont& v = it->second[k];
+      int score = std::abs(v.weight - f.weight) + (v.italic != f.italic ? 1000 : 0);
+      if (score < bestScore) {
+        bestScore = score;
+        best = &v;
+      }
+    }
+    return best;
+  }
+  return 0;
+}
+
+bool GdiFonts::IsWebFont(const FontDesc& f) { return FindWebFont(f) != 0; }
+
+bool GdiFonts::RegisterWebFont(const std::string& cssFamily, int weight, bool italic,
+                               const std::string& sfnt, const std::string& internalName) {
+  if (sfnt.empty() || internalName.empty()) return false;
+  DWORD count = 0;
+  // AddFontMemResourceEx is available from Windows 2000 on; the font stays
+  // private to this process.
+  HANDLE h = AddFontMemResourceEx((void*)sfnt.data(), (DWORD)sfnt.size(), 0, &count);
+  if (!h || count == 0) return false;
+  fontHandles_.push_back(h);
+  WebFont wf;
+  wf.weight = weight;
+  wf.italic = italic;
+  wf.face = Widen(internalName);
+  webFonts_[cssFamily].push_back(wf);
+  for (std::map<std::string, HFONT>::iterator it = fonts_.begin(); it != fonts_.end(); ++it)
+    DeleteObject(it->second);
+  fonts_.clear();
+  familyCache_.clear();
+  return true;
+}
+
 HFONT GdiFonts::Get(const FontDesc& f, float scale) {
   int px = (int)std::floor(f.size * scale + 0.5f);
   if (px < 1) px = 1;
@@ -112,7 +161,8 @@ HFONT GdiFonts::Get(const FontDesc& f, float scale) {
     for (it = fonts_.begin(); it != fonts_.end(); ++it) DeleteObject(it->second);
     fonts_.clear();
   }
-  std::wstring face = ResolveFamily(f.family);
+  const WebFont* web = FindWebFont(f);
+  std::wstring face = web ? web->face : ResolveFamily(f.family);
   // ClearType exists from Windows XP on; Windows 2000 gets standard smoothing.
   DWORD quality = App::Get().isXpOrLater ? 5 /* CLEARTYPE_QUALITY */ : ANTIALIASED_QUALITY;
   HFONT h = CreateFontW(-px, 0, 0, 0, f.weight >= 600 ? FW_BOLD : (f.weight <= 300 ? FW_LIGHT : FW_NORMAL),

@@ -142,6 +142,7 @@ class Browser {
   void RequestStylesheets(Tab* t);
   void RenderTab(Tab* t, bool restyle);
   void RequestImages(Tab* t);
+  void RequestFonts(Tab* t);
   void FinishLoadingIfDone(Tab* t);
   void ScheduleRelayout();
   void SubmitForm(Tab* t, Node* form, Node* submitter, bool newTab);
@@ -815,6 +816,19 @@ void Browser::OnFetched(FetchJob* job) {
     }
     return;
   }
+  if (job->kind == FetchJob::kFont) {
+    if (!job->fontName.empty() &&
+        Fonts().RegisterWebFont(job->fontFamily, job->fontWeight, job->fontItalic, job->fontData,
+                                job->fontName)) {
+      for (size_t i = 0; i < tabList_.size(); ++i) {
+        tabList_[i]->page->FontsChanged();
+        if (tabList_[i]->rendered) tabList_[i]->needsRelayout = true;
+      }
+      renderer_.ClearSvgCache();
+      ScheduleRelayout();
+    }
+    return;
+  }
   if (job->kind == FetchJob::kImage) {
     const std::string& url = job->request.url;
     if (job->imageOk) Images().SetLoaded(url, job->image);
@@ -984,6 +998,7 @@ void Browser::RenderTab(Tab* t, bool restyle) {
       SetTimer(hwnd_, kTimerRefreshBase + t->id, std::max(delay, 1) * 1000, 0);
   }
   RequestImages(t);
+  if (restyle) RequestFonts(t);
   FinishLoadingIfDone(t);
   UpdateTabLabel(t);
   if (t == current_) {
@@ -1015,6 +1030,25 @@ void Browser::RequestImages(Tab* t) {
     job->request.accept = "image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
     job->request.maxBytes = 16 * 1024 * 1024;
     ++t->pendingImages;
+    StartFetch(job);
+  }
+}
+
+void Browser::RequestFonts(Tab* t) {
+  std::vector<WebFontRequest> fonts = t->page->PendingFonts();
+  for (size_t i = 0; i < fonts.size(); ++i) {
+    FetchJob* job = new FetchJob;
+    job->kind = FetchJob::kFont;
+    job->tabId = t->id;
+    job->generation = t->generation;
+    job->notify = hwnd_;
+    job->request.url = fonts[i].url;
+    job->request.referrer = t->url;
+    job->request.accept = "font/woff,font/ttf,application/font-woff,*/*;q=0.5";
+    job->request.maxBytes = 8 * 1024 * 1024;
+    job->fontFamily = fonts[i].family;
+    job->fontWeight = fonts[i].weight;
+    job->fontItalic = fonts[i].italic;
     StartFetch(job);
   }
 }

@@ -18,6 +18,7 @@ void Page::LoadHtml(const std::string& utf8, const std::string& url) {
   doc_ = ParseHtml(utf8);
   root_.reset();
   sheets_.clear();
+  requestedFonts_.clear();
   refreshDelay_ = -1;
   refreshUrl_.clear();
   CollectDocumentInfo();
@@ -202,6 +203,60 @@ void Page::Repaint() {
   if (!root_) return;
   Painter p(&engine_, images_);
   p.Paint(root_.get(), lastViewportW_, lastViewportH_, display_);
+}
+
+std::vector<WebFontRequest> Page::PendingFonts() {
+  std::vector<WebFontRequest> out;
+  if (!doc_) return out;
+  // Families actually referenced by computed styles.
+  std::set<std::string> used;
+  std::vector<Node*> stack(1, doc_->root.get());
+  while (!stack.empty()) {
+    Node* n = stack.back();
+    stack.pop_back();
+    if (n->style) {
+      std::vector<std::string> fams = Split(n->style->fontFamily, ',');
+      for (size_t i = 0; i < fams.size(); ++i) used.insert(Trim(fams[i]));
+      for (int k = 0; k < 2; ++k) {
+        const ComputedStyle* ps = k == 0 ? n->style->before.get() : n->style->after.get();
+        if (!ps) continue;
+        std::vector<std::string> pf = Split(ps->fontFamily, ',');
+        for (size_t i = 0; i < pf.size(); ++i) used.insert(Trim(pf[i]));
+      }
+    }
+    for (size_t i = 0; i < n->children.size(); ++i) stack.push_back(n->children[i].get());
+  }
+  for (size_t i = 0; i < sheets_.size(); ++i) {
+    const SheetEntry& e = sheets_[i];
+    if (!e.loaded || !e.sheet) continue;
+    Url base = e.isLink ? Url::Parse(e.url) : baseUrl_;
+    for (size_t k = 0; k < e.sheet->fontFaces.size(); ++k) {
+      const FontFace& f = e.sheet->fontFaces[k];
+      if (!used.count(f.family) || !f.coversLatin) continue;
+      std::string chosen;
+      for (size_t q = 0; q < f.sources.size() && chosen.empty(); ++q) {
+        std::string fmt = f.sources[q].second;
+        std::string lower = AsciiLower(f.sources[q].first);
+        lower = lower.substr(0, lower.find_first_of("?#"));
+        bool ok = fmt == "woff" || fmt == "truetype" || fmt == "opentype" ||
+                  (fmt.empty() && (EndsWith(lower, ".woff") || EndsWith(lower, ".ttf") ||
+                                   EndsWith(lower, ".otf")));
+        if (ok) {
+          Url u = base.Resolve(f.sources[q].first);
+          if (u.valid()) chosen = u.Spec();
+        }
+      }
+      if (chosen.empty() || requestedFonts_.count(chosen) || requestedFonts_.size() >= 24) continue;
+      requestedFonts_.insert(chosen);
+      WebFontRequest r;
+      r.url = chosen;
+      r.family = f.family;
+      r.weight = f.weight;
+      r.italic = f.italic;
+      out.push_back(r);
+    }
+  }
+  return out;
 }
 
 std::vector<std::string> Page::ReferencedImages() const {

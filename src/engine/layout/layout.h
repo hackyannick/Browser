@@ -46,6 +46,11 @@ class LayoutEngine {
   float Measure(const ComputedStyle* style, const std::string& text);
   FontMetrics Metrics(const ComputedStyle* style);
   FontProvider* fonts() { return fonts_; }
+  // Drops cached measurements (after web fonts were installed).
+  void ClearFontCaches() {
+    measureCache_.clear();
+    metricsCache_.clear();
+  }
 
  private:
   friend class TableLayout;

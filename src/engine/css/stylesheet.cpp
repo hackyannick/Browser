@@ -849,6 +849,61 @@ void ParseRules(const std::string& css, const std::vector<std::string>& media,
         ParseRules(body, m, st, false);
       } else if (name == "supports") {
         if (EvaluateSupports(prelude)) ParseRules(body, media, st, false);
+      } else if (name == "font-face") {
+        std::vector<Declaration> decls = ParseDeclarations(body);
+        FontFace face;
+        for (size_t k = 0; k < decls.size(); ++k) {
+          const Declaration& d = decls[k];
+          std::string v = Trim(d.value);
+          if (d.property == "font-family") {
+            if (v.size() >= 2 && (v[0] == '"' || v[0] == '\'')) v = v.substr(1, v.size() - 2);
+            face.family = AsciiLower(Trim(ReplaceAll(v, "\\", "")));
+          } else if (d.property == "font-weight") {
+            std::string w = AsciiLower(v);
+            long long n;
+            if (w == "bold") face.weight = 700;
+            else if (ParseInt(SplitWhitespace(w).empty() ? w : SplitWhitespace(w)[0], n)) face.weight = (int)n;
+          } else if (d.property == "unicode-range") {
+            face.coversLatin = false;
+            std::vector<std::string> ranges = SplitTopLevel(AsciiLower(v), ',');
+            for (size_t q = 0; q < ranges.size(); ++q) {
+              std::string r = Trim(ranges[q]);
+              if (!StartsWith(r, "u+")) continue;
+              r = r.substr(2);
+              unsigned long lo, hi;
+              size_t dash = r.find('-');
+              std::string a = dash == std::string::npos ? r : r.substr(0, dash);
+              std::string b = dash == std::string::npos ? r : r.substr(dash + 1);
+              if (a.find('?') != std::string::npos) {
+                b = ReplaceAll(a, "?", "f");
+                a = ReplaceAll(a, "?", "0");
+              }
+              lo = strtoul(a.c_str(), 0, 16);
+              hi = strtoul(b.c_str(), 0, 16);
+              if (lo <= 0x61 && hi >= 0x61) face.coversLatin = true;
+            }
+          } else if (d.property == "font-style") {
+            face.italic = StartsWithIgnoreCase(v, "italic") || StartsWithIgnoreCase(v, "oblique");
+          } else if (d.property == "src") {
+            std::vector<std::string> parts = SplitTopLevel(v, ',');
+            for (size_t q = 0; q < parts.size(); ++q) {
+              std::string part = Trim(parts[q]);
+              if (!StartsWithIgnoreCase(part, "url(")) continue;
+              size_t close = FindTopLevel(part, 4, ")");
+              std::string url = Trim(part.substr(4, close == std::string::npos ? std::string::npos : close - 4));
+              if (url.size() >= 2 && (url[0] == '"' || url[0] == '\'')) url = url.substr(1, url.size() - 2);
+              std::string format;
+              size_t f = AsciiLower(part).find("format(");
+              if (f != std::string::npos) {
+                format = AsciiLower(part.substr(f + 7));
+                format = format.substr(0, format.find(')'));
+                format = ReplaceAll(ReplaceAll(Trim(format), "\"", ""), "'", "");
+              }
+              face.sources.push_back(std::make_pair(url, format));
+            }
+          }
+        }
+        if (!face.family.empty() && !face.sources.empty()) st.sheet->fontFaces.push_back(face);
       } else if (name == "layer" || name == "scope" || name == "document" ||
                  name == "-moz-document" || name == "starting-style") {
         if (name != "starting-style") ParseRules(body, media, st, false);

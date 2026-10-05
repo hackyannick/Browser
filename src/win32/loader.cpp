@@ -7,6 +7,7 @@
 
 #include "base/strings.h"
 #include "image/svg.h"
+#include "text/fontfile.h"
 #include "win32/app.h"
 
 namespace kite {
@@ -28,6 +29,10 @@ unsigned __stdcall Worker(void* arg) {
       job->image.density = 2.0f;
     }
     std::string().swap(job->response.body);  // free the compressed data early
+  }
+  if (job->kind == FetchJob::kFont && job->response.ok && job->response.status < 400) {
+    if (FontToSfnt(job->response.body, job->fontData)) job->fontName = SfntFamilyName(job->fontData);
+    std::string().swap(job->response.body);
   }
   if (!PostMessageW(job->notify, WM_KITE_FETCHED, 0, (LPARAM)job)) delete job;
   return 0;

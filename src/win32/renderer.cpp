@@ -397,9 +397,10 @@ void Renderer::Paint(HDC hdc, const DisplayList& dl, int width, int height, floa
         // private use area; zero width / soft hyphen chars render as boxes).
         std::wstring clean;
         clean.reserve(w.size());
+        bool webFont = Fonts().IsWebFont(it.font);
         for (size_t k = 0; k < w.size(); ++k) {
           wchar_t c = w[k];
-          if ((c >= 0xE000 && c <= 0xF8FF) || c == 0x200B || c == 0x200C || c == 0x200D ||
+          if ((!webFont && c >= 0xE000 && c <= 0xF8FF) || c == 0x200B || c == 0x200C || c == 0x200D ||
               c == 0xFEFF || c == 0x00AD || c == 0x2060)
             continue;
           if (c >= 0xD800 && c <= 0xDBFF) {  // astral plane (emoji): not drawable

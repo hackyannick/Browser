@@ -64,9 +64,19 @@ struct StyleRule {
   StyleRule() : order(0) {}
 };
 
+struct FontFace {
+  std::string family;  // lower-case, unquoted
+  int weight;
+  bool italic;
+  bool coversLatin;  // unicode-range includes basic Latin letters
+  std::vector<std::pair<std::string, std::string> > sources;  // url, format
+  FontFace() : weight(400), italic(false), coversLatin(true) {}
+};
+
 class Stylesheet {
  public:
   std::vector<StyleRule> rules;
+  std::vector<FontFace> fontFaces;
   std::vector<std::string> imports;  // @import URLs (unresolved)
 };
 
