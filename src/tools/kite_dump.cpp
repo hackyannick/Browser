@@ -116,6 +116,8 @@ void WritePpm(const DisplayList& dl, int width, int height, const char* path) {
     switch (it.type) {
       case DisplayItem::kRect: fill(it.rect, it.color); break;
       case DisplayItem::kEllipse: fill(it.rect, it.color); break;
+      case DisplayItem::kRoundRect: if (it.ring == 0) fill(it.rect, it.color); break;
+      default: break;
       case DisplayItem::kText: {
         Color c = it.color;
         c.a = (unsigned char)(c.a * 0.55f);

@@ -352,6 +352,13 @@ void CopyProperty(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropFilter: d.blur = s.blur; break;
     case kPropClip: case kPropClipPath: d.clippedAway = s.clippedAway; break;
     case kPropBackgroundClip: d.backgroundClipText = s.backgroundClipText; break;
+    case kPropBorderTopLeftRadius: case kPropBorderTopRightRadius:
+    case kPropBorderBottomRightRadius: case kPropBorderBottomLeftRadius:
+      d.radius[id - kPropBorderTopLeftRadius] = s.radius[id - kPropBorderTopLeftRadius]; break;
+    case kPropBoxShadow: d.shadows = s.shadows; break;
+    case kPropTransform: case kPropTranslate:
+      d.translateX = s.translateX; d.translateY = s.translateY; d.transformHidden = s.transformHidden; break;
+    case kPropAnimationName: d.hasAnimation = s.hasAnimation; break;
     default: break;
   }
 }
@@ -438,7 +445,9 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
     if (un == "flex" || un == "flex-direction" || un == "flex-wrap" || un == "flex-flow" ||
         un == "flex-grow" || un == "flex-shrink" || un == "flex-basis" ||
         un == "justify-content" || un == "align-items" || un == "align-self" ||
-        un == "box-sizing" || un == "order" || un == "background-clip")
+        un == "box-sizing" || un == "order" || un == "background-clip" ||
+        un == "border-radius" || un == "box-shadow" || un == "transform" || un == "animation" ||
+        un == "animation-name")
       name = un;
     else
       return false;
@@ -738,6 +747,15 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
     size_t slash = value.find('/');
     if (slash != std::string::npos)
       out.push_back(std::make_pair((int)kPropGridTemplateColumns, Trim(value.substr(slash + 1))));
+  } else if (name == "border-radius") {
+    std::string first = value.substr(0, value.find('/'));
+    std::vector<std::string> r = SplitValueTokens(first);
+    if (global) r.assign(1, value);
+    FourSides(r, kPropBorderTopLeftRadius, kPropBorderTopRightRadius,
+              kPropBorderBottomRightRadius, kPropBorderBottomLeftRadius, out);
+  } else if (name == "animation") {
+    std::string l = AsciiLower(Trim(value));
+    out.push_back(std::make_pair((int)kPropAnimationName, std::string(l == "none" ? "none" : "anim")));
   } else if (name == "word-wrap") {
     out.push_back(std::make_pair((int)kPropOverflowWrap, value));
   } else if (name == "text-wrap" || name == "text-wrap-mode") {
@@ -1271,6 +1289,84 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
     }
     case kPropBackgroundClip:
       s.backgroundClipText = v == "text";
+      return;
+    case kPropBorderTopLeftRadius: case kPropBorderTopRightRadius:
+    case kPropBorderBottomRightRadius: case kPropBorderBottomLeftRadius: {
+      std::vector<std::string> t = SplitValueTokens(v);
+      if (!t.empty() && ParseLength(t[0], lc, len, false) && len.IsFixed())
+        s.radius[id - kPropBorderTopLeftRadius] = len;
+      return;
+    }
+    case kPropBoxShadow: {
+      s.shadows.clear();
+      if (v == "none") return;
+      std::vector<std::string> layers = SplitValueCommas(value);
+      for (size_t i = 0; i < layers.size(); ++i) {
+        std::vector<std::string> t = SplitValueTokens(layers[i]);
+        BoxShadow sh;
+        sh.color = Color(0, 0, 0, 128);
+        float nums[4] = {0, 0, 0, 0};
+        int n = 0;
+        for (size_t k = 0; k < t.size(); ++k) {
+          std::string tk = AsciiLower(t[k]);
+          if (tk == "inset") { sh.inset = true; continue; }
+          Length l;
+          if (n < 4 && ParseLength(tk, lc, l) && l.IsFixed() && !l.HasPercent()) {
+            nums[n++] = l.Resolve(0);
+            continue;
+          }
+          Color c;
+          if (ParseColor(tk, c, s.color)) sh.color = c;
+        }
+        if (n < 2) continue;
+        sh.x = nums[0];
+        sh.y = nums[1];
+        sh.blur = std::max(0.0f, nums[2]);
+        sh.spread = nums[3];
+        if (!sh.inset && sh.color.a > 0) s.shadows.push_back(sh);
+      }
+      return;
+    }
+    case kPropTranslate:
+    case kPropTransform: {
+      s.translateX = Length::Px(0);
+      s.translateY = Length::Px(0);
+      s.transformHidden = false;
+      if (v == "none") return;
+      std::string src = id == kPropTranslate ? "translate(" + v + ")" : v;
+      size_t p = 0;
+      while (p < src.size()) {
+        size_t open = src.find('(', p);
+        if (open == std::string::npos) break;
+        size_t close = src.find(')', open);
+        if (close == std::string::npos) break;
+        std::string fn = Trim(src.substr(p, open - p));
+        std::string args = src.substr(open + 1, close - open - 1);
+        for (size_t k = 0; k < args.size(); ++k)
+          if (args[k] == ',') args[k] = ' ';
+        std::vector<std::string> a = SplitValueTokens(args);
+        Length l1, l2;
+        if ((fn == "translate" || fn == "translate3d") && !a.empty()) {
+          if (ParseLength(a[0], lc, l1) && l1.IsFixed()) {
+            s.translateX.px += l1.px; s.translateX.pct += l1.pct;
+          }
+          if (a.size() > 1 && ParseLength(a[1], lc, l2) && l2.IsFixed()) {
+            s.translateY.px += l2.px; s.translateY.pct += l2.pct;
+          }
+        } else if (fn == "translatex" && !a.empty() && ParseLength(a[0], lc, l1) && l1.IsFixed()) {
+          s.translateX.px += l1.px; s.translateX.pct += l1.pct;
+        } else if (fn == "translatey" && !a.empty() && ParseLength(a[0], lc, l1) && l1.IsFixed()) {
+          s.translateY.px += l1.px; s.translateY.pct += l1.pct;
+        } else if ((fn == "scale" || fn == "scalex" || fn == "scaley") && !a.empty()) {
+          float f;
+          if (ParseNumber(a[0], f) && f == 0) s.transformHidden = true;
+        }
+        p = close + 1;
+      }
+      return;
+    }
+    case kPropAnimationName:
+      s.hasAnimation = v != "none" && !v.empty();
       return;
     case kPropClipPath:
       s.clippedAway = v == "inset(50%)" || v == "inset(100%)" || StartsWith(v, "circle(0") ||

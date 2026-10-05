@@ -1147,7 +1147,8 @@ void Browser::ScrollBy(float dx, float dy) {
 Node* Browser::NodeAt(int x, int y) {
   if (!current_ || !current_->rendered) return 0;
   float z = ZoomF();
-  return current_->page->HitTest((x + current_->scrollX) / z, (y + current_->scrollY) / z);
+  return current_->page->HitTest((x + current_->scrollX) / z, (y + current_->scrollY) / z,
+                                 current_->scrollX / z, current_->scrollY / z);
 }
 
 void Browser::SetStatus(const std::string& s) {

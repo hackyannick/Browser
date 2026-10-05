@@ -73,6 +73,7 @@ void Painter::Paint(LayoutBox* root, float viewportW, float viewportH, DisplayLi
   out_ = &out;
   out.Clear();
   clipStack_.clear();
+  fixedDepth_ = 0;
   skipBackgroundOf_ = 0;
   out.width = viewportW;
   out.height = 0;
@@ -223,13 +224,82 @@ void Painter::PaintBorders(const ComputedStyle* s, const Rect& r, const float w[
   }
 }
 
+void Painter::ResolveRadii(LayoutBox* b, const Rect& r, float out[4]) {
+  const ComputedStyle* s = b->style;
+  float lim = std::min(r.w, r.h) / 2;
+  for (int i = 0; i < 4; ++i) {
+    const Length& l = s->radius[i];
+    float v = l.IsFixed() ? l.px + l.pct * std::min(r.w, r.h) / 100 : 0;
+    out[i] = std::max(0.0f, std::min(v, lim));
+  }
+}
+
 void Painter::PaintBoxDecorations(LayoutBox* b, const Rect& r, float alpha, bool skipLeft,
                                   bool skipRight) {
   const ComputedStyle* s = b->style;
   float w[4] = {b->border.top, b->border.right, b->border.bottom, b->border.left};
   Rect pad(r.x + w[3], r.y + w[0], r.w - w[1] - w[3], r.h - w[0] - w[2]);
-  if (b != skipBackgroundOf_) PaintBackground(s, r, pad, alpha);
-  PaintBorders(s, r, w, alpha, skipLeft, skipRight);
+  float radii[4];
+  ResolveRadii(b, r, radii);
+  bool rounded = radii[0] > 0.5f || radii[1] > 0.5f || radii[2] > 0.5f || radii[3] > 0.5f;
+  // Outer box shadows (drawn first, below the box).
+  for (size_t i = s->shadows.size(); i-- > 0;) {
+    const BoxShadow& sh = s->shadows[i];
+    DisplayItem it;
+    it.type = DisplayItem::kShadow;
+    it.rect = Rect(r.x + sh.x - sh.spread, r.y + sh.y - sh.spread, r.w + 2 * sh.spread,
+                   r.h + 2 * sh.spread);
+    for (int k = 0; k < 4; ++k) it.radii[k] = radii[k] > 0 ? radii[k] + sh.spread : 0;
+    it.blur = sh.blur;
+    it.color = WithAlpha(sh.color, alpha);
+    out_->items.push_back(it);
+    Extend(Rect(it.rect.x - sh.blur, it.rect.y - sh.blur, it.rect.w + 2 * sh.blur, it.rect.h + 2 * sh.blur));
+  }
+  if (!rounded) {
+    if (b != skipBackgroundOf_) PaintBackground(s, r, pad, alpha);
+    PaintBorders(s, r, w, alpha, skipLeft, skipRight);
+    return;
+  }
+  if (b != skipBackgroundOf_ && !s->backgroundClipText) {
+    Color bg = WithAlpha(s->backgroundColor, alpha);
+    if (bg.a > 0) {
+      DisplayItem it;
+      it.type = DisplayItem::kRoundRect;
+      it.rect = r;
+      for (int k = 0; k < 4; ++k) it.radii[k] = radii[k];
+      it.color = bg;
+      out_->items.push_back(it);
+    }
+    if (!s->backgroundImage.empty()) {
+      size_t before = out_->items.size();
+      ComputedStyle tmp;
+      tmp.CopyFrom(*s);
+      tmp.backgroundColor = Color(0, 0, 0, 0);
+      PaintBackground(&tmp, r, pad, alpha);
+      for (size_t k = before; k < out_->items.size(); ++k)
+        for (int q = 0; q < 4; ++q) out_->items[k].radii[q] = radii[q];
+    }
+  }
+  // Borders: a uniform ring when all sides share a color, else square sides.
+  float maxW = std::max(std::max(w[0], w[1]), std::max(w[2], w[3]));
+  if (maxW <= 0) return;
+  Color c0 = s->border[0].colorIsCurrent ? s->color : s->border[0].color;
+  bool uniform = true;
+  for (int k = 1; k < 4; ++k) {
+    Color ck = s->border[k].colorIsCurrent ? s->color : s->border[k].color;
+    if (w[k] > 0 && ck != c0) uniform = false;
+  }
+  if (uniform) {
+    DisplayItem it;
+    it.type = DisplayItem::kRoundRect;
+    it.rect = r;
+    for (int k = 0; k < 4; ++k) it.radii[k] = radii[k];
+    it.ring = maxW;
+    it.color = WithAlpha(c0, alpha);
+    out_->items.push_back(it);
+  } else {
+    PaintBorders(s, r, w, alpha, skipLeft, skipRight);
+  }
 }
 
 void Painter::PaintMarker(LayoutBox* b, float ax, float ay, float alpha) {
@@ -274,8 +344,7 @@ void Painter::PaintLines(LayoutBox* b, float ax, float ay, float alpha) {
           PaintBackground(f.style, r, pad, alpha);
           PaintBorders(f.style, r, w, alpha, f.openLeft, f.openRight);
           if (f.node) {
-            HitRegion hr = {r, f.node};
-            out_->hits.push_back(hr);
+            AddHit(r, f.node);
           }
           break;
         }
@@ -284,8 +353,7 @@ void Painter::PaintLines(LayoutBox* b, float ax, float ay, float alpha) {
           Text(ax + f.x, ay + f.baseline, f.text, f.style, f.style->color, alpha, true);
           Rect r(ax + f.x, ay + lb.y, f.w, lb.h);
           if (f.node) {
-            HitRegion hr = {r, f.node};
-            out_->hits.push_back(hr);
+            AddHit(r, f.node);
           }
           Extend(Rect(ax + f.x, ay + f.y, f.w, f.h));
           break;
@@ -344,6 +412,7 @@ void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
       it.tileW = tw;
       it.tileH = th;
       it.alpha = alpha;
+      ResolveRadii(b, content, it.radii);
       out_->items.push_back(it);
     } else if (st == ImageProvider::kUnsupported || st == ImageProvider::kLoading) {
       // Nothing to draw (yet).
@@ -574,12 +643,24 @@ void Painter::PaintPositioned(LayoutBox* b, float ax, float ay, float alpha, boo
 
 void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   const ComputedStyle* s = b->style;
-  alpha *= s->opacity;
+  if (s->transformHidden) return;
+  // Content that starts invisible and is faded in by a CSS animation is
+  // shown directly (animations are not run).
+  alpha *= (s->hasAnimation && s->opacity < 0.05f) ? 1.0f : s->opacity;
   if (s->clippedAway) return;
   // Heavy blur (glow effects) cannot be rendered: show only a faint tint.
   if (s->blur >= 8) alpha *= std::max(0.08f, 1.0f - s->blur / 40.0f) * 0.4f;
   if (alpha < 0.02f) return;
   float ax = px + b->x + b->relX, ay = py + b->y + b->relY;
+  ax += s->translateX.px + s->translateX.pct * b->w / 100;
+  ay += s->translateY.px + s->translateY.pct * b->h / 100;
+  bool fixed = s->position == kPosFixed && b->isPositionedChild;
+  if (fixed) {
+    DisplayItem fi;
+    fi.type = DisplayItem::kBeginFixed;
+    out_->items.push_back(fi);
+    ++fixedDepth_;
+  }
   Rect r(ax, ay, b->w, b->h);
   if (s->visible && b->kind != LayoutBox::kTableRowGroup && b->kind != LayoutBox::kTableRow) {
     PaintBoxDecorations(b, r, alpha, false, false);
@@ -587,8 +668,7 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     FillRect(r, s->backgroundColor, alpha);
   }
   if (b->node && b->kind != LayoutBox::kTableRowGroup) {
-    HitRegion hr = {r, b->node};
-    out_->hits.push_back(hr);
+    AddHit(r, b->node);
   }
   Extend(r);
   if (s->display == kDisplayListItem && b->kind != LayoutBox::kReplaced) PaintMarker(b, ax, ay, alpha);
@@ -624,6 +704,12 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     it.type = DisplayItem::kPopClip;
     out_->items.push_back(it);
     clipStack_.pop_back();
+  }
+  if (fixed) {
+    DisplayItem fi;
+    fi.type = DisplayItem::kEndFixed;
+    out_->items.push_back(fi);
+    --fixedDepth_;
   }
 }
 

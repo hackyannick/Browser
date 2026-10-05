@@ -60,7 +60,9 @@ class Page {
   std::vector<std::string> ReferencedImages() const;
 
   // Hit testing in document coordinates.
-  Node* HitTest(float x, float y) const;
+  // (x, y) in document coordinates; scroll offset in CSS px is needed for
+  // position:fixed content.
+  Node* HitTest(float x, float y, float scrollX = 0, float scrollY = 0) const;
   static Node* LinkFor(Node* n);
   std::string LinkUrl(Node* link) const;  // resolved href
   Url ResolveUrl(const std::string& ref) const;

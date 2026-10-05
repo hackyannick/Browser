@@ -144,6 +144,8 @@ class Renderer {
   void FillRect(int x0, int y0, int x1, int y1, Color c);
   void DrawImage(const DisplayItem& it, float ox, float oy, float zoom);
   void DrawSvg(const DisplayItem& it, float ox, float oy, float zoom);
+  void FillCoverage(int x0, int y0, int x1, int y1, Color c,
+                    float (*cov)(float, float, const void*), const void* ctx);
   void Blit(const DecodedImage& img, int dx, int dy, const RECT& area, unsigned alpha);
   std::map<std::string, DecodedImage> svgCache_;
 

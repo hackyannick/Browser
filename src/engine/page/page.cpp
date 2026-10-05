@@ -221,10 +221,13 @@ std::vector<std::string> Page::ReferencedImages() const {
   return out;
 }
 
-Node* Page::HitTest(float x, float y) const {
+Node* Page::HitTest(float x, float y, float scrollX, float scrollY) const {
   const std::vector<HitRegion>& hits = display_.hits;
+  // Fixed content is on top of everything else.
   for (size_t i = hits.size(); i-- > 0;)
-    if (hits[i].rect.contains(x, y)) return hits[i].node;
+    if (hits[i].fixed && hits[i].rect.contains(x - scrollX, y - scrollY)) return hits[i].node;
+  for (size_t i = hits.size(); i-- > 0;)
+    if (!hits[i].fixed && hits[i].rect.contains(x, y)) return hits[i].node;
   return 0;
 }
 

@@ -102,7 +102,15 @@ namespace kite {
   X(Filter, "filter", false)                               \
   X(Clip, "clip", false)                                   \
   X(ClipPath, "clip-path", false)                          \
-  X(BackgroundClip, "background-clip", false)
+  X(BackgroundClip, "background-clip", false)              \
+  X(BorderTopLeftRadius, "border-top-left-radius", false)  \
+  X(BorderTopRightRadius, "border-top-right-radius", false) \
+  X(BorderBottomRightRadius, "border-bottom-right-radius", false) \
+  X(BorderBottomLeftRadius, "border-bottom-left-radius", false) \
+  X(BoxShadow, "box-shadow", false)                        \
+  X(Transform, "transform", false)                         \
+  X(Translate, "translate", false)                         \
+  X(AnimationName, "animation-name", false)
 
 enum PropertyId {
 #define KITE_PROP_ENUM(id, name, inh) kProp##id,

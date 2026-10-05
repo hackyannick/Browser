@@ -100,6 +100,13 @@ struct GridTrack {
   GridTrack() : kind(kAutoTrack), fr(0) {}
 };
 
+struct BoxShadow {
+  float x, y, blur, spread;
+  Color color;
+  bool inset;
+  BoxShadow() : x(0), y(0), blur(0), spread(0), inset(false) {}
+};
+
 struct ComputedStyle {
   ComputedStyle();
 
@@ -158,7 +165,12 @@ struct ComputedStyle {
   float opacity;
   float blur;
   bool clippedAway;
-  bool backgroundClipText;  // clip: rect(0 0 0 0) / clip-path: inset(50%)  // filter: blur() radius in px (approximated)
+  bool backgroundClipText;
+  Length radius[4];  // top-left, top-right, bottom-right, bottom-left
+  std::vector<BoxShadow> shadows;
+  Length translateX, translateY;  // transform: translate(...)
+  bool transformHidden;           // scale(0)
+  bool hasAnimation;  // clip: rect(0 0 0 0) / clip-path: inset(50%)  // filter: blur() radius in px (approximated)
   float aspectRatio;  // 0 = none
   ObjectFit objectFit;
 

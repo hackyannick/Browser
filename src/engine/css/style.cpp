@@ -60,6 +60,10 @@ ComputedStyle::ComputedStyle()
       blur(0),
       clippedAway(false),
       backgroundClipText(false),
+      translateX(Length::Px(0)),
+      translateY(Length::Px(0)),
+      transformHidden(false),
+      hasAnimation(false),
       aspectRatio(0),
       objectFit(kFitFill),
       flexDirection(kFlexRow),
@@ -81,6 +85,7 @@ ComputedStyle::ComputedStyle()
   for (int i = 0; i < 4; ++i) {
     margin[i] = Length::Px(0);
     padding[i] = Length::Px(0);
+    radius[i] = Length::Px(0);
   }
 }
 
@@ -182,6 +187,12 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   blur = o.blur;
   clippedAway = o.clippedAway;
   backgroundClipText = o.backgroundClipText;
+  for (int i = 0; i < 4; ++i) radius[i] = o.radius[i];
+  shadows = o.shadows;
+  translateX = o.translateX;
+  translateY = o.translateY;
+  transformHidden = o.transformHidden;
+  hasAnimation = o.hasAnimation;
   aspectRatio = o.aspectRatio;
   objectFit = o.objectFit;
   flexDirection = o.flexDirection;

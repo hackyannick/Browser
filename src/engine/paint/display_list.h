@@ -13,7 +13,8 @@
 namespace kite {
 
 struct DisplayItem {
-  enum Type { kRect, kText, kImage, kPushClip, kPopClip, kEllipse, kSvg };
+  enum Type { kRect, kText, kImage, kPushClip, kPopClip, kEllipse, kSvg, kRoundRect, kShadow,
+              kBeginFixed, kEndFixed };
   Type type;
   Rect rect;        // rect / ellipse bounds / image destination area / clip
   Color color;
@@ -32,16 +33,25 @@ struct DisplayItem {
   bool hollow;
   // Inline <svg> element (rasterized by the platform at device size).
   const Node* svgNode;
+  // Rounded rectangles / shadows / rounded images: corner radii (tl, tr,
+  // br, bl), ring width for borders (0 = filled), shadow blur radius.
+  float radii[4];
+  float ring;
+  float blur;
+  bool HasRadii() const { return radii[0] > 0 || radii[1] > 0 || radii[2] > 0 || radii[3] > 0; }
 
   DisplayItem()
       : type(kRect), baseline(0), underline(false), lineThrough(false), overline(false),
         tileX(0), tileY(0), tileW(0), tileH(0), repeatX(false), repeatY(false), alpha(1),
-        hollow(false), svgNode(0) {}
+        hollow(false), svgNode(0), ring(0), blur(0) {
+    radii[0] = radii[1] = radii[2] = radii[3] = 0;
+  }
 };
 
 struct HitRegion {
   Rect rect;
   Node* node;
+  bool fixed;  // position: fixed (viewport coordinates)
 };
 
 struct DisplayList {
@@ -88,6 +98,15 @@ class Painter {
   DisplayList* out_;
   LayoutBox* skipBackgroundOf_;
   std::vector<Rect> clipStack_;
+  int fixedDepth_;
+  void AddHit(const Rect& r, Node* n) {
+    HitRegion h;
+    h.rect = r;
+    h.node = n;
+    h.fixed = fixedDepth_ > 0;
+    out_->hits.push_back(h);
+  }
+  void ResolveRadii(LayoutBox* b, const Rect& r, float out[4]);
 };
 
 }  // namespace kite

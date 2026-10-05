@@ -81,6 +81,67 @@ void Renderer::ApplyClip() {
   DeleteObject(rgn);
 }
 
+// Signed distance from (px, py) to a rounded rectangle with per-corner radii
+// (tl, tr, br, bl); negative inside.
+static float RRectSdf(float px, float py, float x0, float y0, float x1, float y1, const float r[4]) {
+  float cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, hw = (x1 - x0) / 2, hh = (y1 - y0) / 2;
+  float dx = px - cx, dy = py - cy;
+  float rad = dx < 0 ? (dy < 0 ? r[0] : r[3]) : (dy < 0 ? r[1] : r[2]);
+  float qx = std::fabs(dx) - (hw - rad), qy = std::fabs(dy) - (hh - rad);
+  float mx = std::max(qx, 0.0f), my = std::max(qy, 0.0f);
+  return std::sqrt(mx * mx + my * my) + std::min(std::max(qx, qy), 0.0f) - rad;
+}
+
+static float Clamp01(float v) { return v < 0 ? 0 : (v > 1 ? 1 : v); }
+
+void Renderer::FillCoverage(int x0, int y0, int x1, int y1, Color c,
+                            float (*cov)(float, float, const void*), const void* ctx) {
+  x0 = std::max(x0, (int)clip_.left);
+  y0 = std::max(y0, (int)clip_.top);
+  x1 = std::min(x1, (int)clip_.right);
+  y1 = std::min(y1, (int)clip_.bottom);
+  for (int y = y0; y < y1; ++y) {
+    uint32_t* row = bits_ + (size_t)y * bw_;
+    for (int x = x0; x < x1; ++x) {
+      float a = cov(x + 0.5f, y + 0.5f, ctx);
+      if (a <= 0.002f) continue;
+      unsigned sa = (unsigned)(a * c.a + 0.5f);
+      if (sa == 0) continue;
+      unsigned ia = 255 - sa;
+      uint32_t d = row[x];
+      unsigned r = (c.r * sa + ((d >> 16) & 255) * ia) / 255;
+      unsigned g = (c.g * sa + ((d >> 8) & 255) * ia) / 255;
+      unsigned b = (c.b * sa + (d & 255) * ia) / 255;
+      row[x] = (r << 16) | (g << 8) | b;
+    }
+  }
+}
+
+namespace {
+struct RRectCtx {
+  float x0, y0, x1, y1, r[4];
+  float ring;     // > 0: only the border ring
+  float blur;     // > 0: soft shadow
+};
+float RRectCoverage(float px, float py, const void* p) {
+  const RRectCtx* c = (const RRectCtx*)p;
+  float sd = RRectSdf(px, py, c->x0, c->y0, c->x1, c->y1, c->r);
+  if (c->blur > 0) {
+    // Approximation of a Gaussian blurred edge.
+    float t = Clamp01(0.5f - sd / c->blur);
+    return t * t * (3 - 2 * t);
+  }
+  float a = Clamp01(0.5f - sd);
+  if (c->ring > 0) {
+    float ir[4];
+    for (int i = 0; i < 4; ++i) ir[i] = std::max(0.0f, c->r[i] - c->ring);
+    float si = RRectSdf(px, py, c->x0 + c->ring, c->y0 + c->ring, c->x1 - c->ring, c->y1 - c->ring, ir);
+    a -= Clamp01(0.5f - si);
+  }
+  return a;
+}
+}  // namespace
+
 void Renderer::DrawImage(const DisplayItem& it, float ox, float oy, float zoom) {
   int tw = (int)std::floor(it.tileW * zoom + 0.5f), th = (int)std::floor(it.tileH * zoom + 0.5f);
   if (tw <= 0 || th <= 0) return;
@@ -106,6 +167,16 @@ void Renderer::DrawImage(const DisplayItem& it, float ox, float oy, float zoom) 
   }
   if ((long long)(ix1 - ix0) * (iy1 - iy0) > 20000) return;
   unsigned alpha = (unsigned)(std::max(0.0f, std::min(1.0f, it.alpha)) * 255 + 0.5f);
+  bool rounded = it.HasRadii();
+  RRectCtx rc;
+  if (rounded) {
+    rc.x0 = it.rect.x * zoom - ox;
+    rc.y0 = it.rect.y * zoom - oy;
+    rc.x1 = it.rect.right() * zoom - ox;
+    rc.y1 = it.rect.bottom() * zoom - oy;
+    for (int k = 0; k < 4; ++k) rc.r[k] = it.radii[k] * zoom;
+    rc.ring = rc.blur = 0;
+  }
   for (int ty = iy0; ty < iy1; ++ty) {
     for (int tx = ix0; tx < ix1; ++tx) {
       int dx = tx0 + tx * tw, dy = ty0 + ty * th;
@@ -114,7 +185,7 @@ void Renderer::DrawImage(const DisplayItem& it, float ox, float oy, float zoom) 
       for (int y = y0; y < y1; ++y) {
         const uint32_t* src = &img->pixels[(size_t)(y - dy) * img->width + (x0 - dx)];
         uint32_t* dst = bits_ + (size_t)y * bw_ + x0;
-        if (!img->hasAlpha && alpha == 255) {
+        if (!img->hasAlpha && alpha == 255 && !rounded) {
           for (int x = x0; x < x1; ++x) *dst++ = *src++ & 0xFFFFFF;
           continue;
         }
@@ -122,11 +193,13 @@ void Renderer::DrawImage(const DisplayItem& it, float ox, float oy, float zoom) 
           uint32_t s = *src;
           unsigned sa = s >> 24;
           unsigned sr = (s >> 16) & 255, sg = (s >> 8) & 255, sb = s & 255;
-          if (alpha != 255) {
-            sa = sa * alpha / 255;
-            sr = sr * alpha / 255;
-            sg = sg * alpha / 255;
-            sb = sb * alpha / 255;
+          unsigned a2 = alpha;
+          if (rounded) a2 = (unsigned)(alpha * RRectCoverage(x + 0.5f, y + 0.5f, &rc));
+          if (a2 != 255) {
+            sa = sa * a2 / 255;
+            sr = sr * a2 / 255;
+            sg = sg * a2 / 255;
+            sb = sb * a2 / 255;
           }
           if (sa == 0) continue;
           uint32_t d = *dst;
@@ -200,9 +273,11 @@ void Renderer::Paint(HDC hdc, const DisplayList& dl, int width, int height, floa
   clipStack_.clear();
   ApplyClip();
   FillRect(0, 0, width, height, dl.background);
-  const float ox = scrollX, oy = scrollY;
-  const float viewTop = oy / zoom, viewBottom = (oy + height) / zoom;
-  const float viewLeft = ox / zoom, viewRight = (ox + width) / zoom;
+  // Inside position:fixed content the scroll offset is not applied.
+  float ox = scrollX, oy = scrollY;
+  float viewTop = oy / zoom, viewBottom = (oy + height) / zoom;
+  float viewLeft = ox / zoom, viewRight = (ox + width) / zoom;
+  int fixedDepth = 0;
   bool gdiDirty = false;
   for (size_t i = 0; i < dl.items.size(); ++i) {
     const DisplayItem& it = dl.items[i];
@@ -219,6 +294,16 @@ void Renderer::Paint(HDC hdc, const DisplayList& dl, int width, int height, floa
       ApplyClip();
       continue;
     }
+    if (it.type == DisplayItem::kBeginFixed || it.type == DisplayItem::kEndFixed) {
+      fixedDepth += it.type == DisplayItem::kBeginFixed ? 1 : -1;
+      ox = fixedDepth > 0 ? 0 : scrollX;
+      oy = fixedDepth > 0 ? 0 : scrollY;
+      viewTop = oy / zoom;
+      viewBottom = (oy + height) / zoom;
+      viewLeft = ox / zoom;
+      viewRight = (ox + width) / zoom;
+      continue;
+    }
     if (it.type == DisplayItem::kPopClip) {
       if (!clipStack_.empty()) {
         clip_ = clipStack_.back();
@@ -233,6 +318,10 @@ void Renderer::Paint(HDC hdc, const DisplayList& dl, int width, int height, floa
     if (it.type == DisplayItem::kText) {
       top = it.baseline - it.font.size * 1.2f;
       bottom = it.baseline + it.font.size * 0.5f;
+    }
+    if (it.type == DisplayItem::kShadow) {
+      top -= it.blur;
+      bottom += it.blur;
     }
     if (bottom < viewTop || top > viewBottom) continue;
     if (it.rect.right() < viewLeft || it.rect.x > viewRight) continue;
@@ -258,6 +347,26 @@ void Renderer::Paint(HDC hdc, const DisplayList& dl, int width, int height, floa
         }
         DrawImage(it, ox, oy, zoom);
         break;
+      case DisplayItem::kRoundRect:
+      case DisplayItem::kShadow: {
+        if (gdiDirty) {
+          GdiFlush();
+          gdiDirty = false;
+        }
+        RRectCtx rc;
+        rc.x0 = it.rect.x * zoom - ox;
+        rc.y0 = it.rect.y * zoom - oy;
+        rc.x1 = it.rect.right() * zoom - ox;
+        rc.y1 = it.rect.bottom() * zoom - oy;
+        for (int k = 0; k < 4; ++k) rc.r[k] = it.radii[k] * zoom;
+        rc.ring = it.ring * zoom;
+        rc.blur = it.type == DisplayItem::kShadow ? std::max(1.0f, it.blur * zoom) : 0;
+        int pad = (int)std::ceil(rc.blur) + 1;
+        FillCoverage((int)std::floor(rc.x0) - pad, (int)std::floor(rc.y0) - pad,
+                     (int)std::ceil(rc.x1) + pad, (int)std::ceil(rc.y1) + pad, it.color,
+                     RRectCoverage, &rc);
+        break;
+      }
       case DisplayItem::kSvg:
         if (gdiDirty) {
           GdiFlush();
