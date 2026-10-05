@@ -366,6 +366,13 @@ void CookieJar::Deserialize(const std::string& data) {
 // ---------------------------------------------------------------------------
 // Network
 
+bool ProxyConfig::UsedFor(const std::string& h) const {
+  if (!enabled()) return false;
+  std::string host = AsciiLower(h);
+  return !(host == "localhost" || StartsWith(host, "127.") || host == "[::1]" || host == "::1" ||
+           EndsWith(host, ".localhost"));
+}
+
 Network& Network::Get() {
   static Network* n = new Network;
   return *n;
@@ -522,6 +529,19 @@ void Network::FinishResponse(const Url& url, const std::string& method, FetchRes
   resp.ok = true;
 }
 
+namespace {
+
+bool ForbiddenHeader(const std::string& lower) {
+  static const char* const names[] = {"host", "connection", "content-length", "cookie", "cookie2", "date", "expect",
+                                      "keep-alive", "te", "trailer", "transfer-encoding", "upgrade", "via", "referer",
+                                      "user-agent", "accept-encoding", "content-type", "accept", "origin", 0};
+  for (int i = 0; names[i]; ++i)
+    if (lower == names[i]) return true;
+  return StartsWith(lower, "proxy-") || StartsWith(lower, "sec-") || lower.empty() || lower[0] == ':';
+}
+
+}  // namespace
+
 bool Network::FetchHttp2(const std::shared_ptr<Http2Connection>& conn, const Url& url, const FetchRequest& req,
                          const std::string& method, const std::string& body, FetchResponse& resp) {
   HeaderList h;
@@ -540,6 +560,10 @@ bool Network::FetchHttp2(const std::shared_ptr<Http2Connection>& conn, const Url
       ref.ClearFragment();
       h.push_back(std::make_pair(std::string("referer"), ref.Spec()));
     }
+  }
+  for (size_t i = 0; i < req.headers.size(); ++i) {
+    std::string name = AsciiLower(Trim(req.headers[i].first));
+    if (!ForbiddenHeader(name)) h.push_back(std::make_pair(name, req.headers[i].second));
   }
   if (method == "POST" || !body.empty()) {
     h.push_back(std::make_pair(std::string("content-type"),
@@ -573,6 +597,7 @@ FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const 
   resp.secure = tls;
   resp.protocol = "http/1.1";
   ProxyConfig proxy = this->proxy();
+  if (!proxy.UsedFor(url.host())) proxy = ProxyConfig();
   std::string ua = userAgent();
   std::string poolKey = url.host() + ":" + IntToString(url.EffectivePort()) + "|" +
                         (proxy.enabled() ? proxy.host + ":" + IntToString(proxy.port) : std::string());
@@ -698,6 +723,12 @@ FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const 
       ref.ClearFragment();
       r += "Referer: " + ref.Spec() + "\r\n";
     }
+  }
+  for (size_t i = 0; i < req.headers.size(); ++i) {
+    std::string name = AsciiLower(Trim(req.headers[i].first));
+    std::string value = req.headers[i].second;
+    if (!ForbiddenHeader(name) && value.find_first_of("\r\n") == std::string::npos)
+      r += req.headers[i].first + ": " + value + "\r\n";
   }
   if (method == "POST" || !body.empty()) {
     r += "Content-Type: " +

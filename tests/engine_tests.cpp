@@ -2,6 +2,11 @@
 // host). A tiny self-contained test harness keeps the dependencies at zero.
 #include <cmath>
 #include <cstdio>
+#ifdef _WIN32
+#include <windows.h>
+#else
+#include <unistd.h>
+#endif
 #include <map>
 #include <set>
 #include <string>
@@ -17,6 +22,7 @@
 #include "image/image.h"
 #include "image/svg.h"
 #include "net/hpack.h"
+#include "net/websocket.h"
 #include "script/storage.h"
 #include "net/http.h"
 #include "net/http2.h"
@@ -1118,6 +1124,48 @@ void TestWebComponents() {
   CHECK(h.ById("q")->layoutBox == 0);
 }
 
+void TestAsyncApis() {
+  // RFC 6455 section 1.3 handshake example, and a masked client frame.
+  CHECK_EQ(WebSocketClient::AcceptKey("dGhlIHNhbXBsZSBub25jZQ=="), "s3pPLMBiTxaQ9kYGzzhZRbK+xOo=");
+  const unsigned char mask[4] = {0x37, 0xfa, 0x21, 0x3d};
+  CHECK_EQ(Hex("8185" "37fa213d" "7f9f4d5158"), WebSocketClient::EncodeFrame(1, "Hello", mask));  // RFC 5.7
+  std::string big = WebSocketClient::EncodeFrame(2, std::string(300, 'x'), mask);
+  CHECK_EQ((unsigned char)big[1], 0xFEu);  // masked, 16-bit length
+  CHECK_EQ(big.size(), 2u + 2 + 4 + 300);
+
+  // A worker from a data: URL: messages both ways with structured clone.
+  ScriptPage p("<div id=out></div>");
+  p.page.script()->Execute(
+      "window.got = [];"
+      "var w = new Worker('data:text/javascript,' + encodeURIComponent("
+      "  'onmessage = function (e) { postMessage({ n: e.data.n * 2, m: new Map([[1, 2]]), s: new Intl.NumberFormat(\"de-DE\").format(1000) }); };'));"
+      "w.onmessage = function (e) { got.push(e.data.n + ':' + e.data.m.get(1) + ':' + e.data.s); };"
+      "w.postMessage({ n: 21 });",
+      "test", 0);
+  for (int i = 0; i < 200 && p.Eval("got.length") == "0"; ++i) {
+    p.page.script()->PumpAsync();
+#ifdef _WIN32
+    Sleep(10);
+#else
+    usleep(10000);
+#endif
+  }
+  CHECK_EQ(p.Eval("got.join()"), "42:2:1.000");
+  p.Eval("(w.terminate(), 1)");
+
+  // Shared APIs.
+  CHECK_EQ(p.Eval("new Intl.NumberFormat('en-US', { style: 'currency', currency: 'USD' }).format(1234.5)"), "$1,234.50");
+  CHECK_EQ(p.Eval("new Intl.DateTimeFormat('de-DE', { timeZone: 'UTC', dateStyle: 'long' }).format(new Date(Date.UTC(2024, 2, 1)))"),
+           "1. März 2024");
+  CHECK_EQ(p.Eval("new TextDecoder().decode(new Uint8Array([0xe2, 0x82, 0xac]))"), "\xE2\x82\xAC");
+  CHECK_EQ(p.Eval("btoa(String.fromCharCode(255)) + atob('/w==').charCodeAt(0)"), "/w==255");
+  p.page.script()->Execute(
+      "window.st = ''; new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('a')); c.enqueue(new TextEncoder().encode('b')); c.close(); } }))"
+      ".text().then(function (t) { st = t; });",
+      "test", 0);
+  CHECK_EQ(p.Eval("st"), "ab");
+}
+
 void TestHpack() {
   // RFC 7541 C.4: requests with Huffman coding and a shared dynamic table.
   HpackDecoder d;
@@ -1202,6 +1250,7 @@ int main() {
   TestModules();
   TestWebApis();
   TestWebComponents();
+  TestAsyncApis();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

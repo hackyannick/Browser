@@ -23,6 +23,9 @@
 #include "html/parser.h"
 #include "net/url.h"
 #include "page/page.h"
+#include "script/common.h"
+#include "script/worker.h"
+#include "net/websocket.h"
 
 extern "C" {
 #include "quickjs.h"
@@ -539,7 +542,7 @@ KITE_FN(Request) {
   Url u = Engine(ctx)->page()->ResolveUrl(Str(ctx, argv[1]));
   if (!u.valid()) return JS_NewInt32(ctx, 0);
   r.url = u.Spec();
-  r.body = Str(ctx, argv[2]);
+  if (!JsBytes(ctx, &argv[2], r.body)) r.body = Str(ctx, argv[2]);
   uint32_t n = 0;
   JSValue len = JS_GetPropertyStr(ctx, argv[3], "length");
   JS_ToUint32(ctx, &n, len);
@@ -1007,6 +1010,68 @@ std::string SerializeNode(const Node* n, bool outer) {
 }
 
 
+// Workers and WebSockets.
+KITE_FN(WorkerNew) {
+  ARGS_AT_LEAST(3);
+  ScriptEngine* e = Engine(ctx);
+  std::string spec = Str(ctx, argv[0]);
+  Url u = e->page()->ResolveUrl(spec);
+  if (!u.valid()) return JS_ThrowSyntaxError(ctx, "Failed to construct 'Worker': The URL '%s' is invalid.", spec.c_str());
+  return JS_NewInt32(ctx, e->StartWorker(u.Spec(), JS_ToBool(ctx, argv[1]) != 0, Str(ctx, argv[2])));
+}
+
+KITE_FN(WorkerPost) {
+  ARGS_AT_LEAST(2);
+  Engine(ctx)->PostToWorker(Int(ctx, argv[0]), Str(ctx, argv[1]));
+  return JS_UNDEFINED;
+}
+
+KITE_FN(WorkerEnd) {
+  ARGS_AT_LEAST(1);
+  Engine(ctx)->EndWorker(Int(ctx, argv[0]));
+  return JS_UNDEFINED;
+}
+
+KITE_FN(WsOpen) {
+  ARGS_AT_LEAST(2);
+  std::vector<std::string> protocols;
+  uint32_t n = 0;
+  JSValue len = JS_GetPropertyStr(ctx, argv[1], "length");
+  JS_ToUint32(ctx, &n, len);
+  JS_FreeValue(ctx, len);
+  for (uint32_t i = 0; i < n; ++i) {
+    JSValue v = JS_GetPropertyUint32(ctx, argv[1], i);
+    protocols.push_back(Str(ctx, v));
+    JS_FreeValue(ctx, v);
+  }
+  return JS_NewInt32(ctx, Engine(ctx)->OpenWebSocket(Str(ctx, argv[0]), protocols));
+}
+
+KITE_FN(WsSend) {
+  ARGS_AT_LEAST(3);
+  std::shared_ptr<WebSocketClient> ws = Engine(ctx)->socket(Int(ctx, argv[0]));
+  if (!ws) return JS_UNDEFINED;
+  std::string data;
+  bool binary = JS_ToBool(ctx, argv[2]) != 0;
+  if (binary) JsBytes(ctx, &argv[1], data);
+  else data = Str(ctx, argv[1]);
+  ws->Send(data, binary);
+  return JS_UNDEFINED;
+}
+
+KITE_FN(WsClose) {
+  ARGS_AT_LEAST(3);
+  std::shared_ptr<WebSocketClient> ws = Engine(ctx)->socket(Int(ctx, argv[0]));
+  if (ws) ws->Close(Int(ctx, argv[1]), Str(ctx, argv[2]));
+  return JS_UNDEFINED;
+}
+
+KITE_FN(WsBuffered) {
+  ARGS_AT_LEAST(1);
+  std::shared_ptr<WebSocketClient> ws = Engine(ctx)->socket(Int(ctx, argv[0]));
+  return JS_NewInt64(ctx, ws ? (int64_t)ws->bufferedAmount() : 0);
+}
+
 // Shadow DOM and custom elements.
 KITE_FN(AttachShadow) {
   ARGS_AT_LEAST(1);
@@ -1178,6 +1243,7 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
   JS_SetContextOpaque(ctx, this);
   rt_ = rt;
   ctx_ = ctx;
+  InstallCommonApis(ctx);
   JSValue global = JS_GetGlobalObject(ctx);
   JSValue k = JS_NewObject(ctx);
   struct Fn {
@@ -1207,6 +1273,8 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"cvPutData", CvPutData, 10}, {"cvDataUrl", CvDataUrl, 1}, {"imgLoad", ImgLoad, 1},
       {"imgSize", ImgSize, 1}, {"cvSvgPath", CvSvgPath, 2},
       {"storage", StorageOp, 4}, {"pushState", PushState, 3},
+      {"workerNew", WorkerNew, 3}, {"workerPost", WorkerPost, 2}, {"workerEnd", WorkerEnd, 1},
+      {"wsOpen", WsOpen, 2}, {"wsSend", WsSend, 3}, {"wsClose", WsClose, 3}, {"wsBuffered", WsBuffered, 1},
       {"attachShadow", AttachShadow, 1}, {"shadow", ShadowOf, 1}, {"host", HostOf, 1},
       {"setDefined", SetDefined, 1}, {"customs", Customs, 1}, {"connected", Connected, 1}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
   };
@@ -1219,6 +1287,10 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
 
 ScriptEngine::~ScriptEngine() {
   JSContext* ctx = (JSContext*)ctx_;
+  for (std::map<int, std::shared_ptr<WorkerThread> >::iterator it = workers_.begin(); it != workers_.end(); ++it)
+    it->second->Terminate();
+  for (std::map<int, std::shared_ptr<WebSocketClient> >::iterator it = sockets_.begin(); it != sockets_.end(); ++it)
+    it->second->Abort();
   for (std::map<std::string, ModuleRec>::iterator it = modules_.begin(); it != modules_.end(); ++it)
     if (it->second.value) {
       JS_FreeValue(ctx, *(JSValue*)it->second.value);
@@ -1565,7 +1637,7 @@ void ScriptEngine::DeliverResponse(int id, int status, const std::string& status
     JS_SetPropertyUint32(ctx, hdrs, (uint32_t)(i * 2 + 1), NewStr(ctx, headers[i].second));
   }
   JSValue args[6] = {JS_NewInt32(ctx, id), JS_NewInt32(ctx, status), NewStr(ctx, statusText),
-                     NewStr(ctx, body), hdrs, NewStr(ctx, finalUrl)};
+                     JS_NewArrayBufferCopy(ctx, (const uint8_t*)body.data(), body.size()), hdrs, NewStr(ctx, finalUrl)};
   JSValue arr[7];
   for (int i = 0; i < 6; ++i) arr[i] = args[i];
   arr[6] = JS_NewBool(ctx, networkError);
@@ -1784,6 +1856,92 @@ void* ScriptEngine::LoadModuleNow(const std::string& url) {
   JS_FreeValue(ctx, meta);
   JS_FreeValue(ctx, m);  // the context's module list keeps it
   return def;
+}
+
+// ---------------------------------------------------------------------------
+// Workers and WebSockets
+
+int ScriptEngine::StartWorker(const std::string& url, bool module, const std::string& name) {
+  int id = nextAsync_++;
+  workers_[id] = WorkerThread::Start(url, module, name);
+  return id;
+}
+
+void ScriptEngine::PostToWorker(int id, const std::string& data) {
+  std::map<int, std::shared_ptr<WorkerThread> >::iterator it = workers_.find(id);
+  if (it != workers_.end()) it->second->PostMessage(data);
+}
+
+void ScriptEngine::EndWorker(int id) {
+  std::map<int, std::shared_ptr<WorkerThread> >::iterator it = workers_.find(id);
+  if (it == workers_.end()) return;
+  it->second->Terminate();
+  workers_.erase(it);
+}
+
+int ScriptEngine::OpenWebSocket(const std::string& url, const std::vector<std::string>& protocols) {
+  int id = nextAsync_++;
+  sockets_[id] = WebSocketClient::Open(url, protocols, Url::Parse(page_->url()).Origin());
+  return id;
+}
+
+std::shared_ptr<WebSocketClient> ScriptEngine::socket(int id) {
+  std::map<int, std::shared_ptr<WebSocketClient> >::iterator it = sockets_.find(id);
+  return it == sockets_.end() ? std::shared_ptr<WebSocketClient>() : it->second;
+}
+
+bool ScriptEngine::PumpAsync() {
+  JSContext* ctx = (JSContext*)ctx_;
+  bool ran = false;
+  std::vector<int> ids;
+  for (std::map<int, std::shared_ptr<WorkerThread> >::iterator it = workers_.begin(); it != workers_.end(); ++it)
+    ids.push_back(it->first);
+  for (size_t i = 0; i < ids.size(); ++i) {
+    std::map<int, std::shared_ptr<WorkerThread> >::iterator it = workers_.find(ids[i]);
+    if (it == workers_.end()) continue;
+    std::shared_ptr<WorkerThread> w = it->second;
+    std::vector<WorkerThread::Event> events;
+    if (!w->TakeEvents(events)) continue;
+    for (size_t k = 0; k < events.size(); ++k) {
+      if (events[k].type == WorkerThread::Event::kLog) {
+        Log(events[k].data);
+        continue;
+      }
+      deadline_ = NowMs() + timeLimit_;
+      JSValue args[3] = {JS_NewInt32(ctx, ids[i]), JS_NewInt32(ctx, events[k].type == WorkerThread::Event::kMessage ? 0 : 1),
+                         NewStr(ctx, events[k].data)};
+      CallKiteHook(this, ctx, "__kiteWorkerEvent", 3, args, 0);
+      JS_FreeValue(ctx, args[2]);
+      RunJobs();
+      deadline_ = 0;
+      ran = true;
+    }
+  }
+  ids.clear();
+  for (std::map<int, std::shared_ptr<WebSocketClient> >::iterator it = sockets_.begin(); it != sockets_.end(); ++it)
+    ids.push_back(it->first);
+  for (size_t i = 0; i < ids.size(); ++i) {
+    std::shared_ptr<WebSocketClient> ws = socket(ids[i]);
+    if (!ws) continue;
+    std::vector<WebSocketClient::Event> events;
+    if (!ws->TakeEvents(events)) continue;
+    for (size_t k = 0; k < events.size(); ++k) {
+      const WebSocketClient::Event& ev = events[k];
+      if (ev.type == WebSocketClient::Event::kClose) sockets_.erase(ids[i]);
+      deadline_ = NowMs() + timeLimit_;
+      JSValue data = ev.binary ? JS_NewArrayBufferCopy(ctx, (const uint8_t*)ev.data.data(), ev.data.size())
+                               : NewStr(ctx, ev.data);
+      JSValue args[7] = {JS_NewInt32(ctx, ids[i]), JS_NewInt32(ctx, (int)ev.type), data, JS_NewBool(ctx, ev.binary),
+                         JS_NewInt32(ctx, ev.code), NewStr(ctx, ev.reason), JS_NewBool(ctx, ev.clean)};
+      CallKiteHook(this, ctx, "__kiteWsEvent", 7, args, 0);
+      JS_FreeValue(ctx, args[2]);
+      JS_FreeValue(ctx, args[5]);
+      RunJobs();
+      deadline_ = 0;
+      ran = true;
+    }
+  }
+  return ran;
 }
 
 }  // namespace kite

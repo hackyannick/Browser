@@ -179,6 +179,7 @@ class HeadlessHost : public ScriptHost {
 void RunScriptsHeadless(Page& page) {
   ScriptEngine* js = page.script();
   if (!js) return;
+  int asyncBudget = 4000;  // ms
   for (int round = 0; round < 50; ++round) {
     std::vector<std::string> pending = page.PendingScripts();
     for (size_t i = 0; i < pending.size(); ++i) {
@@ -199,19 +200,27 @@ void RunScriptsHeadless(Page& page) {
       fr.body = reqs[i].body;
       for (size_t k = 0; k < reqs[i].headers.size(); ++k)
         if (AsciiLower(reqs[i].headers[k].first) == "content-type") fr.contentType = reqs[i].headers[k].second;
+        else fr.headers.push_back(reqs[i].headers[k]);
       FetchResponse s = Network::Get().Fetch(fr);
       fprintf(stderr, "fetch() %s %s: %d\n", reqs[i].method.c_str(), reqs[i].url.c_str(), s.status);
       std::vector<std::pair<std::string, std::string> > hdrs;
       for (size_t k = 0; k < s.headers.size(); ++k)
         hdrs.push_back(std::make_pair(AsciiLower(s.headers[k].first), s.headers[k].second));
-      js->DeliverResponse(reqs[i].id, s.status, "", ConvertToUtf8(s.body, s.Charset().empty() ? "utf-8" : s.Charset()),
-                          hdrs, s.finalUrl, !s.ok);
+      js->DeliverResponse(reqs[i].id, s.status, "", s.body, hdrs, s.finalUrl, !s.ok);
     }
     int delay = js->NextTimerDelay();
     if (delay >= 0 && delay <= 200 && round < 49) {
       if (delay > 0) usleep(delay * 1000);
       js->RunDueTimers();
       ran = true;
+    }
+    // Workers and WebSockets: give them up to a few seconds in total.
+    if (js->HasAsync() && asyncBudget > 0) {
+      usleep(20000);
+      asyncBudget -= 20;
+      if (js->PumpAsync()) ran = true;
+      if (round == 48) round = 40;  // keep looping while they are active
+      continue;
     }
     if (!ran && reqs.empty() && pending.empty() && page.scriptsFinished()) break;
   }
@@ -224,7 +233,7 @@ int main(int argc, char** argv) {
   std::string target, ppm, caFile = "resources/cacert.pem";
   float width = 1024, height = 768;
   bool tree = true, dl = false, images = false, js = false;
-  std::string inspect;
+  std::string inspect, preScript;
   if (argc == 4 && std::string(argv[1]) == "--font") {
     // Converts a web font (WOFF/WOFF2) into a TrueType/OpenType file.
     std::string sfnt;
@@ -251,6 +260,7 @@ int main(int argc, char** argv) {
     else if (a == "--js") js = true;
     else if (a == "--no-h2") Network::Get().SetHttp2Enabled(false);
     else if (a == "--inspect" && i + 1 < argc) inspect = argv[++i];
+    else if (a == "--pre" && i + 1 < argc) preScript = argv[++i];  // JavaScript run before the page's scripts
     else target = a;
   }
   if (target.empty()) {
@@ -315,6 +325,17 @@ int main(int argc, char** argv) {
   page.Restyle(width, height);
   page.Relayout(width, height);
   if (js) {
+    if (!preScript.empty() && page.script()) {
+      FILE* f = fopen(preScript.c_str(), "rb");
+      std::string code;
+      if (f) {
+        char buf[4096];
+        size_t n;
+        while ((n = fread(buf, 1, sizeof buf, f)) > 0) code.append(buf, n);
+        fclose(f);
+      }
+      page.script()->Execute(code, preScript, 0);
+    }
     RunScriptsHeadless(page);
     page.ScriptMutated();
   }

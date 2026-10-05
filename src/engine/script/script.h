@@ -17,6 +17,8 @@ class Canvas2D;
 namespace kite {
 
 class Page;
+class WorkerThread;
+class WebSocketClient;
 
 // Services the platform provides to scripts.
 class ScriptHost {
@@ -96,6 +98,17 @@ class ScriptEngine {
   void NoteRejection(void* promise, const std::string& message);
   void ForgetRejection(void* promise);
 
+  // Web Workers and WebSockets run on background threads; PumpAsync
+  // delivers their events (call it when WakeUi() fired). Returns true if
+  // any script ran.
+  bool PumpAsync();
+  bool HasAsync() const { return !workers_.empty() || !sockets_.empty(); }
+  int StartWorker(const std::string& url, bool module, const std::string& name);
+  void PostToWorker(int id, const std::string& data);
+  void EndWorker(int id);
+  int OpenWebSocket(const std::string& url, const std::vector<std::string>& protocols);
+  std::shared_ptr<WebSocketClient> socket(int id);
+
   // Set when scripts changed the document or its styles.
   bool TakeDirty();
   // Set when a canvas bitmap changed (repaint only, no relayout).
@@ -141,6 +154,9 @@ class ScriptEngine {
   void ReportException();
   long long NowMs();
 
+  std::map<int, std::shared_ptr<WorkerThread> > workers_;
+  std::map<int, std::shared_ptr<WebSocketClient> > sockets_;
+  int nextAsync_ = 1;
   struct ModuleRec {
     int state = 0;  // 0 fetching, 1 compiled, -1 failed
     void* value = 0;  // JSValue* of the compiled module

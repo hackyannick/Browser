@@ -10,6 +10,7 @@
 #include <set>
 
 #include "base/strings.h"
+#include "base/thread.h"
 #include "html/parser.h"
 #include "image/svg.h"
 #include "page/page.h"
@@ -39,6 +40,8 @@ const UINT_PTR kTimerAnimBase = 0x4000;  // CSS animation frames (~30 fps)
 // Deferred navigation requested by a script (location.href = ..., form.submit()).
 const UINT WM_KITE_JSNAV = WM_APP + 3;
 const UINT WM_KITE_HISTGO = WM_APP + 4;  // history.go(delta) from a script
+const UINT WM_KITE_WAKE = WM_APP + 5;    // worker/WebSocket events are waiting
+const UINT_PTR kTimerWake = 4;
 const int kZoomLevels[] = {30, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300};
 
 struct HistoryEntry {
@@ -136,6 +139,7 @@ class Tab {
 
 class Browser {
  public:
+  HWND window() const { return hwnd_; }
   Browser() : hwnd_(0), tabs_(0), toolbar_(0), toolbar2_(0), address_(0), view_(0), status_(0),
               findBar_(0), findEdit_(0), findVisible_(false), current_(0), nextTabId_(1),
               zoom_(100), uiFont_(0), addressFont_(0), editCtl_(0), editNode_(0),
@@ -253,6 +257,12 @@ class Browser {
 };
 
 Browser* g_browser = 0;
+// Background threads (workers, WebSockets) wake the UI thread; repeated
+// wake-ups are folded into one message.
+volatile LONG g_wakePending = 0;
+void WakeBrowser(void* hwnd) {
+  if (InterlockedExchange((LONG*)&g_wakePending, 1) == 0) PostMessageW((HWND)hwnd, WM_KITE_WAKE, 0, 0);
+}
 
 std::string ShortTitle(const std::string& t, size_t max) {
   if (Utf8Length(t) <= max) return t;
@@ -984,10 +994,8 @@ void Browser::OnFetched(FetchJob* job) {
     std::vector<std::pair<std::string, std::string> > hdrs;
     for (size_t i = 0; i < r.headers.size(); ++i)
       hdrs.push_back(std::make_pair(AsciiLower(r.headers[i].first), r.headers[i].second));
-    std::string cs = r.Charset();
     BeginScript();
-    js->DeliverResponse(job->scriptRequestId, r.status, r.ok ? "OK" : "",
-                        ConvertToUtf8(r.body, cs.empty() ? "utf-8" : cs), hdrs,
+    js->DeliverResponse(job->scriptRequestId, r.status, r.ok ? "OK" : "", r.body, hdrs,
                         r.finalUrl.empty() ? job->request.url : r.finalUrl, !r.ok);
     EndScript(t);
     return;
@@ -2166,6 +2174,11 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         SetTimer(hwnd_, id, 100, 0);
         return 0;
       }
+      if (id == kTimerWake) {
+        KillTimer(hwnd_, kTimerWake);
+        PostMessageW(hwnd_, WM_KITE_WAKE, 0, 0);
+        return 0;
+      }
       if (id == kTimerImageAnim) {
         KillTimer(hwnd_, kTimerImageAnim);
         imageAnimArmed_ = false;
@@ -2214,6 +2227,21 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         return 0;
       }
       OnFetched((FetchJob*)l);
+      return 0;
+    case WM_KITE_WAKE:
+      InterlockedExchange((LONG*)&g_wakePending, 0);
+      if (scriptDepth_ > 0) {
+        SetTimer(hwnd_, kTimerWake, 50, 0);  // a script dialog is open: later
+        return 0;
+      }
+      for (size_t i = 0; i < tabList_.size(); ++i) {
+        Tab* t = tabList_[i];
+        ScriptEngine* js = t->page->script();
+        if (!js || !js->HasAsync()) continue;
+        BeginScript();
+        js->PumpAsync();
+        EndScript(t);
+      }
       return 0;
     case WM_KITE_HISTGO: {
       Tab* t = TabById((int)w);
@@ -2544,6 +2572,7 @@ void Browser::AfterScript(Tab* t) {
       std::string name = AsciiLower(r.headers[k].first);
       if (name == "content-type") job->request.contentType = r.headers[k].second;
       else if (name == "accept") job->request.accept = r.headers[k].second;
+      else job->request.headers.push_back(r.headers[k]);
     }
     StartFetch(job);
   }
@@ -2940,10 +2969,12 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
   return DefWindowProcW(h, m, w, l);
 }
 
+
 int RunBrowser(HINSTANCE inst, const std::wstring& startUrl) {
   static Browser browser;
   g_browser = &browser;
   if (!browser.Create(inst, startUrl)) return 1;
+  SetUiWaker(WakeBrowser, (void*)browser.window());
   return browser.Run();
 }
 

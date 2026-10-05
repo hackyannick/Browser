@@ -24,6 +24,9 @@ struct FetchRequest {
   std::string contentType;
   std::string referrer;
   std::string accept;
+  // Further request headers (from fetch()/XMLHttpRequest); forbidden ones
+  // (Host, Cookie, Content-Length, ...) are ignored.
+  std::vector<std::pair<std::string, std::string> > headers;
   std::shared_ptr<CancelToken> cancel;
   size_t maxBytes;
   // Optional progress callback (called from the worker thread).
@@ -54,6 +57,8 @@ struct ProxyConfig {
   int port;
   ProxyConfig() : port(0) {}
   bool enabled() const { return !host.empty() && port > 0; }
+  // Local addresses are always contacted directly.
+  bool UsedFor(const std::string& targetHost) const;
 };
 
 class CookieJar {
