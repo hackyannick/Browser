@@ -14,7 +14,9 @@
 #include "html/parser.h"
 #include "image/image.h"
 #include "image/svg.h"
+#include "net/hpack.h"
 #include "net/http.h"
+#include "net/http2.h"
 #include "net/url.h"
 #include "page/animation.h"
 #include "page/page.h"
@@ -857,6 +859,69 @@ void TestTransforms() {
   SetAnimationClockForTesting(0);
 }
 
+std::string Hex(const char* hex) {
+  std::string out;
+  for (const char* p = hex; p[0] && p[1]; p += 2) {
+    if (*p == ' ') {
+      --p;
+      continue;
+    }
+    unsigned v;
+    sscanf(p, "%2x", &v);
+    out += (char)v;
+  }
+  return out;
+}
+
+void TestHpack() {
+  // RFC 7541 C.4: requests with Huffman coding and a shared dynamic table.
+  HpackDecoder d;
+  HeaderList h;
+  std::string b1 = Hex("828684418cf1e3c2e5f23a6ba0ab90f4ff");
+  CHECK(d.Decode((const uint8_t*)b1.data(), b1.size(), h));
+  CHECK_EQ(h.size(), 4u);
+  if (h.size() == 4) {
+    CHECK_EQ(h[0].second, "GET");
+    CHECK_EQ(h[3].first, ":authority");
+    CHECK_EQ(h[3].second, "www.example.com");
+  }
+  h.clear();
+  std::string b2 = Hex("828684be5886a8eb10649cbf");
+  CHECK(d.Decode((const uint8_t*)b2.data(), b2.size(), h));
+  CHECK_EQ(h.size(), 5u);
+  if (h.size() == 5) {
+    CHECK_EQ(h[3].second, "www.example.com");  // from the dynamic table
+    CHECK_EQ(h[4].first, "cache-control");
+    CHECK_EQ(h[4].second, "no-cache");
+  }
+  h.clear();
+  std::string b3 = Hex("828785bf408825a849e95ba97d7f8925a849e95bb8e8b4bf");
+  CHECK(d.Decode((const uint8_t*)b3.data(), b3.size(), h));
+  CHECK_EQ(h.size(), 5u);
+  if (h.size() == 5) {
+    CHECK_EQ(h[1].second, "https");
+    CHECK_EQ(h[2].second, "/index.html");
+    CHECK_EQ(h[4].first, "custom-key");
+    CHECK_EQ(h[4].second, "custom-value");
+  }
+  // Static table end and the encoder round trip.
+  HeaderList in;
+  in.push_back(std::make_pair(std::string(":method"), std::string("POST")));
+  in.push_back(std::make_pair(std::string("vary"), std::string("x")));
+  in.push_back(std::make_pair(std::string("www-authenticate"), std::string("Basic")));
+  in.push_back(std::make_pair(std::string("x-kite"), std::string("\xC3\xA4")));
+  std::string enc = HpackEncode(in);
+  HpackDecoder d2;
+  HeaderList out;
+  CHECK(d2.Decode((const uint8_t*)enc.data(), enc.size(), out));
+  CHECK(out == in);
+  // Broken input is rejected.
+  std::string bad = Hex("ff");
+  HeaderList junk;
+  CHECK(!d2.Decode((const uint8_t*)bad.data(), bad.size(), junk));
+  CHECK_EQ(Http2Connection::Frame(4, 1, 0, "").size(), 9u);
+}
+
 }  // namespace
 
 int main() {
@@ -886,6 +951,7 @@ int main() {
   TestCanvas();
   TestAnimations();
   TestTransforms();
+  TestHpack();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

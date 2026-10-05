@@ -1,6 +1,11 @@
 #include "net/http.h"
+#include "net/http2.h"
 
+#include <algorithm>
 #include <cstdio>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
@@ -478,15 +483,147 @@ class Reader {
 
 }  // namespace
 
+namespace {
+
+// Clears the cancel token's socket when the request ends (the descriptor
+// number may be reused by a later connection).
+struct CancelSocketGuard {
+  CancelToken* token;
+  ~CancelSocketGuard() {
+    if (token) token->SetSocket(-1);
+  }
+};
+
+}  // namespace
+
+std::shared_ptr<Http2Connection> Network::PooledConnection(const std::string& key) {
+  MutexLock l(mu_);
+  std::shared_ptr<Http2Connection> best;
+  for (size_t i = 0; i < h2Pool_.size();) {
+    if (!h2Pool_[i].second->usable()) {
+      h2Pool_.erase(h2Pool_.begin() + i);
+      continue;
+    }
+    if (h2Pool_[i].first == key && h2Pool_[i].second->activeStreams() < 64 &&
+        (!best || h2Pool_[i].second->activeStreams() < best->activeStreams()))
+      best = h2Pool_[i].second;
+    ++i;
+  }
+  return best;
+}
+
+void Network::FinishResponse(const Url& url, const std::string& method, FetchResponse& resp, std::string& raw) {
+  for (size_t i = 0; i < resp.headers.size(); ++i)
+    if (EqualsIgnoreCase(resp.headers[i].first, "set-cookie"))
+      cookies_.SetFromHeader(url, resp.headers[i].second);
+  std::string ce = resp.Header("content-encoding");
+  if (!ce.empty() && !Inflate(raw, ce, resp.body)) resp.body = raw;
+  else if (ce.empty()) resp.body.swap(raw);
+  resp.ok = true;
+}
+
+bool Network::FetchHttp2(const std::shared_ptr<Http2Connection>& conn, const Url& url, const FetchRequest& req,
+                         const std::string& method, const std::string& body, FetchResponse& resp) {
+  HeaderList h;
+  h.push_back(std::make_pair(std::string("user-agent"), userAgent()));
+  h.push_back(std::make_pair(std::string("accept"),
+                             req.accept.empty() ? std::string("text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.8")
+                                                : req.accept));
+  h.push_back(std::make_pair(std::string("accept-language"), std::string("de-DE,de;q=0.9,en;q=0.7")));
+  h.push_back(std::make_pair(std::string("accept-encoding"), std::string("gzip, deflate, br")));
+  h.push_back(std::make_pair(std::string("upgrade-insecure-requests"), std::string("1")));
+  std::string cookie = cookies_.CookieHeader(url);
+  if (!cookie.empty()) h.push_back(std::make_pair(std::string("cookie"), cookie));
+  if (!req.referrer.empty()) {
+    Url ref = Url::Parse(req.referrer);
+    if (ref.valid()) {
+      ref.ClearFragment();
+      h.push_back(std::make_pair(std::string("referer"), ref.Spec()));
+    }
+  }
+  if (method == "POST" || !body.empty()) {
+    h.push_back(std::make_pair(std::string("content-type"),
+                               req.contentType.empty() ? std::string("application/x-www-form-urlencoded") : req.contentType));
+    h.push_back(std::make_pair(std::string("content-length"), IntToString((long long)body.size())));
+  }
+  Http2Result r = conn->Request(method, "https", url.HostPort(), url.PathAndQuery(), h, body, req.cancel.get(),
+                                req.maxBytes, req.progress, req.progressCtx);
+  resp.finalUrl = url.Spec();
+  resp.secure = true;
+  resp.protocol = "h2";
+  if (!r.ok) {
+    // Idempotent requests are repeated on a fresh connection.
+    if (r.retryable && (method == "GET" || method == "HEAD")) return false;
+    resp.error = r.error;
+    return true;
+  }
+  resp.status = r.status;
+  resp.headers.swap(r.headers);
+  bool hasBody = method != "HEAD" && resp.status != 204 && resp.status != 304;
+  if (!hasBody) r.body.clear();
+  FinishResponse(url, method, resp, r.body);
+  return true;
+}
+
 FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const std::string& method,
                                  const std::string& body) {
   FetchResponse resp;
   resp.finalUrl = url.Spec();
   bool tls = url.scheme() == "https";
   resp.secure = tls;
+  resp.protocol = "http/1.1";
   ProxyConfig proxy = this->proxy();
   std::string ua = userAgent();
-  TcpSocket sock;
+  std::string poolKey = url.host() + ":" + IntToString(url.EffectivePort()) + "|" +
+                        (proxy.enabled() ? proxy.host + ":" + IntToString(proxy.port) : std::string());
+  if (tls) {
+    for (int attempt = 0; attempt < 3; ++attempt) {
+      std::shared_ptr<Http2Connection> conn = PooledConnection(poolKey);
+      if (!conn) {
+        // A known HTTP/2 server with a connection being set up right now:
+        // wait for it instead of opening another one.
+        bool wait;
+        {
+          MutexLock l(mu_);
+          wait = std::find(h2Known_.begin(), h2Known_.end(), poolKey) != h2Known_.end() &&
+                 std::find(connecting_.begin(), connecting_.end(), poolKey) != connecting_.end();
+        }
+        for (int i = 0; wait && i < 500 && !conn; ++i) {
+          if (req.cancel && req.cancel->cancelled()) break;
+#ifdef _WIN32
+          Sleep(20);
+#else
+          usleep(20000);
+#endif
+          conn = PooledConnection(poolKey);
+          MutexLock l(mu_);
+          wait = std::find(connecting_.begin(), connecting_.end(), poolKey) != connecting_.end();
+        }
+        if (!conn) break;
+      }
+      if (FetchHttp2(conn, url, req, method, body, resp)) return resp;
+    }
+  }
+  struct ConnectingMark {
+    Network* net;
+    std::string key;
+    bool active;
+    void Done() {
+      if (!active) return;
+      active = false;
+      MutexLock l(net->mu_);
+      std::vector<std::string>::iterator it = std::find(net->connecting_.begin(), net->connecting_.end(), key);
+      if (it != net->connecting_.end()) net->connecting_.erase(it);
+    }
+    ~ConnectingMark() { Done(); }
+  } connecting = {this, poolKey, tls};
+  if (tls) {
+    MutexLock l(mu_);
+    connecting_.push_back(poolKey);
+  }
+  CancelSocketGuard cancelGuard = {req.cancel.get()};
+  std::unique_ptr<TcpSocket> sockOwner(new TcpSocket);
+  TcpSocket& sock = *sockOwner;
   std::string connectHost = proxy.enabled() ? proxy.host : url.host();
   int connectPort = proxy.enabled() ? proxy.port : url.EffectivePort();
   if (!sock.Connect(connectHost, connectPort, 20000, req.cancel.get())) {
@@ -516,9 +653,29 @@ FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const 
   std::unique_ptr<TlsStream> tlsStream;
   Stream* stream = &sock;
   if (tls) {
+    static const char* const kAlpn[] = {"h2", "http/1.1"};
     tlsStream.reset(new TlsStream(&sock));
-    if (!tlsStream->Handshake(url.host())) {
+    bool offerH2 = http2Enabled();
+    if (!tlsStream->Handshake(url.host(), offerH2 ? kAlpn : 0, offerH2 ? 2 : 0)) {
       resp.error = "Sichere Verbindung fehlgeschlagen: " + tlsStream->error();
+      return resp;
+    }
+    if (tlsStream->selectedProtocol() == "h2") {
+      // The connection is shared from now on: cancelling one request must
+      // not close the socket.
+      if (req.cancel) req.cancel->SetSocket(-1);
+      std::shared_ptr<Http2Connection> conn(new Http2Connection(std::move(sockOwner), std::move(tlsStream)));
+      if (!conn->Start()) {
+        resp.error = "HTTP/2-Verbindung fehlgeschlagen";
+        return resp;
+      }
+      {
+        MutexLock l(mu_);
+        h2Pool_.push_back(std::make_pair(poolKey, conn));
+        if (std::find(h2Known_.begin(), h2Known_.end(), poolKey) == h2Known_.end()) h2Known_.push_back(poolKey);
+      }
+      connecting.Done();
+      if (!FetchHttp2(conn, url, req, method, body, resp)) resp.error = "HTTP/2-Verbindung abgelehnt";
       return resp;
     }
     stream = tlsStream.get();
@@ -586,10 +743,6 @@ FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const 
     if (resp.status >= 100 && resp.status < 200) continue;
     break;
   }
-  for (size_t i = 0; i < resp.headers.size(); ++i)
-    if (EqualsIgnoreCase(resp.headers[i].first, "set-cookie"))
-      cookies_.SetFromHeader(url, resp.headers[i].second);
-
   std::string raw;
   bool hasBody = method != "HEAD" && resp.status != 204 && resp.status != 304;
   std::string te = AsciiLower(resp.Header("transfer-encoding"));
@@ -634,10 +787,7 @@ FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const 
     resp.error = "Abgebrochen";
     return resp;
   }
-  std::string ce = resp.Header("content-encoding");
-  if (!ce.empty() && !Inflate(raw, ce, resp.body)) resp.body = raw;
-  else if (ce.empty()) resp.body.swap(raw);
-  resp.ok = true;
+  FinishResponse(url, method, resp, raw);
   (void)StatusText;
   return resp;
 }

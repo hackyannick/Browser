@@ -33,8 +33,9 @@ struct Settings {
   int proxyPort;
   bool loadImages;
   bool javaScript;
+  bool http2;                 // kite.ini: Http2=0 disables HTTP/2
   int defaultZoom;            // percent
-  Settings() : proxyPort(0), loadImages(true), javaScript(true), defaultZoom(100) {}
+  Settings() : proxyPort(0), loadImages(true), javaScript(true), http2(true), defaultZoom(100) {}
 };
 
 class App {

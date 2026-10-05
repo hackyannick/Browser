@@ -42,6 +42,8 @@ class TcpSocket : public Stream {
   int Read(char* buf, int len);
   bool WriteAll(const char* buf, int len);
   void Close();
+  // True when data (or EOF) is available within |timeoutMs|.
+  bool WaitReadable(int timeoutMs);
   std::string error() const { return error_; }
   long long handle() const { return fd_; }
 
@@ -55,9 +57,14 @@ class TlsStream : public Stream {
  public:
   explicit TlsStream(TcpSocket* sock);
   ~TlsStream();
-  bool Handshake(const std::string& host);
+  // |alpn|: protocols offered via ALPN (e.g. "h2", "http/1.1"), or null.
+  bool Handshake(const std::string& host, const char* const* alpn = 0, int alpnCount = 0);
+  // Protocol chosen by the server ("" without ALPN).
+  std::string selectedProtocol() const;
   int Read(char* buf, int len);
   bool WriteAll(const char* buf, int len);
+  // True when decrypted data is buffered or the socket becomes readable.
+  bool WaitReadable(int timeoutMs);
   std::string error() const { return error_; }
 
  private:

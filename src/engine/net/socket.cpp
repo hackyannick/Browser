@@ -185,6 +185,22 @@ bool TcpSocket::Connect(const std::string& host, int port, int timeoutMs, Cancel
   return true;
 }
 
+bool TcpSocket::WaitReadable(int timeoutMs) {
+  if (fd_ < 0) return true;  // Read reports the error
+  fd_set rset;
+  FD_ZERO(&rset);
+#ifdef _WIN32
+  FD_SET((SOCKET)fd_, &rset);
+#else
+  FD_SET((int)fd_, &rset);
+#endif
+  struct timeval tv;
+  tv.tv_sec = timeoutMs / 1000;
+  tv.tv_usec = (timeoutMs % 1000) * 1000;
+  int r = select((int)fd_ + 1, &rset, 0, 0, &tv);
+  return r != 0;  // ready, or an error that Read will report
+}
+
 int TcpSocket::Read(char* buf, int len) {
   if (fd_ < 0) return -1;
   for (;;) {

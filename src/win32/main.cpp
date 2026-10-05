@@ -83,6 +83,7 @@ void App::Init(HINSTANCE inst) {
   if (ParseInt(IniGet(L"ProxyPort", "0"), v)) settings.proxyPort = (int)v;
   settings.loadImages = IniGet(L"LoadImages", "1") != "0";
   settings.javaScript = IniGet(L"JavaScript", "1") != "0";
+  settings.http2 = IniGet(L"Http2", "1") != "0";
   if (ParseInt(IniGet(L"DefaultZoom", "100"), v)) settings.defaultZoom = (int)v;
 
   NetInit();
@@ -106,6 +107,7 @@ void App::ApplyNetworkSettings() {
   pc.host = settings.proxyHost;
   pc.port = settings.proxyPort;
   Network::Get().SetProxy(pc);
+  Network::Get().SetHttp2Enabled(settings.http2);
 }
 
 void App::SaveSettings() {
@@ -115,6 +117,7 @@ void App::SaveSettings() {
   IniSet(L"ProxyPort", IntToString(settings.proxyPort));
   IniSet(L"LoadImages", settings.loadImages ? "1" : "0");
   IniSet(L"JavaScript", settings.javaScript ? "1" : "0");
+  IniSet(L"Http2", settings.http2 ? "1" : "0");
   IniSet(L"DefaultZoom", IntToString(settings.defaultZoom));
 }
 

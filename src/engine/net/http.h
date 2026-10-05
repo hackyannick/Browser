@@ -9,6 +9,10 @@
 
 #include "base/mutex.h"
 #include "net/socket.h"
+
+namespace kite {
+class Http2Connection;
+}
 #include "net/url.h"
 
 namespace kite {
@@ -36,6 +40,7 @@ struct FetchResponse {
   std::vector<std::pair<std::string, std::string> > headers;
   std::string body;      // decoded (gzip/deflate removed)
   bool secure;           // delivered over TLS
+  std::string protocol;  // "http/1.1" or "h2"
 
   FetchResponse() : ok(false), status(0), secure(false) {}
   std::string Header(const std::string& name) const;
@@ -80,12 +85,25 @@ class Network {
   void SetUserAgent(const std::string& ua) { MutexLock l(mu_); userAgent_ = ua; }
   std::string userAgent() { MutexLock l(mu_); return userAgent_; }
   CookieJar& cookies() { return cookies_; }
+  // HTTP/2 via ALPN (on by default).
+  void SetHttp2Enabled(bool on) { MutexLock l(mu_); http2_ = on; }
+  bool http2Enabled() { MutexLock l(mu_); return http2_; }
 
  private:
   Network();
   FetchResponse FetchHttp(const Url& url, const FetchRequest& req, const std::string& method,
                           const std::string& body);
   FetchResponse FetchFile(const Url& url);
+  // HTTP/2: reuses a pooled connection. Returns false if the request could
+  // not be processed and should be retried on a new connection.
+  bool FetchHttp2(const std::shared_ptr<Http2Connection>& conn, const Url& url, const FetchRequest& req,
+                  const std::string& method, const std::string& body, FetchResponse& resp);
+  std::shared_ptr<Http2Connection> PooledConnection(const std::string& key);
+  void FinishResponse(const Url& url, const std::string& method, FetchResponse& resp, std::string& raw);
+  std::vector<std::pair<std::string, std::shared_ptr<Http2Connection> > > h2Pool_;
+  bool http2_ = true;
+  std::vector<std::string> h2Known_;          // origins that negotiated h2
+  std::vector<std::string> connecting_;       // origins with a connection being set up
   FetchResponse FetchData(const Url& url);
 
   Mutex mu_;

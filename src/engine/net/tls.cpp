@@ -190,7 +190,7 @@ static std::string TlsErrorText(int err) {
   }
 }
 
-bool TlsStream::Handshake(const std::string& host) {
+bool TlsStream::Handshake(const std::string& host, const char* const* alpn, int alpnCount) {
   // Anchors are loaded once at startup and read-only afterwards.
   const br_x509_trust_anchor* tas;
   size_t count;
@@ -205,6 +205,7 @@ bool TlsStream::Handshake(const std::string& host) {
   impl_->dedup.inner = &impl_->xc.vtable;
   br_ssl_engine_set_x509(&impl_->sc.eng, &impl_->dedup.vtable);
   br_ssl_engine_set_buffer(&impl_->sc.eng, &impl_->iobuf[0], impl_->iobuf.size(), 1);
+  if (alpn && alpnCount > 0) br_ssl_engine_set_protocol_names(&impl_->sc.eng, (const char**)alpn, alpnCount);
   if (!br_ssl_client_reset(&impl_->sc, host.c_str(), 0)) {
     error_ = "TLS-Initialisierung fehlgeschlagen";
     return false;
@@ -247,6 +248,17 @@ bool TlsStream::Handshake(const std::string& host) {
     }
     if (state & BR_SSL_RECVAPP) return true;
   }
+}
+
+std::string TlsStream::selectedProtocol() const {
+  const char* p = br_ssl_engine_get_selected_protocol(const_cast<br_ssl_engine_context*>(&impl_->sc.eng));
+  return p ? p : "";
+}
+
+bool TlsStream::WaitReadable(int timeoutMs) {
+  unsigned state = br_ssl_engine_current_state(&impl_->sc.eng);
+  if (state & (BR_SSL_RECVAPP | BR_SSL_CLOSED)) return true;
+  return sock_->WaitReadable(timeoutMs);
 }
 
 int TlsStream::Read(char* buf, int len) {
