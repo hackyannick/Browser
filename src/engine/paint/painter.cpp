@@ -4,6 +4,7 @@
 #include "base/strings.h"
 #include "layout/layout.h"
 #include "paint/display_list.h"
+#include "canvas/canvas.h"
 
 namespace kite {
 
@@ -386,6 +387,20 @@ void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
   FontMetrics fm = engine_->Metrics(s);
   float textBaseline = content.y + (content.h - (fm.ascent + fm.descent)) / 2 + fm.ascent;
   Color gray(128, 128, 128);
+  if (tag == "canvas" && el->canvasId) {
+    DisplayItem it;
+    it.type = DisplayItem::kImage;
+    it.imageUrl = CanvasUrl(el->canvasId);
+    it.rect = content;
+    it.tileX = content.x;
+    it.tileY = content.y;
+    it.tileW = content.w;
+    it.tileH = content.h;
+    it.alpha = alpha;
+    ResolveRadii(b, content, it.radii);
+    out_->items.push_back(it);
+    return;
+  }
   if (tag == "img" || tag == "video" || (tag == "input" && AsciiLower(el->Attr("type")) == "image")) {
     int iw = 0, ih = 0;
     ImageProvider::State st = b->imageUrl.empty() || !images_

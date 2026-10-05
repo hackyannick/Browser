@@ -1,6 +1,7 @@
 #include "win32/app.h"
 
 #include <cmath>
+#include <cstring>
 
 #include "base/strings.h"
 
@@ -149,12 +150,12 @@ bool GdiFonts::RegisterWebFont(const std::string& cssFamily, int weight, bool it
   return true;
 }
 
-HFONT GdiFonts::Get(const FontDesc& f, float scale) {
+HFONT GdiFonts::Get(const FontDesc& f, float scale, bool grayscale) {
   int px = (int)std::floor(f.size * scale + 0.5f);
   if (px < 1) px = 1;
   if (px > 400) px = 400;
   std::string key = f.family + "|" + IntToString(px) + "|" + IntToString(f.weight) + "|" +
-                    (f.italic ? "i" : "n");
+                    (f.italic ? "i" : "n") + (grayscale ? "|g" : "");
   std::map<std::string, HFONT>::iterator it = fonts_.find(key);
   if (it != fonts_.end()) return it->second;
   if (fonts_.size() > 400) {
@@ -164,12 +165,60 @@ HFONT GdiFonts::Get(const FontDesc& f, float scale) {
   const WebFont* web = FindWebFont(f);
   std::wstring face = web ? web->face : ResolveFamily(f.family);
   // ClearType exists from Windows XP on; Windows 2000 gets standard smoothing.
-  DWORD quality = App::Get().isXpOrLater ? 5 /* CLEARTYPE_QUALITY */ : ANTIALIASED_QUALITY;
+  DWORD quality = App::Get().isXpOrLater && !grayscale ? 5 /* CLEARTYPE_QUALITY */ : ANTIALIASED_QUALITY;
   HFONT h = CreateFontW(-px, 0, 0, 0, f.weight >= 600 ? FW_BOLD : (f.weight <= 300 ? FW_LIGHT : FW_NORMAL),
                         f.italic, 0, 0, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                         quality, DEFAULT_PITCH | FF_DONTCARE, face.c_str());
   fonts_[key] = h;
   return h;
+}
+
+bool GdiFonts::RasterizeText(const FontDesc& f, const std::string& utf8, TextMask& out) {
+  std::wstring w = Widen(utf8);
+  if (w.empty()) return false;
+  HFONT font = Get(f, 1.0f, true);
+  HGDIOBJ oldFont = SelectObject(dc_, font);
+  SIZE sz = {0, 0};
+  GetTextExtentPoint32W(dc_, w.c_str(), (int)w.size(), &sz);
+  TEXTMETRICW tm;
+  GetTextMetricsW(dc_, &tm);
+  SelectObject(dc_, oldFont);
+  const int pad = 2;
+  int width = sz.cx + tm.tmOverhang + (f.italic ? tm.tmHeight / 3 : 0) + pad;
+  int height = tm.tmHeight + 2 * pad;
+  if (width <= 0 || height <= 0 || (long long)width * height > 16 * 1024 * 1024) return false;
+  BITMAPINFO bi;
+  ZeroMemory(&bi, sizeof bi);
+  bi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+  bi.bmiHeader.biWidth = width;
+  bi.bmiHeader.biHeight = -height;  // top-down
+  bi.bmiHeader.biPlanes = 1;
+  bi.bmiHeader.biBitCount = 32;
+  bi.bmiHeader.biCompression = BI_RGB;
+  void* bits = 0;
+  HBITMAP bmp = CreateDIBSection(dc_, &bi, DIB_RGB_COLORS, &bits, 0, 0);
+  if (!bmp || !bits) return false;
+  HGDIOBJ oldBmp = SelectObject(dc_, bmp);
+  oldFont = SelectObject(dc_, font);
+  memset(bits, 0, (size_t)width * height * 4);
+  SetBkMode(dc_, TRANSPARENT);
+  SetTextColor(dc_, RGB(255, 255, 255));
+  SetTextAlign(dc_, TA_LEFT | TA_TOP);
+  ExtTextOutW(dc_, 0, pad, 0, 0, w.c_str(), (UINT)w.size(), 0);
+  GdiFlush();
+  out.width = width;
+  out.height = height;
+  out.baseline = (float)(pad + tm.tmAscent);
+  out.alpha.resize((size_t)width * height);
+  const uint32_t* px = (const uint32_t*)bits;
+  for (size_t i = 0; i < out.alpha.size(); ++i) {
+    uint32_t p = px[i];
+    out.alpha[i] = (uint8_t)((((p >> 16) & 255) + ((p >> 8) & 255) + (p & 255)) / 3);
+  }
+  SelectObject(dc_, oldFont);
+  SelectObject(dc_, oldBmp);
+  DeleteObject(bmp);
+  return true;
 }
 
 FontMetrics GdiFonts::Metrics(const FontDesc& f) {

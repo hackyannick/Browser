@@ -616,6 +616,69 @@ void TestScript() {
   CHECK_EQ(p.Eval("1+1"), "2");
 }
 
+void TestCanvas() {
+  ScriptPage p("<html><body><div id=out></div><canvas id=c width=100 height=50></canvas></body></html>");
+  // px(x, y) -> "r,g,b,a"
+  p.page.script()->Execute(
+      "var c = document.getElementById('c'), g = c.getContext('2d');"
+      "function px(x, y) { return Array.from(g.getImageData(x, y, 1, 1).data).join(); }",
+      "setup", 0);
+  CHECK_EQ(p.Eval("g === c.getContext('2d') && c.getContext('webgl') === null"), "true");
+  CHECK_EQ(p.Eval("px(5, 5)"), "0,0,0,0");
+  CHECK_EQ(p.Eval("(g.fillStyle = 'red', g.fillRect(0, 0, 10, 10), px(5, 5))"), "255,0,0,255");
+  CHECK_EQ(p.Eval("px(10, 5)"), "0,0,0,0");
+  // Semi-transparent blue over red.
+  CHECK_EQ(p.Eval("(g.fillStyle = 'rgba(0,0,255,0.5)', g.fillRect(0, 0, 10, 10), px(5, 5))"), "127,0,128,255");
+  // Paths: a filled circle and a stroked line.
+  CHECK_EQ(p.Eval("(g.fillStyle = '#00ff00', g.beginPath(), g.arc(50, 25, 10, 0, Math.PI * 2), g.fill(), px(50, 25))"),
+           "0,255,0,255");
+  CHECK_EQ(p.Eval("px(50, 10)"), "0,0,0,0");
+  CHECK_EQ(p.Eval("g.isPointInPath(50, 25) + ',' + g.isPointInPath(70, 25)"), "true,false");
+  CHECK_EQ(p.Eval("(g.strokeStyle = 'black', g.lineWidth = 4, g.beginPath(), g.moveTo(20, 40), g.lineTo(90, 40),"
+                  " g.stroke(), px(60, 40))"),
+           "0,0,0,255");
+  CHECK_EQ(p.Eval("px(60, 45)"), "0,0,0,0");
+  // Transforms, save/restore.
+  CHECK_EQ(p.Eval("(g.save(), g.translate(80, 0), g.scale(2, 2), g.fillStyle = 'blue', g.fillRect(0, 0, 5, 5),"
+                  " g.restore(), px(89, 9) + '|' + g.fillStyle + '|' + g.getTransform().e)"),
+           "0,0,255,255|#00ff00|0");
+  // clearRect, globalAlpha, composite operation.
+  CHECK_EQ(p.Eval("(g.clearRect(0, 0, 10, 10), px(5, 5))"), "0,0,0,0");
+  CHECK_EQ(p.Eval("(g.fillStyle = 'white', g.fillRect(0, 0, 4, 4), g.globalCompositeOperation = 'destination-out',"
+                  " g.fillRect(0, 0, 2, 2), g.globalCompositeOperation = 'source-over', px(1, 1) + '|' + px(3, 3))"),
+           "0,0,0,0|255,255,255,255");
+  // Gradients.
+  CHECK_EQ(p.Eval("(function(){ var gr = g.createLinearGradient(0, 0, 100, 0); gr.addColorStop(0, 'black');"
+                  " gr.addColorStop(1, 'white'); g.fillStyle = gr; g.fillRect(0, 45, 100, 5);"
+                  " var a = g.getImageData(0, 47, 100, 1).data; return a[0] < 10 && a[99*4] > 245 && a[50*4] > 110 && a[50*4] < 145; })()"),
+           "true");
+  // Image data round trip and drawing a canvas onto another.
+  CHECK_EQ(p.Eval("(function(){ var d = g.createImageData(2, 2); for (var i = 0; i < 16; i += 4) { d.data[i] = 10;"
+                  " d.data[i + 3] = 255; } g.putImageData(d, 30, 0); return px(31, 1); })()"),
+           "10,0,0,255");
+  CHECK_EQ(p.Eval("(function(){ var o = document.createElement('canvas'); o.width = 20; o.height = 20;"
+                  " var h = o.getContext('2d'); h.drawImage(c, 30, 0, 2, 2, 0, 0, 20, 20);"
+                  " return Array.from(h.getImageData(10, 10, 1, 1).data).join(); })()"),
+           "10,0,0,255");
+  // Path2D (also from SVG path data), dashes, PNG export.
+  CHECK_EQ(p.Eval("(function(){ g.clearRect(0, 0, 100, 50); var q = new Path2D('M0 0H20V20H0Z'); g.fillStyle = 'red';"
+                  " g.fill(q); return px(10, 10) + '|' + g.isPointInPath(q, 25, 10); })()"),
+           "255,0,0,255|false");
+  CHECK_EQ(p.Eval("(g.setLineDash([4, 2]), g.getLineDash().join())"), "4,2");
+  CHECK_EQ(p.Eval("(g.font = 'bold 20px Arial', g.font + '|' + (g.measureText('Hallo').width > 40))"),
+           "bold 20px Arial|true");
+  CHECK_EQ(p.Eval("(g.font = 'nonsense', g.font)"), "bold 20px Arial");
+  CHECK_EQ(p.Eval("c.toDataURL().slice(0, 22)"), "data:image/png;base64,");
+  CHECK_EQ(p.Eval("(c.width = 10, px(5, 5) + '|' + g.fillStyle)"), "0,0,0,0|#000000");
+  // The canvas is painted as an image.
+  p.page.script()->TakeDirty();
+  p.page.ScriptMutated();
+  bool painted = false;
+  for (size_t i = 0; i < p.page.display().items.size(); ++i)
+    if (StartsWith(p.page.display().items[i].imageUrl, "kite-canvas:")) painted = true;
+  CHECK(painted);
+}
+
 }  // namespace
 
 int main() {
@@ -642,6 +705,7 @@ int main() {
   TestSvg();
   TestScript();
   TestWebPAndWoff2();
+  TestCanvas();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

@@ -62,6 +62,7 @@ bool ParseInt(const std::string& s, long long& out);
 double ParseDoublePrefix(const std::string& s, size_t& consumed);
 
 std::string Base64Decode(const std::string& in);
+std::string Base64Encode(const std::string& in);
 std::string PercentDecode(const std::string& in, bool plusIsSpace);
 std::string PercentEncodeForm(const std::string& in);  // x-www-form-urlencoded
 std::string HtmlEscape(const std::string& in);

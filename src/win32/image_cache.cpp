@@ -3,6 +3,7 @@
 #include <algorithm>
 
 #include "base/strings.h"
+#include "canvas/canvas.h"
 
 namespace kite {
 
@@ -12,6 +13,13 @@ ImageCache& Images() {
 }
 
 ImageProvider::State ImageCache::GetImage(const std::string& url, int& width, int& height) {
+  if (StartsWith(url, "kite-canvas:")) {
+    const DecodedImage* c = CanvasPixelsForUrl(url, 0);
+    if (!c) return kFailed;
+    width = c->width;
+    height = c->height;
+    return kLoaded;
+  }
   std::map<std::string, Entry>::iterator it = entries_.find(url);
   if (it == entries_.end()) return App::Get().settings.loadImages ? kLoading : kFailed;
   it->second.lastUse = ++clock_;
@@ -22,6 +30,7 @@ ImageProvider::State ImageCache::GetImage(const std::string& url, int& width, in
 }
 
 const DecodedImage* ImageCache::Find(const std::string& url) {
+  if (StartsWith(url, "kite-canvas:")) return CanvasPixelsForUrl(url, 0);
   std::map<std::string, Entry>::iterator it = entries_.find(url);
   if (it == entries_.end() || it->second.state != kLoaded) return 0;
   it->second.lastUse = ++clock_;
@@ -76,22 +85,16 @@ void ImageCache::Trim() {
   }
 }
 
-const DecodedImage* ImageCache::Scaled(const std::string& url, int w, int h) {
-  const DecodedImage* src = Find(url);
-  if (!src || w <= 0 || h <= 0) return 0;
-  if (src->width == w && src->height == h) return src;
-  if ((long long)w * h > 4096LL * 4096) return 0;
-  std::string key = url + "|" + IntToString(w) + "x" + IntToString(h);
-  std::map<std::string, DecodedImage>::iterator it = scaled_.find(key);
-  if (it != scaled_.end()) return &it->second;
-  DecodedImage& dst = scaled_[key];
+namespace {
+
+// Box filter when shrinking, bilinear when enlarging.
+void ScaleInto(const DecodedImage* src, DecodedImage& dst, int w, int h) {
   dst.width = w;
   dst.height = h;
   dst.hasAlpha = src->hasAlpha;
   dst.pixels.resize((size_t)w * h);
   const int sw = src->width, sh = src->height;
   for (int y = 0; y < h; ++y) {
-    // Box filter when shrinking, bilinear when enlarging.
     float sy0 = (float)y * sh / h, sy1 = (float)(y + 1) * sh / h;
     for (int x = 0; x < w; ++x) {
       float sx0 = (float)x * sw / w, sx1 = (float)(x + 1) * sw / w;
@@ -130,6 +133,34 @@ const DecodedImage* ImageCache::Scaled(const std::string& url, int w, int h) {
       dst.pixels[(size_t)y * w + x] = out;
     }
   }
+}
+
+}  // namespace
+
+const DecodedImage* ImageCache::Scaled(const std::string& url, int w, int h) {
+  if (StartsWith(url, "kite-canvas:")) {
+    // Canvas bitmaps change; keep one scaled copy per size and version.
+    unsigned version = 0;
+    const DecodedImage* src = CanvasPixelsForUrl(url, &version);
+    if (!src || w <= 0 || h <= 0 || src->width <= 0 || src->height <= 0) return 0;
+    if (src->width == w && src->height == h) return src;
+    if ((long long)w * h > 4096LL * 4096) return 0;
+    std::pair<unsigned, DecodedImage>& e = canvasScaled_[url];
+    if (e.first != version || e.second.width != w || e.second.height != h) {
+      ScaleInto(src, e.second, w, h);
+      e.first = version;
+    }
+    return &e.second;
+  }
+  const DecodedImage* src = Find(url);
+  if (!src || w <= 0 || h <= 0) return 0;
+  if (src->width == w && src->height == h) return src;
+  if ((long long)w * h > 4096LL * 4096) return 0;
+  std::string key = url + "|" + IntToString(w) + "x" + IntToString(h);
+  std::map<std::string, DecodedImage>::iterator it = scaled_.find(key);
+  if (it != scaled_.end()) return &it->second;
+  DecodedImage& dst = scaled_[key];
+  ScaleInto(src, dst, w, h);
   scaledOrder_.push_back(key);
   scaledBytes_ += dst.pixels.size() * 4;
   while (scaledBytes_ > 32u * 1024 * 1024 && scaledOrder_.size() > 1) {

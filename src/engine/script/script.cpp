@@ -3,6 +3,7 @@
 // primitives registered here as the global "__kite" object (see dom_js.cpp).
 #include "script/script.h"
 
+#include <algorithm>
 #include <cstring>
 
 #ifdef _WIN32
@@ -11,7 +12,11 @@
 #include <sys/time.h>
 #endif
 
+#include <cmath>
+
 #include "base/strings.h"
+#include "canvas/canvas.h"
+#include "css/style.h"
 #include "css/resolver.h"
 #include "css/stylesheet.h"
 #include "html/parser.h"
@@ -583,6 +588,364 @@ KITE_FN(Dirty) {
   return JS_UNDEFINED;
 }
 
+// ---------------------------------------------------------------------------
+// <canvas>
+
+Canvas2D* Cv(JSContext* ctx, JSValueConst v) { return Engine(ctx)->CanvasById(Int(ctx, v)); }
+float F(JSContext* ctx, JSValueConst v) { return (float)Num(ctx, v); }
+
+#define CV_FN(name) KITE_FN(name)
+#define CV_GET(n)            \
+  ARGS_AT_LEAST(n);          \
+  Canvas2D* c = Cv(ctx, argv[0]); \
+  if (!c) return JS_UNDEFINED;
+#define CV_DONE() Engine(ctx)->MarkCanvasDirty()
+
+CV_FN(CvCreate) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  if (!n) return JS_NewInt32(ctx, 0);
+  return JS_NewInt32(ctx, Engine(ctx)->CreateCanvas(n));
+}
+
+CV_FN(CvResize) {
+  CV_GET(3);
+  c->Resize(Int(ctx, argv[1]), Int(ctx, argv[2]));
+  CV_DONE();
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvState) {  // 0 save, 1 restore, 2 reset, 3 beginPath, 4 closePath, 5 pushPath, 6 popPath
+  CV_GET(2);
+  switch (Int(ctx, argv[1])) {
+    case 0: c->Save(); break;
+    case 1: c->Restore(); break;
+    case 2: {
+      int w = c->width(), h = c->height();
+      c->Resize(w, h);
+      CV_DONE();
+      break;
+    }
+    case 3: c->BeginPath(); break;
+    case 4: c->ClosePath(); break;
+    case 5: c->PushPath(); break;
+    case 6: c->PopPath(); break;
+  }
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvMatrix) {  // (c, set?, a, b, c, d, e, f)
+  CV_GET(8);
+  gfx::Matrix m(F(ctx, argv[2]), F(ctx, argv[3]), F(ctx, argv[4]), F(ctx, argv[5]), F(ctx, argv[6]),
+                F(ctx, argv[7]));
+  if (JS_ToBool(ctx, argv[1]) > 0) c->SetTransform(m);
+  else c->Transform(m);
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvGetMatrix) {
+  CV_GET(1);
+  const gfx::Matrix& m = c->transform();
+  JSValue arr = JS_NewArray(ctx);
+  float v[6] = {m.a, m.b, m.c, m.d, m.e, m.f};
+  for (int i = 0; i < 6; ++i) JS_SetPropertyUint32(ctx, arr, i, JS_NewFloat64(ctx, v[i]));
+  return arr;
+}
+
+bool ParseCanvasColor(const std::string& s, Color& out) {
+  std::string v = AsciiLower(Trim(s));
+  if (v == "currentcolor" || v == "inherit" || v.empty()) return false;
+  return ParseColor(v, out, Color(0, 0, 0));
+}
+
+CV_FN(CvColor) {  // (c, which, css) -> bool
+  CV_GET(3);
+  Color col;
+  if (!ParseCanvasColor(Str(ctx, argv[2]), col)) return JS_FALSE;
+  CanvasPaint p;
+  p.color = col;
+  if (Int(ctx, argv[1])) c->SetStroke(p);
+  else c->SetFill(p);
+  return JS_TRUE;
+}
+
+CV_FN(CvGradient) {  // (c, which, kind, x0, y0, r0, x1, y1, r1, [offset, color, ...])
+  CV_GET(10);
+  std::shared_ptr<CanvasGradient> g(new CanvasGradient);
+  g->kind = (CanvasGradient::Kind)Int(ctx, argv[2]);
+  g->x0 = F(ctx, argv[3]);
+  g->y0 = F(ctx, argv[4]);
+  g->r0 = F(ctx, argv[5]);
+  g->x1 = F(ctx, argv[6]);
+  g->y1 = F(ctx, argv[7]);
+  g->r1 = F(ctx, argv[8]);
+  uint32_t n = 0;
+  JSValue len = JS_GetPropertyStr(ctx, argv[9], "length");
+  JS_ToUint32(ctx, &n, len);
+  JS_FreeValue(ctx, len);
+  for (uint32_t i = 0; i + 1 < n && i < 2048; i += 2) {
+    JSValue o = JS_GetPropertyUint32(ctx, argv[9], i), col = JS_GetPropertyUint32(ctx, argv[9], i + 1);
+    Color cc;
+    if (ParseCanvasColor(Str(ctx, col), cc)) g->stops.push_back(std::make_pair(F(ctx, o), cc));
+    JS_FreeValue(ctx, o);
+    JS_FreeValue(ctx, col);
+  }
+  CanvasPaint p;
+  p.kind = CanvasPaint::kGradient;
+  p.gradient = g;
+  if (Int(ctx, argv[1])) c->SetStroke(p);
+  else c->SetFill(p);
+  return JS_UNDEFINED;
+}
+
+// Pixels of an image source (<img> or <canvas> element).
+const DecodedImage* SourcePixels(JSContext* ctx, JSValueConst v) {
+  ScriptEngine* e = Engine(ctx);
+  Node* n = Arg(ctx, v);
+  if (!n || !n->IsElement()) return 0;
+  if (n->tag == "canvas") {
+    Canvas2D* c = n->canvasId ? e->CanvasById(n->canvasId) : 0;
+    return c ? &c->pixels() : 0;
+  }
+  std::string src = n->Attr("src");
+  if (src.empty()) return 0;
+  Url u = e->page()->ResolveUrl(src);
+  if (!u.valid() || !e->page()->images()) return 0;
+  return e->page()->images()->Pixels(u.Spec());
+}
+
+CV_FN(CvSourceSize) {
+  ARGS_AT_LEAST(1);
+  const DecodedImage* img = SourcePixels(ctx, argv[0]);
+  if (!img) return JS_NULL;
+  float d = img->density > 0 ? img->density : 1;
+  JSValue arr = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, arr, 0, JS_NewFloat64(ctx, img->width / d));
+  JS_SetPropertyUint32(ctx, arr, 1, JS_NewFloat64(ctx, img->height / d));
+  return arr;
+}
+
+CV_FN(CvPattern) {  // (c, which, sourceHandle, repetition, a, b, c, d, e, f) -> bool
+  CV_GET(10);
+  const DecodedImage* img = SourcePixels(ctx, argv[2]);
+  if (!img || img->width <= 0) return JS_FALSE;
+  std::shared_ptr<CanvasPattern> p(new CanvasPattern);
+  p->image = *img;
+  std::string rep = Str(ctx, argv[3]);
+  p->repeatX = rep.empty() || rep == "repeat" || rep == "repeat-x";
+  p->repeatY = rep.empty() || rep == "repeat" || rep == "repeat-y";
+  float d = img->density > 0 ? img->density : 1;
+  p->transform = gfx::Matrix(F(ctx, argv[4]), F(ctx, argv[5]), F(ctx, argv[6]), F(ctx, argv[7]), F(ctx, argv[8]),
+                             F(ctx, argv[9])) * gfx::Matrix(1 / d, 0, 0, 1 / d, 0, 0);
+  CanvasPaint paint;
+  paint.kind = CanvasPaint::kPattern;
+  paint.pattern = p;
+  if (Int(ctx, argv[1])) c->SetStroke(paint);
+  else c->SetFill(paint);
+  return JS_TRUE;
+}
+
+CV_FN(CvProp) {  // (c, prop, value)
+  CV_GET(3);
+  int prop = Int(ctx, argv[1]);
+  switch (prop) {
+    case 0: c->SetLineWidth(F(ctx, argv[2])); break;
+    case 1: c->SetLineCap((gfx::LineCap)Int(ctx, argv[2])); break;
+    case 2: c->SetLineJoin((gfx::LineJoin)Int(ctx, argv[2])); break;
+    case 3: c->SetMiterLimit(F(ctx, argv[2])); break;
+    case 4: c->SetGlobalAlpha(F(ctx, argv[2])); break;
+    case 5: c->SetCompositeOp((CompositeOp)Int(ctx, argv[2])); break;
+    case 6: c->SetTextAlign(Int(ctx, argv[2])); break;
+    case 7: c->SetTextBaseline(Int(ctx, argv[2])); break;
+    case 8: c->SetImageSmoothing(JS_ToBool(ctx, argv[2]) > 0); break;
+    case 9: c->SetLineDashOffset(F(ctx, argv[2])); break;
+  }
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvFont) {
+  CV_GET(2);
+  return JS_NewBool(ctx, c->SetFont(Str(ctx, argv[1])));
+}
+
+CV_FN(CvShadow) {  // (c, color, blur, ox, oy)
+  CV_GET(5);
+  Color col;
+  if (!ParseCanvasColor(Str(ctx, argv[1]), col)) col = Color();
+  c->SetShadow(col, F(ctx, argv[2]), F(ctx, argv[3]), F(ctx, argv[4]));
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvDash) {
+  CV_GET(2);
+  std::vector<float> d;
+  uint32_t n = 0;
+  JSValue len = JS_GetPropertyStr(ctx, argv[1], "length");
+  JS_ToUint32(ctx, &n, len);
+  JS_FreeValue(ctx, len);
+  bool ok = true;
+  for (uint32_t i = 0; i < n && i < 1024; ++i) {
+    JSValue v = JS_GetPropertyUint32(ctx, argv[1], i);
+    float f = F(ctx, v);
+    JS_FreeValue(ctx, v);
+    if (!(f >= 0) || !std::isfinite(f)) ok = false;
+    d.push_back(f);
+  }
+  if (!ok) return JS_UNDEFINED;
+  if (d.size() % 2) d.insert(d.end(), d.begin(), d.end());
+  float sum = 0;
+  for (size_t i = 0; i < d.size(); ++i) sum += d[i];
+  if (sum <= 0) d.clear();
+  c->SetLineDash(d);
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvPath) {  // (c, op, ...numbers)
+  CV_GET(2);
+  float a[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+  for (int i = 0; i < 8 && i + 2 < argc; ++i) a[i] = F(ctx, argv[i + 2]);
+  switch (Int(ctx, argv[1])) {
+    case 0: c->MoveTo(a[0], a[1]); break;
+    case 1: c->LineTo(a[0], a[1]); break;
+    case 2: c->QuadraticCurveTo(a[0], a[1], a[2], a[3]); break;
+    case 3: c->BezierCurveTo(a[0], a[1], a[2], a[3], a[4], a[5]); break;
+    case 4: c->Arc(a[0], a[1], a[2], a[3], a[4], a[5] != 0); break;
+    case 5: c->ArcTo(a[0], a[1], a[2], a[3], a[4]); break;
+    case 6: c->Ellipse(a[0], a[1], a[2], a[3], a[4], a[5], a[6], a[7] != 0); break;
+    case 7: c->Rect(a[0], a[1], a[2], a[3]); break;
+    case 8: {
+      float r[4] = {a[4], a[5], a[6], a[7]};
+      c->RoundRect(a[0], a[1], a[2], a[3], r);
+      break;
+    }
+  }
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvSvgPath) {
+  CV_GET(2);
+  c->SvgPath(Str(ctx, argv[1]));
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvDraw) {  // (c, op, ...) 0 fill(evenOdd) 1 stroke 2 clip(evenOdd) 3 fillRect 4 strokeRect 5 clearRect
+  CV_GET(2);
+  float a[4] = {0, 0, 0, 0};
+  for (int i = 0; i < 4 && i + 2 < argc; ++i) a[i] = F(ctx, argv[i + 2]);
+  switch (Int(ctx, argv[1])) {
+    case 0: c->Fill(a[0] != 0); break;
+    case 1: c->Stroke(); break;
+    case 2: c->Clip(a[0] != 0); return JS_UNDEFINED;
+    case 3: c->FillRect(a[0], a[1], a[2], a[3]); break;
+    case 4: c->StrokeRect(a[0], a[1], a[2], a[3]); break;
+    case 5: c->ClearRect(a[0], a[1], a[2], a[3]); break;
+  }
+  CV_DONE();
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvHit) {  // (c, stroke?, x, y, evenOdd)
+  CV_GET(5);
+  float x = F(ctx, argv[2]), y = F(ctx, argv[3]);
+  if (JS_ToBool(ctx, argv[1]) > 0) return JS_NewBool(ctx, c->IsPointInStroke(x, y));
+  return JS_NewBool(ctx, c->IsPointInPath(x, y, JS_ToBool(ctx, argv[4]) > 0));
+}
+
+CV_FN(CvText) {  // (c, text, x, y, maxWidth, stroke)
+  CV_GET(6);
+  c->FillText(Str(ctx, argv[1]), F(ctx, argv[2]), F(ctx, argv[3]), F(ctx, argv[4]), JS_ToBool(ctx, argv[5]) > 0);
+  CV_DONE();
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvMeasure) {
+  CV_GET(2);
+  TextMetricsResult m = c->MeasureText(Str(ctx, argv[1]));
+  JSValue arr = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, arr, 0, JS_NewFloat64(ctx, m.width));
+  JS_SetPropertyUint32(ctx, arr, 1, JS_NewFloat64(ctx, m.ascent));
+  JS_SetPropertyUint32(ctx, arr, 2, JS_NewFloat64(ctx, m.descent));
+  return arr;
+}
+
+CV_FN(CvImage) {  // (c, source, sx, sy, sw, sh, dx, dy, dw, dh)
+  CV_GET(10);
+  const DecodedImage* img = SourcePixels(ctx, argv[1]);
+  if (!img) return JS_UNDEFINED;
+  float d = img->density > 0 ? img->density : 1;
+  float v[8];
+  for (int i = 0; i < 8; ++i) v[i] = F(ctx, argv[i + 2]);
+  // Copy when drawing a canvas onto itself.
+  if (img == &c->pixels()) {
+    DecodedImage copy = *img;
+    c->DrawImage(copy, v[0] * d, v[1] * d, v[2] * d, v[3] * d, v[4], v[5], v[6], v[7]);
+  } else {
+    c->DrawImage(*img, v[0] * d, v[1] * d, v[2] * d, v[3] * d, v[4], v[5], v[6], v[7]);
+  }
+  CV_DONE();
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvGetData) {  // (c, x, y, w, h) -> ArrayBuffer
+  CV_GET(5);
+  std::string d = c->GetImageData(Int(ctx, argv[1]), Int(ctx, argv[2]), Int(ctx, argv[3]), Int(ctx, argv[4]));
+  return JS_NewArrayBufferCopy(ctx, (const uint8_t*)d.data(), d.size());
+}
+
+CV_FN(CvPutData) {  // (c, typedArray, w, h, dx, dy, dirtyX, dirtyY, dirtyW, dirtyH)
+  CV_GET(10);
+  size_t off = 0, len = 0, bpe = 0;
+  JSValue buf = JS_GetTypedArrayBuffer(ctx, argv[1], &off, &len, &bpe);
+  if (JS_IsException(buf)) return JS_EXCEPTION;
+  size_t size = 0;
+  uint8_t* p = JS_GetArrayBuffer(ctx, &size, buf);
+  int w = Int(ctx, argv[2]), h = Int(ctx, argv[3]);
+  if (p && w > 0 && h > 0 && off + len <= size && (size_t)w * h * 4 <= len)
+    c->PutImageData(p + off, w, h, Int(ctx, argv[4]), Int(ctx, argv[5]), Int(ctx, argv[6]), Int(ctx, argv[7]),
+                    Int(ctx, argv[8]), Int(ctx, argv[9]));
+  JS_FreeValue(ctx, buf);
+  CV_DONE();
+  return JS_UNDEFINED;
+}
+
+CV_FN(CvDataUrl) {
+  CV_GET(1);
+  return NewStr(ctx, "data:image/png;base64," + Base64Encode(c->ToPng()));
+}
+
+// Image loading for scripts: (imgHandle) -> 0 pending, 1 loaded, 2 failed.
+CV_FN(ImgLoad) {
+  ARGS_AT_LEAST(1);
+  ScriptEngine* e = Engine(ctx);
+  Node* n = Arg(ctx, argv[0]);
+  if (!n) return JS_NewInt32(ctx, 2);
+  std::string src = n->Attr("src");
+  if (src.empty()) return JS_NewInt32(ctx, 2);
+  Url u = e->page()->ResolveUrl(src);
+  if (!u.valid() || !e->page()->images()) return JS_NewInt32(ctx, 2);
+  int w = 0, h = 0;
+  ImageProvider::State st = e->page()->images()->GetImage(u.Spec(), w, h);
+  if (st == ImageProvider::kLoaded) return JS_NewInt32(ctx, 1);
+  if (st == ImageProvider::kFailed || st == ImageProvider::kUnsupported) return JS_NewInt32(ctx, 2);
+  e->WatchImage(n, u.Spec(), true);
+  return JS_NewInt32(ctx, 0);
+}
+
+CV_FN(ImgSize) {
+  ARGS_AT_LEAST(1);
+  ScriptEngine* e = Engine(ctx);
+  Node* n = Arg(ctx, argv[0]);
+  int w = 0, h = 0;
+  if (n && e->page()->images()) {
+    Url u = e->page()->ResolveUrl(n->Attr("src"));
+    if (u.valid() && e->page()->images()->GetImage(u.Spec(), w, h) != ImageProvider::kLoaded) w = h = 0;
+  }
+  JSValue arr = JS_NewArray(ctx);
+  JS_SetPropertyUint32(ctx, arr, 0, JS_NewInt32(ctx, w));
+  JS_SetPropertyUint32(ctx, arr, 1, JS_NewInt32(ctx, h));
+  return arr;
+}
+
 KITE_FN(Cur) { return Handle(ctx, Engine(ctx)->currentScript()); }
 
 KITE_FN(Submit) {
@@ -678,6 +1041,14 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"timer", JsTimer, 3}, {"clearTimer", JsClearTimer, 1}, {"request", Request, 4},
       {"scrollTo", ScrollTo, 2}, {"scroll", Scroll, 0}, {"viewport", Viewport, 0},
       {"media", Media, 1}, {"dirty", Dirty, 0}, {"submit", Submit, 1}, {"cur", Cur, 0},
+      {"cvCreate", CvCreate, 1}, {"cvResize", CvResize, 3}, {"cvState", CvState, 2},
+      {"cvMatrix", CvMatrix, 8}, {"cvGetMatrix", CvGetMatrix, 1}, {"cvColor", CvColor, 3},
+      {"cvGradient", CvGradient, 10}, {"cvPattern", CvPattern, 10}, {"cvSourceSize", CvSourceSize, 1},
+      {"cvProp", CvProp, 3}, {"cvFont", CvFont, 2}, {"cvShadow", CvShadow, 5}, {"cvDash", CvDash, 2},
+      {"cvPath", CvPath, 10}, {"cvDraw", CvDraw, 6}, {"cvHit", CvHit, 5}, {"cvText", CvText, 6},
+      {"cvMeasure", CvMeasure, 2}, {"cvImage", CvImage, 10}, {"cvGetData", CvGetData, 5},
+      {"cvPutData", CvPutData, 10}, {"cvDataUrl", CvDataUrl, 1}, {"imgLoad", ImgLoad, 1},
+      {"imgSize", ImgSize, 1}, {"cvSvgPath", CvSvgPath, 2},
   };
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)
     JS_SetPropertyStr(ctx, k, fns[i].name, JS_NewCFunction(ctx, fns[i].fn, fns[i].name, fns[i].argc));
@@ -694,6 +1065,7 @@ ScriptEngine::~ScriptEngine() {
   }
   JS_FreeContext(ctx);
   JS_FreeRuntime((JSRuntime*)rt_);
+  canvases_.clear();
 }
 
 long long ScriptEngine::NowMs() {
@@ -834,6 +1206,53 @@ int ScriptEngine::HandleOf(Node* n) {
 Node* ScriptEngine::NodeOf(int h) {
   if (h <= 0 || h >= (int)handles_.size()) return 0;
   return handles_[h];
+}
+
+Canvas2D* ScriptEngine::CanvasById(int id) {
+  std::map<int, std::unique_ptr<Canvas2D> >::iterator it = canvases_.find(id);
+  return it == canvases_.end() ? 0 : it->second.get();
+}
+
+int ScriptEngine::CreateCanvas(Node* n) {
+  if (n->canvasId && CanvasById(n->canvasId)) return n->canvasId;
+  long long w = 300, h = 150;
+  std::string ws = n->Attr("width"), hs = n->Attr("height");
+  if (!ws.empty() && (!ParseInt(Trim(ws), w) || w < 0)) w = 300;
+  if (!hs.empty() && (!ParseInt(Trim(hs), h) || h < 0)) h = 150;
+  std::unique_ptr<Canvas2D> c(new Canvas2D((int)std::min(w, 16384LL), (int)std::min(h, 16384LL), page_->fonts()));
+  int id = c->id();
+  canvases_[id] = std::move(c);
+  n->canvasId = id;
+  MarkDirty();  // the painter now shows the bitmap
+  return id;
+}
+
+void ScriptEngine::WatchImage(Node* img, const std::string& url, bool request) {
+  for (size_t i = 0; i < imageWaiters_.size(); ++i)
+    if (imageWaiters_[i].second == img && imageWaiters_[i].first == url) return;
+  imageWaiters_.push_back(std::make_pair(url, img));
+  if (request && std::find(imageLoads_.begin(), imageLoads_.end(), url) == imageLoads_.end())
+    imageLoads_.push_back(url);
+}
+
+std::vector<std::string> ScriptEngine::TakeImageLoads() {
+  std::vector<std::string> out;
+  out.swap(imageLoads_);
+  return out;
+}
+
+void ScriptEngine::ImageLoaded(const std::string& url, bool ok) {
+  std::vector<Node*> nodes;
+  for (size_t i = 0; i < imageWaiters_.size();) {
+    if (imageWaiters_[i].first == url) {
+      nodes.push_back(imageWaiters_[i].second);
+      imageWaiters_.erase(imageWaiters_.begin() + i);
+    } else {
+      ++i;
+    }
+  }
+  for (size_t i = 0; i < nodes.size(); ++i) DispatchEvent(nodes[i], ok ? "load" : "error");
+  if (!nodes.empty()) MarkDirty();
 }
 
 void ScriptEngine::Adopt(std::unique_ptr<Node> n) {

@@ -37,6 +37,7 @@ class Node {
   size_t index;  // position in parent's children
   LayoutBox* layoutBox = nullptr;  // principal box (set by the box builder)
   int scriptHandle = 0;            // JavaScript wrapper id (0 = none)
+  int canvasId = 0;                // <canvas> bitmap (see canvas/canvas.h)
   bool scriptDone = false;         // <script> already executed
 
   // Cached values for selector matching.

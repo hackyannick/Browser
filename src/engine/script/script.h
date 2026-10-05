@@ -10,6 +10,10 @@
 #include "dom/node.h"
 
 namespace kite {
+class Canvas2D;
+}
+
+namespace kite {
 
 class Page;
 
@@ -62,6 +66,16 @@ class ScriptEngine {
 
   // Set when scripts changed the document or its styles.
   bool TakeDirty();
+  // Set when a canvas bitmap changed (repaint only, no relayout).
+  bool TakeCanvasDirty() {
+    bool d = canvasDirty_;
+    canvasDirty_ = false;
+    return d;
+  }
+  // Images requested by scripts (new Image().src = ...) that the platform
+  // should load; report completion with ImageLoaded.
+  std::vector<std::string> TakeImageLoads();
+  void ImageLoaded(const std::string& url, bool ok);
   // Maximum run time of one script or event dispatch.
   void SetTimeLimit(int ms) { timeLimit_ = ms; }
   const std::vector<std::string>& console() const { return console_; }
@@ -84,6 +98,11 @@ class ScriptEngine {
   int AddTimer(void* fn, int delay, bool repeat);
   void ClearTimer(int id);
   int AddRequest(const ScriptRequest& r);
+  Canvas2D* CanvasById(int id);
+  int CreateCanvas(Node* n);
+  void MarkCanvasDirty() { canvasDirty_ = true; }
+  void WatchImage(Node* img, const std::string& url, bool request);
+  std::map<int, std::shared_ptr<void> >& canvasObjects() { return canvasObjects_; }
 
  private:
   void RunJobs();
@@ -110,6 +129,11 @@ class ScriptEngine {
   std::vector<std::string> console_;
   bool dirty_;
   bool layoutStale_ = false;
+  bool canvasDirty_ = false;
+  std::map<int, std::unique_ptr<Canvas2D> > canvases_;
+  std::map<int, std::shared_ptr<void> > canvasObjects_;  // patterns
+  std::vector<std::pair<std::string, Node*> > imageWaiters_;
+  std::vector<std::string> imageLoads_;
   Node* currentScript_;
   long long deadline_;
   int timeLimit_ = 8000;

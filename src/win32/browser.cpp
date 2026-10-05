@@ -889,9 +889,19 @@ void Browser::OnFetched(FetchJob* job) {
     else Images().SetFailed(url);
     for (size_t i = 0; i < tabList_.size(); ++i) {
       Tab* t = tabList_[i];
-      if (t->id == job->tabId && t->generation == job->generation && t->pendingImages > 0)
+      if (t->id == job->tabId && t->generation == job->generation && t->pendingImages > 0 &&
+          job->scriptRequestId != -1)
         --t->pendingImages;
       if (t->rendered) t->needsRelayout = true;
+    }
+    // Scripts waiting for this image (img.onload).
+    bool loaded = Images().Find(url) != 0;
+    for (size_t i = 0; i < tabList_.size(); ++i) {
+      Tab* t = tabList_[i];
+      if (!t->page->script()) continue;
+      BeginScript();
+      t->page->script()->ImageLoaded(url, loaded);
+      EndScript(t);
     }
     ScheduleRelayout();
     Tab* t = TabById(job->tabId);
@@ -2338,6 +2348,24 @@ void Browser::AfterScript(Tab* t) {
     --scriptDepth_;
     if (!ran) break;
   }
+  // Images loaded by scripts (new Image()).
+  std::vector<std::string> imgs = js->TakeImageLoads();
+  for (size_t i = 0; i < imgs.size(); ++i) {
+    if (Images().IsKnown(imgs[i])) continue;  // already loading; completion notifies
+    if (!StartsWith(imgs[i], "http") && !StartsWith(imgs[i], "data:") && !StartsWith(imgs[i], "file:")) continue;
+    Images().SetLoading(imgs[i]);
+    FetchJob* job = new FetchJob;
+    job->kind = FetchJob::kImage;
+    job->tabId = t->id;
+    job->generation = t->generation;
+    job->notify = hwnd_;
+    job->scriptRequestId = -1;  // not counted as a page image
+    job->request.url = imgs[i];
+    job->request.referrer = t->url;
+    job->request.accept = "image/webp,image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
+    job->request.maxBytes = 16 * 1024 * 1024;
+    StartFetch(job);
+  }
   // fetch() / XMLHttpRequest.
   std::vector<ScriptRequest> reqs = js->TakeRequests();
   for (size_t i = 0; i < reqs.size(); ++i) {
@@ -2369,6 +2397,8 @@ void Browser::AfterScript(Tab* t) {
     t->jsNavForm = sub;
     PostMessageW(hwnd_, WM_KITE_JSNAV, t->id, 0);
   }
+  // Canvas drawing only needs a repaint.
+  if (js->TakeCanvasDirty() && t == current_) InvalidateRect(view_, 0, FALSE);
   // DOM changes: restyle and relayout.
   if (js->TakeDirty() && t->rendered) {
     page->ScriptMutated();

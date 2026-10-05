@@ -44,6 +44,8 @@ class Page {
   void LoadImageDocument(const std::string& url);
 
   const std::string& url() const { return url_; }
+  FontProvider* fonts() { return fonts_; }
+  ImageProvider* images() { return images_; }
   std::string Title() const;
   Document* document() { return doc_.get(); }
 

@@ -533,18 +533,24 @@ class HTMLElement extends Element {
   get download() { return this.getAttribute('download') || ''; }
   // Media / scripts
   get src() { return urlPart(this, 'src', 'href'); }
-  set src(v) { this.setAttribute('src', v); if (this.localName === 'img') setTimeout(() => this.dispatchEvent(new Event('load')), 0); }
+  set src(v) {
+    this.setAttribute('src', v);
+    if (this.localName !== 'img') return;
+    const st = K.imgLoad(this._h);  // 0 pending (load/error fire later), 1 loaded, 2 failed
+    if (st === 1) setTimeout(() => this.dispatchEvent(new Event('load')), 0);
+    else if (st === 2) setTimeout(() => this.dispatchEvent(new Event('error')), 0);
+  }
   get srcset() { return this.getAttribute('srcset') || ''; }
   set srcset(v) { this.setAttribute('srcset', v); }
   get alt() { return this.getAttribute('alt') || ''; }
   set alt(v) { this.setAttribute('alt', v); }
-  get width() { const v = parseInt(this.getAttribute('width'), 10); return isNaN(v) ? this.offsetWidth : v; }
+  get width() { const v = parseInt(this.getAttribute('width'), 10); return isNaN(v) ? (this.isConnected ? this.offsetWidth : (this.localName === 'img' ? K.imgSize(this._h)[0] : 0)) : v; }
   set width(v) { this.setAttribute('width', v); }
-  get height() { const v = parseInt(this.getAttribute('height'), 10); return isNaN(v) ? this.offsetHeight : v; }
+  get height() { const v = parseInt(this.getAttribute('height'), 10); return isNaN(v) ? (this.isConnected ? this.offsetHeight : (this.localName === 'img' ? K.imgSize(this._h)[1] : 0)) : v; }
   set height(v) { this.setAttribute('height', v); }
-  get complete() { return true; }
-  get naturalWidth() { return this.offsetWidth; }
-  get naturalHeight() { return this.offsetHeight; }
+  get complete() { return this.localName !== 'img' || !this.getAttribute('src') || K.imgSize(this._h)[0] > 0; }
+  get naturalWidth() { return this.localName === 'img' ? K.imgSize(this._h)[0] : 0; }
+  get naturalHeight() { return this.localName === 'img' ? K.imgSize(this._h)[1] : 0; }
   get currentSrc() { return this.src; }
   get loading() { return this.getAttribute('loading') || 'auto'; }
   set loading(v) { this.setAttribute('loading', v); }
@@ -704,7 +710,7 @@ defineTag('HTMLHeadingElement', ['h1', 'h2', 'h3', 'h4', 'h5', 'h6']); defineTag
 defineTag('HTMLOListElement', ['ol']); defineTag('HTMLLIElement', ['li']); defineTag('HTMLTableElement', ['table']);
 defineTag('HTMLTableRowElement', ['tr']); defineTag('HTMLTableCellElement', ['td', 'th']);
 defineTag('HTMLTableSectionElement', ['tbody', 'thead', 'tfoot']); defineTag('HTMLLabelElement', ['label']);
-defineTag('HTMLIFrameElement', ['iframe']); defineTag('HTMLCanvasElement', ['canvas']); defineTag('HTMLVideoElement', ['video']);
+defineTag('HTMLIFrameElement', ['iframe']); defineTag('HTMLVideoElement', ['video']);
 defineTag('HTMLAudioElement', ['audio']); defineTag('HTMLTemplateElement', ['template']); defineTag('HTMLDetailsElement', ['details']);
 defineTag('HTMLDialogElement', ['dialog']); defineTag('HTMLPreElement', ['pre']); defineTag('HTMLBRElement', ['br']);
 defineTag('HTMLHRElement', ['hr']); defineTag('HTMLTitleElement', ['title']); defineTag('HTMLFieldSetElement', ['fieldset']);
@@ -751,6 +757,368 @@ function W(h) {
   Object.defineProperty(w, '_h', { value: h });
   wrappers.set(h, w);
   return w;
+}
+
+// ------------------------------------------------------------------ Canvas
+const CAPS = { butt: 0, round: 1, square: 2 };
+const JOINS = { miter: 0, round: 1, bevel: 2 };
+const OPS = { 'source-over': 0, 'source-in': 1, 'source-out': 2, 'source-atop': 3, 'destination-over': 4,
+  'destination-in': 5, 'destination-out': 6, 'destination-atop': 7, 'lighter': 8, 'copy': 9, 'xor': 10 };
+const ALIGNS = { start: 0, left: 0, center: 1, right: 2, end: 2 };
+const BASELINES = { alphabetic: 0, top: 1, middle: 2, bottom: 3, hanging: 4, ideographic: 5 };
+
+class DOMMatrix {
+  constructor(init) {
+    let v = [1, 0, 0, 1, 0, 0];
+    if (Array.isArray(init) && init.length >= 6) v = init.length === 16 ? [init[0], init[1], init[4], init[5], init[12], init[13]] : init.slice(0, 6);
+    else if (typeof init === 'string' && /matrix\(/.test(init)) v = init.replace(/^.*\(|\).*$/g, '').split(',').map(Number);
+    [this.a, this.b, this.c, this.d, this.e, this.f] = v.map(Number);
+  }
+  get m11() { return this.a; } set m11(v) { this.a = v; }
+  get m12() { return this.b; } set m12(v) { this.b = v; }
+  get m21() { return this.c; } set m21(v) { this.c = v; }
+  get m22() { return this.d; } set m22(v) { this.d = v; }
+  get m41() { return this.e; } set m41(v) { this.e = v; }
+  get m42() { return this.f; } set m42(v) { this.f = v; }
+  get is2D() { return true; }
+  get isIdentity() { return this.a === 1 && this.b === 0 && this.c === 0 && this.d === 1 && this.e === 0 && this.f === 0; }
+  multiply(m) {
+    m = m instanceof DOMMatrix ? m : new DOMMatrix([m.a ?? 1, m.b ?? 0, m.c ?? 0, m.d ?? 1, m.e ?? 0, m.f ?? 0]);
+    return new DOMMatrix([this.a * m.a + this.c * m.b, this.b * m.a + this.d * m.b, this.a * m.c + this.c * m.d,
+      this.b * m.c + this.d * m.d, this.a * m.e + this.c * m.f + this.e, this.b * m.e + this.d * m.f + this.f]);
+  }
+  translate(x, y) { return this.multiply(new DOMMatrix([1, 0, 0, 1, x || 0, y || 0])); }
+  scale(sx, sy) { if (sy === undefined) sy = sx; return this.multiply(new DOMMatrix([sx, 0, 0, sy, 0, 0])); }
+  rotate(deg) { const r = (deg || 0) * Math.PI / 180, c = Math.cos(r), s = Math.sin(r); return this.multiply(new DOMMatrix([c, s, -s, c, 0, 0])); }
+  inverse() {
+    const det = this.a * this.d - this.b * this.c;
+    if (!det) return new DOMMatrix([NaN, NaN, NaN, NaN, NaN, NaN]);
+    return new DOMMatrix([this.d / det, -this.b / det, -this.c / det, this.a / det,
+      (this.c * this.f - this.d * this.e) / det, (this.b * this.e - this.a * this.f) / det]);
+  }
+  transformPoint(p) { p = p || {}; const x = p.x || 0, y = p.y || 0; return { x: this.a * x + this.c * y + this.e, y: this.b * x + this.d * y + this.f, z: 0, w: 1 }; }
+  toString() { return 'matrix(' + [this.a, this.b, this.c, this.d, this.e, this.f].join(', ') + ')'; }
+  static fromMatrix(m) { return new DOMMatrix([m.a ?? 1, m.b ?? 0, m.c ?? 0, m.d ?? 1, m.e ?? 0, m.f ?? 0]); }
+}
+
+class ImageData {
+  constructor(a, b, c) {
+    if (a instanceof Uint8ClampedArray) {
+      this.data = a; this.width = b >>> 0; this.height = c === undefined ? (a.length / 4 / this.width) | 0 : c >>> 0;
+    } else {
+      this.width = a >>> 0; this.height = b >>> 0;
+      if (!this.width || !this.height) throw new DOMException('IndexSizeError', 'IndexSizeError');
+      this.data = new Uint8ClampedArray(this.width * this.height * 4);
+    }
+    this.colorSpace = 'srgb';
+  }
+}
+
+class CanvasGradient {
+  constructor(kind, args) { this._k = kind; this._a = args; this._s = []; }
+  addColorStop(o, c) {
+    o = +o;
+    if (!(o >= 0 && o <= 1)) throw new DOMException('IndexSizeError', 'IndexSizeError');
+    this._s.push(o, String(c));
+  }
+}
+
+class CanvasPattern {
+  constructor(src, rep) { this._src = src; this._rep = rep; this._m = [1, 0, 0, 1, 0, 0]; }
+  setTransform(m) { if (m) this._m = [m.a ?? 1, m.b ?? 0, m.c ?? 0, m.d ?? 1, m.e ?? 0, m.f ?? 0]; }
+}
+
+class Path2D {
+  constructor(p) {
+    this._ops = [];
+    if (p instanceof Path2D) this._ops = p._ops.slice();
+    else if (typeof p === 'string') this._ops.push(['svg', p]);
+  }
+  addPath(p) { if (p instanceof Path2D) this._ops.push(...p._ops); }
+  moveTo(x, y) { this._ops.push([0, x, y]); }
+  lineTo(x, y) { this._ops.push([1, x, y]); }
+  quadraticCurveTo(a, b, c, d) { this._ops.push([2, a, b, c, d]); }
+  bezierCurveTo(a, b, c, d, e, f) { this._ops.push([3, a, b, c, d, e, f]); }
+  arc(x, y, r, a0, a1, ccw) { if (r < 0) throw new DOMException('IndexSizeError', 'IndexSizeError'); this._ops.push([4, x, y, r, a0, a1, ccw ? 1 : 0]); }
+  arcTo(a, b, c, d, r) { this._ops.push([5, a, b, c, d, r]); }
+  ellipse(x, y, rx, ry, rot, a0, a1, ccw) { this._ops.push([6, x, y, rx, ry, rot, a0, a1, ccw ? 1 : 0]); }
+  rect(x, y, w, h) { this._ops.push([7, x, y, w, h]); }
+  roundRect(x, y, w, h, r) { this._ops.push([8, x, y, w, h, ...radiiOf(r)]); }
+  closePath() { this._ops.push(['close']); }
+  _replay(id) {
+    for (const o of this._ops) {
+      if (o[0] === 'svg') K.cvSvgPath(id, o[1]);
+      else if (o[0] === 'close') K.cvState(id, 4);
+      else K.cvPath(id, ...o);
+    }
+  }
+}
+
+function radiiOf(r) {
+  if (r === undefined) r = 0;
+  const list = Array.isArray(r) ? r : [r];
+  const v = list.map(x => typeof x === 'object' && x ? (x.x || 0) : +x || 0);
+  if (v.length === 1) return [v[0], v[0], v[0], v[0]];
+  if (v.length === 2) return [v[0], v[1], v[0], v[1]];
+  if (v.length === 3) return [v[0], v[1], v[2], v[1]];
+  return v.slice(0, 4);
+}
+
+function canvasDefaults() {
+  return { fillStyle: '#000000', strokeStyle: '#000000', lineWidth: 1, lineCap: 'butt', lineJoin: 'miter',
+    miterLimit: 10, globalAlpha: 1, globalCompositeOperation: 'source-over', font: '10px sans-serif',
+    textAlign: 'start', textBaseline: 'alphabetic', direction: 'ltr', imageSmoothingEnabled: true,
+    imageSmoothingQuality: 'low', shadowColor: 'rgba(0, 0, 0, 0)', shadowBlur: 0, shadowOffsetX: 0,
+    shadowOffsetY: 0, lineDash: [], lineDashOffset: 0, filter: 'none', letterSpacing: '0px',
+    fontKerning: 'auto', wordSpacing: '0px' };
+}
+
+function normColor(s) {
+  const v = String(s).trim().toLowerCase();
+  if (/^#[0-9a-f]{3}$/.test(v)) return '#' + v[1] + v[1] + v[2] + v[2] + v[3] + v[3];
+  return v;
+}
+
+class CanvasRenderingContext2D {
+  constructor(canvas) {
+    Object.defineProperty(this, 'canvas', { value: canvas });
+    this._id = K.cvCreate(canvas._h);
+    this._s = canvasDefaults();
+    this._stack = [];
+  }
+  _paint(which) {
+    const v = which ? this._s.strokeStyle : this._s.fillStyle;
+    if (v instanceof CanvasGradient) K.cvGradient(this._id, which, v._k, ...v._a, v._s);
+    else if (v instanceof CanvasPattern) K.cvPattern(this._id, which, v._src._h, v._rep, ...v._m);
+  }
+  _style(which, v) {
+    const key = which ? 'strokeStyle' : 'fillStyle';
+    if (v instanceof CanvasGradient || v instanceof CanvasPattern) { this._s[key] = v; return; }
+    if (typeof v !== 'string' && !(v instanceof String)) return;
+    if (K.cvColor(this._id, which, String(v))) this._s[key] = normColor(v);
+  }
+  get fillStyle() { return this._s.fillStyle; }
+  set fillStyle(v) { this._style(0, v); }
+  get strokeStyle() { return this._s.strokeStyle; }
+  set strokeStyle(v) { this._style(1, v); }
+  get lineWidth() { return this._s.lineWidth; }
+  set lineWidth(v) { v = +v; if (v > 0 && isFinite(v)) { this._s.lineWidth = v; K.cvProp(this._id, 0, v); } }
+  get lineCap() { return this._s.lineCap; }
+  set lineCap(v) { if (v in CAPS) { this._s.lineCap = v; K.cvProp(this._id, 1, CAPS[v]); } }
+  get lineJoin() { return this._s.lineJoin; }
+  set lineJoin(v) { if (v in JOINS) { this._s.lineJoin = v; K.cvProp(this._id, 2, JOINS[v]); } }
+  get miterLimit() { return this._s.miterLimit; }
+  set miterLimit(v) { v = +v; if (v > 0 && isFinite(v)) { this._s.miterLimit = v; K.cvProp(this._id, 3, v); } }
+  get globalAlpha() { return this._s.globalAlpha; }
+  set globalAlpha(v) { v = +v; if (v >= 0 && v <= 1) { this._s.globalAlpha = v; K.cvProp(this._id, 4, v); } }
+  get globalCompositeOperation() { return this._s.globalCompositeOperation; }
+  set globalCompositeOperation(v) {
+    // Blend modes (multiply, screen ...) are drawn like source-over.
+    const op = OPS[v] !== undefined ? OPS[v] : (/^(multiply|screen|overlay|darken|lighten|color-dodge|color-burn|hard-light|soft-light|difference|exclusion|hue|saturation|color|luminosity)$/.test(v) ? 0 : -1);
+    if (op >= 0) { this._s.globalCompositeOperation = v; K.cvProp(this._id, 5, op); }
+  }
+  get font() { return this._s.font; }
+  set font(v) { if (K.cvFont(this._id, String(v))) this._s.font = String(v); }
+  get textAlign() { return this._s.textAlign; }
+  set textAlign(v) { if (v in ALIGNS) { this._s.textAlign = v; K.cvProp(this._id, 6, ALIGNS[v]); } }
+  get textBaseline() { return this._s.textBaseline; }
+  set textBaseline(v) { if (v in BASELINES) { this._s.textBaseline = v; K.cvProp(this._id, 7, BASELINES[v]); } }
+  get direction() { return this._s.direction; }
+  set direction(v) { this._s.direction = v; }
+  get letterSpacing() { return this._s.letterSpacing; }
+  set letterSpacing(v) { this._s.letterSpacing = v; }
+  get fontKerning() { return this._s.fontKerning; }
+  set fontKerning(v) { this._s.fontKerning = v; }
+  get wordSpacing() { return this._s.wordSpacing; }
+  set wordSpacing(v) { this._s.wordSpacing = v; }
+  get filter() { return this._s.filter; }
+  set filter(v) { this._s.filter = v; }
+  get imageSmoothingEnabled() { return this._s.imageSmoothingEnabled; }
+  set imageSmoothingEnabled(v) { this._s.imageSmoothingEnabled = !!v; K.cvProp(this._id, 8, !!v); }
+  get imageSmoothingQuality() { return this._s.imageSmoothingQuality; }
+  set imageSmoothingQuality(v) { this._s.imageSmoothingQuality = v; }
+  _shadow() { K.cvShadow(this._id, this._s.shadowColor, this._s.shadowBlur, this._s.shadowOffsetX, this._s.shadowOffsetY); }
+  get shadowColor() { return this._s.shadowColor; }
+  set shadowColor(v) { this._s.shadowColor = String(v); this._shadow(); }
+  get shadowBlur() { return this._s.shadowBlur; }
+  set shadowBlur(v) { v = +v; if (v >= 0 && isFinite(v)) { this._s.shadowBlur = v; this._shadow(); } }
+  get shadowOffsetX() { return this._s.shadowOffsetX; }
+  set shadowOffsetX(v) { v = +v; if (isFinite(v)) { this._s.shadowOffsetX = v; this._shadow(); } }
+  get shadowOffsetY() { return this._s.shadowOffsetY; }
+  set shadowOffsetY(v) { v = +v; if (isFinite(v)) { this._s.shadowOffsetY = v; this._shadow(); } }
+  get lineDashOffset() { return this._s.lineDashOffset; }
+  set lineDashOffset(v) { v = +v; if (isFinite(v)) { this._s.lineDashOffset = v; K.cvProp(this._id, 9, v); } }
+  setLineDash(a) {
+    if (!a || typeof a.length !== 'number') return;
+    const v = Array.from(a, Number);
+    if (v.some(x => !(x >= 0) || !isFinite(x))) return;
+    this._s.lineDash = v.length % 2 ? v.concat(v) : v;
+    K.cvDash(this._id, v);
+  }
+  getLineDash() { return this._s.lineDash.slice(); }
+
+  save() { this._stack.push(Object.assign({}, this._s)); K.cvState(this._id, 0); }
+  restore() { if (!this._stack.length) return; this._s = this._stack.pop(); K.cvState(this._id, 1); }
+  reset() { this._s = canvasDefaults(); this._stack = []; K.cvState(this._id, 2); }
+  isContextLost() { return false; }
+  getContextAttributes() { return { alpha: true, desynchronized: false, colorSpace: 'srgb', willReadFrequently: false }; }
+
+  scale(x, y) { K.cvMatrix(this._id, false, +x, 0, 0, +y, 0, 0); }
+  rotate(a) { const c = Math.cos(a), s = Math.sin(a); K.cvMatrix(this._id, false, c, s, -s, c, 0, 0); }
+  translate(x, y) { K.cvMatrix(this._id, false, 1, 0, 0, 1, +x, +y); }
+  transform(a, b, c, d, e, f) { K.cvMatrix(this._id, false, +a, +b, +c, +d, +e, +f); }
+  setTransform(a, b, c, d, e, f) {
+    if (a === undefined) { this.resetTransform(); return; }
+    if (typeof a === 'object') { const m = a; K.cvMatrix(this._id, true, m.a ?? m.m11 ?? 1, m.b ?? m.m12 ?? 0, m.c ?? m.m21 ?? 0, m.d ?? m.m22 ?? 1, m.e ?? m.m41 ?? 0, m.f ?? m.m42 ?? 0); return; }
+    K.cvMatrix(this._id, true, +a, +b, +c, +d, +e, +f);
+  }
+  resetTransform() { K.cvMatrix(this._id, true, 1, 0, 0, 1, 0, 0); }
+  getTransform() { return new DOMMatrix(K.cvGetMatrix(this._id)); }
+
+  createLinearGradient(x0, y0, x1, y1) { return new CanvasGradient(0, [+x0, +y0, 0, +x1, +y1, 0]); }
+  createRadialGradient(x0, y0, r0, x1, y1, r1) {
+    if (r0 < 0 || r1 < 0) throw new DOMException('IndexSizeError', 'IndexSizeError');
+    return new CanvasGradient(1, [+x0, +y0, +r0, +x1, +y1, +r1]);
+  }
+  createConicGradient(a, x, y) { return new CanvasGradient(2, [+x, +y, +a, 0, 0, 0]); }
+  createPattern(img, rep) {
+    if (!img || !img._h) return null;
+    if (!K.cvSourceSize(img._h)) return null;
+    return new CanvasPattern(img, rep === null || rep === undefined ? 'repeat' : String(rep));
+  }
+
+  beginPath() { K.cvState(this._id, 3); }
+  closePath() { K.cvState(this._id, 4); }
+  moveTo(x, y) { K.cvPath(this._id, 0, x, y); }
+  lineTo(x, y) { K.cvPath(this._id, 1, x, y); }
+  quadraticCurveTo(a, b, c, d) { K.cvPath(this._id, 2, a, b, c, d); }
+  bezierCurveTo(a, b, c, d, e, f) { K.cvPath(this._id, 3, a, b, c, d, e, f); }
+  arc(x, y, r, a0, a1, ccw) {
+    if (r < 0) throw new DOMException('IndexSizeError', 'IndexSizeError');
+    K.cvPath(this._id, 4, x, y, r, a0, a1, ccw ? 1 : 0);
+  }
+  arcTo(a, b, c, d, r) {
+    if (r < 0) throw new DOMException('IndexSizeError', 'IndexSizeError');
+    K.cvPath(this._id, 5, a, b, c, d, r);
+  }
+  ellipse(x, y, rx, ry, rot, a0, a1, ccw) {
+    if (rx < 0 || ry < 0) throw new DOMException('IndexSizeError', 'IndexSizeError');
+    K.cvPath(this._id, 6, x, y, rx, ry, rot, a0, a1, ccw ? 1 : 0);
+  }
+  rect(x, y, w, h) { K.cvPath(this._id, 7, x, y, w, h); }
+  roundRect(x, y, w, h, r) { K.cvPath(this._id, 8, x, y, w, h, ...radiiOf(r)); }
+  _withPath(path, fn) {
+    if (path instanceof Path2D) { K.cvState(this._id, 5); path._replay(this._id); const r = fn(); K.cvState(this._id, 6); return r; }
+    return fn();
+  }
+  fill(a, b) {
+    const path = a instanceof Path2D ? a : null, rule = path ? b : a;
+    this._paint(0);
+    this._withPath(path, () => K.cvDraw(this._id, 0, rule === 'evenodd' ? 1 : 0));
+  }
+  stroke(path) { this._paint(1); this._withPath(path instanceof Path2D ? path : null, () => K.cvDraw(this._id, 1)); }
+  clip(a, b) {
+    const path = a instanceof Path2D ? a : null, rule = path ? b : a;
+    this._withPath(path, () => K.cvDraw(this._id, 2, rule === 'evenodd' ? 1 : 0));
+  }
+  isPointInPath(a, b, c, d) {
+    if (a instanceof Path2D) return this._withPath(a, () => K.cvHit(this._id, 0, b, c, d === 'evenodd' ? 1 : 0));
+    return K.cvHit(this._id, 0, a, b, c === 'evenodd' ? 1 : 0);
+  }
+  isPointInStroke(a, b, c) {
+    if (a instanceof Path2D) return this._withPath(a, () => K.cvHit(this._id, 1, b, c, 0));
+    return K.cvHit(this._id, 1, a, b, 0);
+  }
+  fillRect(x, y, w, h) { this._paint(0); K.cvDraw(this._id, 3, x, y, w, h); }
+  strokeRect(x, y, w, h) { this._paint(1); K.cvDraw(this._id, 4, x, y, w, h); }
+  clearRect(x, y, w, h) { K.cvDraw(this._id, 5, x, y, w, h); }
+  fillText(t, x, y, mw) { this._paint(0); K.cvText(this._id, String(t), +x, +y, mw === undefined ? 0 : +mw, false); }
+  strokeText(t, x, y, mw) { this._paint(1); K.cvText(this._id, String(t), +x, +y, mw === undefined ? 0 : +mw, true); }
+  measureText(t) {
+    const m = K.cvMeasure(this._id, String(t));
+    const left = this._s.textAlign === 'center' ? m[0] / 2 : (this._s.textAlign === 'right' || this._s.textAlign === 'end') ? m[0] : 0;
+    return { width: m[0], actualBoundingBoxLeft: left, actualBoundingBoxRight: m[0] - left,
+      actualBoundingBoxAscent: m[1], actualBoundingBoxDescent: m[2], fontBoundingBoxAscent: m[1],
+      fontBoundingBoxDescent: m[2], emHeightAscent: m[1], emHeightDescent: m[2], hangingBaseline: m[1] * 0.8,
+      alphabeticBaseline: 0, ideographicBaseline: -m[2] };
+  }
+  drawImage(img, a, b, c, d, e, f, g, h) {
+    if (!img) throw new TypeError('drawImage: no image');
+    if (img instanceof ImageData) return;
+    if (!img._h) return;
+    const size = K.cvSourceSize(img._h);
+    if (!size || !size[0] || !size[1]) return;
+    let sx = 0, sy = 0, sw = size[0], sh = size[1], dx, dy, dw, dh;
+    if (c === undefined) { dx = a; dy = b; dw = sw; dh = sh; }
+    else if (e === undefined) { dx = a; dy = b; dw = c; dh = d; }
+    else { sx = a; sy = b; sw = c; sh = d; dx = e; dy = f; dw = g; dh = h; }
+    K.cvImage(this._id, img._h, +sx, +sy, +sw, +sh, +dx, +dy, +dw, +dh);
+  }
+  createImageData(w, h) {
+    if (w instanceof ImageData) return new ImageData(w.width, w.height);
+    return new ImageData(Math.abs(w | 0), Math.abs(h | 0));
+  }
+  getImageData(x, y, w, h) {
+    x |= 0; y |= 0; w |= 0; h |= 0;
+    if (!w || !h) throw new DOMException('IndexSizeError', 'IndexSizeError');
+    if (w < 0) { x += w; w = -w; }
+    if (h < 0) { y += h; h = -h; }
+    return new ImageData(new Uint8ClampedArray(K.cvGetData(this._id, x, y, w, h)), w, h);
+  }
+  putImageData(img, dx, dy, x, y, w, h) {
+    if (!img || !img.data) return;
+    if (x === undefined) { x = 0; y = 0; w = img.width; h = img.height; }
+    K.cvPutData(this._id, img.data, img.width, img.height, dx | 0, dy | 0, x | 0, y | 0, w | 0, h | 0);
+  }
+  drawFocusIfNeeded() {}
+  scrollPathIntoView() {}
+}
+
+class HTMLCanvasElement extends HTMLElement {
+  get width() { const v = parseInt(this.getAttribute('width'), 10); return isNaN(v) || v < 0 ? 300 : v; }
+  set width(v) { this.setAttribute('width', String(Math.max(0, v | 0))); }
+  get height() { const v = parseInt(this.getAttribute('height'), 10); return isNaN(v) || v < 0 ? 150 : v; }
+  set height(v) { this.setAttribute('height', String(Math.max(0, v | 0))); }
+  setAttribute(n, v) {
+    super.setAttribute(n, v);
+    n = String(n).toLowerCase();
+    if ((n === 'width' || n === 'height') && this._ctx) {
+      K.cvResize(this._ctx._id, this.width, this.height);
+      this._ctx._s = canvasDefaults();
+      this._ctx._stack = [];
+    }
+  }
+  getContext(type) {
+    if (type !== '2d') return null;
+    if (!this._ctx) Object.defineProperty(this, '_ctx', { value: new CanvasRenderingContext2D(this), configurable: true });
+    return this._ctx;
+  }
+  toDataURL() { return K.cvDataUrl(this.getContext('2d')._id); }
+  toBlob(cb, type) {
+    const url = this.toDataURL(type);
+    setTimeout(() => cb(new Blob([atob(url.slice(url.indexOf(',') + 1))], { type: 'image/png' })), 0);
+  }
+  captureStream() { return null; }
+  transferControlToOffscreen() { return this; }
+}
+TAG_CLASSES.canvas = HTMLCanvasElement;
+G.HTMLCanvasElement = HTMLCanvasElement;
+
+function OffscreenCanvas(w, h) {
+  const c = G.document.createElement('canvas');
+  c.width = w; c.height = h;
+  c.convertToBlob = () => new Promise(res => c.toBlob(res));
+  c.transferToImageBitmap = () => c;
+  return c;
+}
+
+function createImageBitmap(src) {
+  if (!src || !src._h) return Promise.reject(new TypeError('createImageBitmap: unsupported source'));
+  return new Promise((res, rej) => {
+    const done = () => { if (K.cvSourceSize(src._h)) { src.close = () => {}; res(src); } else rej(new DOMException('InvalidStateError', 'InvalidStateError')); };
+    if (src.localName === 'img' && !K.cvSourceSize(src._h)) { src.addEventListener('load', done, { once: true }); src.addEventListener('error', done, { once: true }); }
+    else done();
+  });
 }
 
 // ------------------------------------------------------------------ Document
@@ -1303,7 +1671,8 @@ Object.assign(G, {
   scrollTo(x, y) { if (x && typeof x === 'object') { y = x.top; x = x.left; } K.scrollTo(+x || 0, +y || 0); },
   scroll(x, y) { G.scrollTo(x, y); },
   scrollBy(x, y) { if (x && typeof x === 'object') { y = x.top; x = x.left; } K.scrollTo(G.scrollX + (+x || 0), G.scrollY + (+y || 0)); },
-  atob, btoa, URL, URLSearchParams, fetch, XMLHttpRequest, Headers, Request, Response, Blob, File, FormData,
+  atob, btoa, URL, URLSearchParams, DOMMatrix, DOMMatrixReadOnly: DOMMatrix, ImageData, Path2D,
+  CanvasRenderingContext2D, CanvasGradient, CanvasPattern, OffscreenCanvas, createImageBitmap, fetch, XMLHttpRequest, Headers, Request, Response, Blob, File, FormData,
   AbortController, AbortSignal, TextEncoder, TextDecoder, DOMException,
   Event, UIEvent, MouseEvent, PointerEvent, KeyboardEvent, FocusEvent, InputEvent, CustomEvent, MessageEvent,
   ErrorEvent, ProgressEvent, SubmitEvent, EventTarget,

@@ -11,33 +11,36 @@
 #include "css/style.h"
 #include "css/stylesheet.h"
 #include "html/parser.h"
+#include "image/raster.h"
 
 namespace kite {
 
 namespace {
 
-const float kPi = 3.14159265358979f;
+using namespace gfx;
 
-struct Matrix {
-  float a, b, c, d, e, f;
-  Matrix() : a(1), b(0), c(0), d(1), e(0), f(0) {}
-  Matrix(float a_, float b_, float c_, float d_, float e_, float f_)
-      : a(a_), b(b_), c(c_), d(d_), e(e_), f(f_) {}
-  Matrix operator*(const Matrix& m) const {  // this * m (m applied first)
-    return Matrix(a * m.a + c * m.b, b * m.a + d * m.b, a * m.c + c * m.d, b * m.c + d * m.d,
-                  a * m.e + c * m.f + e, b * m.e + d * m.f + f);
+void Composite(const Raster& r, Color c, float opacity, DecodedImage& out) {
+  float a = c.a / 255.0f * opacity;
+  for (int y = r.y0; y < r.y1; ++y) {
+    const float* cov = r.Row(y);
+    uint32_t* px = &out.pixels[(size_t)y * out.width];
+    for (int x = r.x0; x < r.x1; ++x) {
+      float cv = cov[x];
+      if (cv <= 0) continue;
+      float sa = std::min(1.0f, cv) * a;
+      uint32_t d = px[x];
+      float da = (d >> 24) / 255.0f;
+      float dr = ((d >> 16) & 255), dg = ((d >> 8) & 255), db = (d & 255);
+      float na = sa + da * (1 - sa);
+      unsigned rr = (unsigned)(c.r * sa + dr * (1 - sa) + 0.5f);
+      unsigned g = (unsigned)(c.g * sa + dg * (1 - sa) + 0.5f);
+      unsigned b = (unsigned)(c.b * sa + db * (1 - sa) + 0.5f);
+      unsigned aa = (unsigned)(na * 255 + 0.5f);
+      px[x] = (std::min(aa, 255u) << 24) | (std::min(rr, 255u) << 16) | (std::min(g, 255u) << 8) |
+              std::min(b, 255u);
+    }
   }
-  void Apply(float x, float y, float& ox, float& oy) const {
-    ox = a * x + c * y + e;
-    oy = b * x + d * y + f;
-  }
-  float Scale() const { return std::sqrt(std::fabs(a * d - b * c)); }
-};
-
-struct Pt {
-  float x, y;
-};
-typedef std::vector<Pt> Poly;
+}
 
 // Number list parser tolerant of SVG's compact syntax ("1-2.5.5e3").
 class NumReader {
@@ -137,119 +140,6 @@ Matrix ParseTransform(const std::string& t) {
   }
   return m;
 }
-
-// ---------------------------------------------------------------------------
-// Path building (in user space; transformed when flattened)
-
-class PathBuilder {
- public:
-  PathBuilder(const Matrix& m, float tolerance) : m_(m), tol_(tolerance) {}
-  std::vector<Poly> polys;
-  std::vector<bool> closed;
-
-  void MoveTo(float x, float y) {
-    Flush(false);
-    cur_.clear();
-    Add(x, y);
-    sx_ = x;
-    sy_ = y;
-    lx_ = x;
-    ly_ = y;
-  }
-  void LineTo(float x, float y) {
-    if (cur_.empty()) Add(lx_, ly_);
-    Add(x, y);
-    lx_ = x;
-    ly_ = y;
-  }
-  void CubicTo(float x1, float y1, float x2, float y2, float x, float y) {
-    int n = Steps(lx_, ly_, x1, y1, x2, y2, x, y);
-    float x0 = lx_, y0 = ly_;
-    for (int i = 1; i <= n; ++i) {
-      float t = (float)i / n, u = 1 - t;
-      LineTo(u * u * u * x0 + 3 * u * u * t * x1 + 3 * u * t * t * x2 + t * t * t * x,
-             u * u * u * y0 + 3 * u * u * t * y1 + 3 * u * t * t * y2 + t * t * t * y);
-    }
-  }
-  void QuadTo(float x1, float y1, float x, float y) {
-    float x0 = lx_, y0 = ly_;
-    int n = Steps(x0, y0, x1, y1, x1, y1, x, y);
-    for (int i = 1; i <= n; ++i) {
-      float t = (float)i / n, u = 1 - t;
-      LineTo(u * u * x0 + 2 * u * t * x1 + t * t * x, u * u * y0 + 2 * u * t * y1 + t * t * y);
-    }
-  }
-  void ArcTo(float rx, float ry, float rotDeg, bool large, bool sweep, float x, float y) {
-    float x1 = lx_, y1 = ly_;
-    if (rx == 0 || ry == 0 || (x1 == x && y1 == y)) {
-      LineTo(x, y);
-      return;
-    }
-    rx = std::fabs(rx);
-    ry = std::fabs(ry);
-    float phi = rotDeg * kPi / 180, cp = std::cos(phi), sp = std::sin(phi);
-    float dx = (x1 - x) / 2, dy = (y1 - y) / 2;
-    float x1p = cp * dx + sp * dy, y1p = -sp * dx + cp * dy;
-    float lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
-    if (lambda > 1) {
-      float s = std::sqrt(lambda);
-      rx *= s;
-      ry *= s;
-    }
-    float num = rx * rx * ry * ry - rx * rx * y1p * y1p - ry * ry * x1p * x1p;
-    float den = rx * rx * y1p * y1p + ry * ry * x1p * x1p;
-    float coef = den == 0 ? 0 : std::sqrt(std::max(0.0f, num / den));
-    if (large == sweep) coef = -coef;
-    float cxp = coef * rx * y1p / ry, cyp = -coef * ry * x1p / rx;
-    float cx = cp * cxp - sp * cyp + (x1 + x) / 2, cy = sp * cxp + cp * cyp + (y1 + y) / 2;
-    float th1 = std::atan2((y1p - cyp) / ry, (x1p - cxp) / rx);
-    float th2 = std::atan2((-y1p - cyp) / ry, (-x1p - cxp) / rx);
-    float dth = th2 - th1;
-    if (sweep && dth < 0) dth += 2 * kPi;
-    if (!sweep && dth > 0) dth -= 2 * kPi;
-    float r = std::max(rx, ry) * m_.Scale();
-    int n = std::max(4, std::min(256, (int)(std::fabs(dth) * std::sqrt(std::max(r, 1.0f)) * 1.5f)));
-    for (int i = 1; i <= n; ++i) {
-      float t = th1 + dth * i / n;
-      float ex = rx * std::cos(t), ey = ry * std::sin(t);
-      LineTo(cp * ex - sp * ey + cx, sp * ex + cp * ey + cy);
-    }
-  }
-  void Close() {
-    if (!cur_.empty()) {
-      lx_ = sx_;
-      ly_ = sy_;
-    }
-    Flush(true);
-    cur_.clear();
-  }
-  void Finish() { Flush(false); }
-  float lastX() const { return lx_; }
-  float lastY() const { return ly_; }
-
- private:
-  int Steps(float x0, float y0, float x1, float y1, float x2, float y2, float x3, float y3) {
-    float len = std::hypot(x1 - x0, y1 - y0) + std::hypot(x2 - x1, y2 - y1) + std::hypot(x3 - x2, y3 - y2);
-    len *= m_.Scale();
-    return std::max(2, std::min(128, (int)(std::sqrt(len / tol_) * 2)));
-  }
-  void Add(float x, float y) {
-    Pt p;
-    m_.Apply(x, y, p.x, p.y);
-    cur_.push_back(p);
-  }
-  void Flush(bool close) {
-    if (cur_.size() >= 2) {
-      polys.push_back(cur_);
-      closed.push_back(close);
-    }
-    cur_.clear();
-  }
-  Matrix m_;
-  float tol_;
-  Poly cur_;
-  float sx_ = 0, sy_ = 0, lx_ = 0, ly_ = 0;
-};
 
 void ParsePathData(const std::string& d, PathBuilder& pb) {
   NumReader r(d);
@@ -365,111 +255,6 @@ void ParsePathData(const std::string& d, PathBuilder& pb) {
 }
 
 // ---------------------------------------------------------------------------
-// Rasterizer (4x vertical supersampling with exact horizontal coverage)
-
-class Raster {
- public:
-  Raster(int w, int h) : w_(w), h_(h), cov_((size_t)w * h, 0.0f) {}
-
-  void Clear() { std::fill(cov_.begin(), cov_.end(), 0.0f); }
-
-  void Fill(const std::vector<Poly>& polys, bool evenOdd) {
-    struct Edge {
-      float x0, y0, x1, y1;
-      int dir;
-    };
-    std::vector<Edge> edges;
-    float minY = 1e9f, maxY = -1e9f;
-    for (size_t i = 0; i < polys.size(); ++i) {
-      const Poly& p = polys[i];
-      for (size_t k = 0; k < p.size(); ++k) {
-        Pt a = p[k], b = p[(k + 1) % p.size()];
-        if (a.y == b.y) continue;
-        Edge e;
-        e.dir = a.y < b.y ? 1 : -1;
-        if (a.y > b.y) std::swap(a, b);
-        e.x0 = a.x;
-        e.y0 = a.y;
-        e.x1 = b.x;
-        e.y1 = b.y;
-        edges.push_back(e);
-        minY = std::min(minY, a.y);
-        maxY = std::max(maxY, b.y);
-      }
-    }
-    if (edges.empty()) return;
-    int y0 = std::max(0, (int)std::floor(minY)), y1 = std::min(h_, (int)std::ceil(maxY));
-    const int S = 4;
-    std::vector<std::pair<float, int> > xs;
-    std::vector<float> row(w_ + 2);
-    for (int y = y0; y < y1; ++y) {
-      bool any = false;
-      std::fill(row.begin(), row.end(), 0.0f);
-      for (int s = 0; s < S; ++s) {
-        float sy = y + (s + 0.5f) / S;
-        xs.clear();
-        for (size_t i = 0; i < edges.size(); ++i) {
-          const Edge& e = edges[i];
-          if (sy < e.y0 || sy >= e.y1) continue;
-          float t = (sy - e.y0) / (e.y1 - e.y0);
-          xs.push_back(std::make_pair(e.x0 + (e.x1 - e.x0) * t, e.dir));
-        }
-        if (xs.size() < 2) continue;
-        std::sort(xs.begin(), xs.end());
-        int wind = 0;
-        for (size_t i = 0; i + 1 < xs.size(); ++i) {
-          wind += xs[i].second;
-          bool inside = evenOdd ? (i % 2 == 0) : wind != 0;
-          if (!inside) continue;
-          AddSpan(row, xs[i].first, xs[i + 1].first, 1.0f / S);
-          any = true;
-        }
-      }
-      if (!any) continue;
-      float* dst = &cov_[(size_t)y * w_];
-      for (int x = 0; x < w_; ++x)
-        if (row[x] > 0) dst[x] = std::min(1.0f, dst[x] + row[x]);
-    }
-  }
-
-  void Composite(Color c, float opacity, DecodedImage& out) {
-    float a = c.a / 255.0f * opacity;
-    for (size_t i = 0; i < cov_.size(); ++i) {
-      float cv = cov_[i];
-      if (cv <= 0) continue;
-      float sa = std::min(1.0f, cv) * a;
-      uint32_t d = out.pixels[i];
-      float da = (d >> 24) / 255.0f;
-      float dr = ((d >> 16) & 255), dg = ((d >> 8) & 255), db = (d & 255);
-      float na = sa + da * (1 - sa);
-      unsigned r = (unsigned)(c.r * sa + dr * (1 - sa) + 0.5f);
-      unsigned g = (unsigned)(c.g * sa + dg * (1 - sa) + 0.5f);
-      unsigned b = (unsigned)(c.b * sa + db * (1 - sa) + 0.5f);
-      unsigned aa = (unsigned)(na * 255 + 0.5f);
-      out.pixels[i] = (std::min(aa, 255u) << 24) | (std::min(r, 255u) << 16) | (std::min(g, 255u) << 8) |
-                      std::min(b, 255u);
-    }
-  }
-
- private:
-  void AddSpan(std::vector<float>& row, float xa, float xb, float weight) {
-    if (xb <= 0 || xa >= w_) return;
-    xa = std::max(0.0f, xa);
-    xb = std::min((float)w_, xb);
-    int ia = (int)xa, ib = (int)xb;
-    if (ia == ib) {
-      row[ia] += (xb - xa) * weight;
-      return;
-    }
-    row[ia] += (ia + 1 - xa) * weight;
-    for (int x = ia + 1; x < ib; ++x) row[x] += weight;
-    if (ib < w_) row[ib] += (xb - ib) * weight;
-  }
-  int w_, h_;
-  std::vector<float> cov_;
-};
-
-// ---------------------------------------------------------------------------
 // Styling
 
 struct PaintState {
@@ -483,6 +268,10 @@ struct PaintState {
   float strokeOpacity;
   bool evenOdd;
   Color current;
+  LineJoin join = kJoinMiter;
+  LineCap cap = kCapButt;
+  float miterLimit = 4;
+  std::vector<float> dash;
   PaintState()
       : hasFill(true), fill(0, 0, 0), hasStroke(false), strokeWidth(1), opacity(1),
         fillOpacity(1), strokeOpacity(1), evenOdd(false), current(0, 0, 0) {}
@@ -688,6 +477,21 @@ class SvgRenderer {
       if (ps.hasStroke) ps.stroke = c;
     }
     if (Prop(n, "stroke-width", v)) ps.strokeWidth = Num(v, 1);
+    if (Prop(n, "stroke-linejoin", v)) ps.join = v == "round" ? kJoinRound : v == "bevel" ? kJoinBevel : kJoinMiter;
+    if (Prop(n, "stroke-linecap", v)) ps.cap = v == "round" ? kCapRound : v == "square" ? kCapSquare : kCapButt;
+    if (Prop(n, "stroke-miterlimit", v)) ps.miterLimit = Num(v, 4);
+    if (Prop(n, "stroke-dasharray", v)) {
+      ps.dash.clear();
+      if (v != "none") {
+        NumReader r(v);
+        float x;
+        while (r.Number(x)) ps.dash.push_back(std::max(0.0f, x));
+        if (ps.dash.size() % 2) ps.dash.insert(ps.dash.end(), ps.dash.begin(), ps.dash.end());
+        float sum = 0;
+        for (size_t i = 0; i < ps.dash.size(); ++i) sum += ps.dash[i];
+        if (sum <= 0) ps.dash.clear();
+      }
+    }
     if (Prop(n, "fill-opacity", v)) ps.fillOpacity = Num(v, 1);
     if (Prop(n, "stroke-opacity", v)) ps.strokeOpacity = Num(v, 1);
     if (Prop(n, "fill-rule", v)) ps.evenOdd = AsciiLower(Trim(v)) == "evenodd";
@@ -698,55 +502,19 @@ class SvgRenderer {
     if (ps.hasFill && ps.fillOpacity > 0) {
       raster_->Clear();
       raster_->Fill(polys, ps.evenOdd);
-      raster_->Composite(ps.fill, opacity * ps.fillOpacity, out);
+      Composite(*raster_, ps.fill, opacity * ps.fillOpacity, out);
     }
     if (ps.hasStroke && ps.strokeWidth > 0 && ps.strokeOpacity > 0) {
-      float hw = std::max(0.35f, ps.strokeWidth * m.Scale() / 2);
-      std::vector<Poly> quads;
-      for (size_t i = 0; i < polys.size(); ++i) {
-        const Poly& p = polys[i];
-        size_t n = p.size();
-        size_t segs = closed[i] ? n : n - 1;
-        for (size_t k = 0; k < segs; ++k) {
-          Pt a = p[k], b = p[(k + 1) % n];
-          float dx = b.x - a.x, dy = b.y - a.y, len = std::sqrt(dx * dx + dy * dy);
-          if (len < 1e-4f) continue;
-          float nx = -dy / len * hw, ny = dx / len * hw;
-          Poly q(4);
-          q[0].x = a.x + nx; q[0].y = a.y + ny;
-          q[1].x = b.x + nx; q[1].y = b.y + ny;
-          q[2].x = b.x - nx; q[2].y = b.y - ny;
-          q[3].x = a.x - nx; q[3].y = a.y - ny;
-          quads.push_back(q);
-        }
-        // Round joins/caps.
-        if (hw > 0.8f) {
-          for (size_t k = 0; k < n; ++k) {
-            Poly c;
-            int segsC = std::max(8, (int)(hw * 2));
-            for (int s = segsC; s > 0; --s) {
-              float t = 2 * kPi * s / segsC;
-              Pt pt = {p[k].x + hw * std::cos(t), p[k].y + hw * std::sin(t)};
-              c.push_back(pt);
-            }
-            quads.push_back(c);
-          }
-        }
-      }
-      // Normalise orientation so nonzero filling unions everything.
-      for (size_t i = 0; i < quads.size(); ++i) {
-        float area = 0;
-        const Poly& q = quads[i];
-        for (size_t k = 0; k < q.size(); ++k) {
-          const Pt& a = q[k];
-          const Pt& b = q[(k + 1) % q.size()];
-          area += a.x * b.y - b.x * a.y;
-        }
-        if (area < 0) std::reverse(quads[i].begin(), quads[i].end());
-      }
+      StrokeStyle st;
+      st.width = std::max(0.7f, ps.strokeWidth * m.Scale());
+      st.join = ps.join;
+      st.cap = ps.cap;
+      st.miterLimit = ps.miterLimit;
+      for (size_t i = 0; i < ps.dash.size(); ++i) st.dash.push_back(ps.dash[i] * m.Scale());
+      std::vector<Poly> outline = StrokePolys(polys, closed, st);
       raster_->Clear();
-      raster_->Fill(quads, false);
-      raster_->Composite(ps.stroke, opacity * ps.strokeOpacity, out);
+      raster_->Fill(outline, false);
+      Composite(*raster_, ps.stroke, opacity * ps.strokeOpacity, out);
     }
   }
 
@@ -881,6 +649,10 @@ class SvgRenderer {
 };
 
 }  // namespace
+
+namespace gfx {
+void ParseSvgPath(const std::string& d, PathBuilder& pb) { ParsePathData(d, pb); }
+}  // namespace gfx
 
 bool SvgIntrinsicSize(const Node* svg, float& w, float& h) {
   w = h = 0;

@@ -343,6 +343,22 @@ double ParseDoublePrefix(const std::string& s, size_t& consumed) {
   return sign * v;
 }
 
+std::string Base64Encode(const std::string& in) {
+  static const char* kChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+  std::string out;
+  out.reserve((in.size() + 2) / 3 * 4);
+  for (size_t i = 0; i < in.size(); i += 3) {
+    unsigned n = (unsigned char)in[i] << 16;
+    if (i + 1 < in.size()) n |= (unsigned char)in[i + 1] << 8;
+    if (i + 2 < in.size()) n |= (unsigned char)in[i + 2];
+    out += kChars[(n >> 18) & 63];
+    out += kChars[(n >> 12) & 63];
+    out += i + 1 < in.size() ? kChars[(n >> 6) & 63] : '=';
+    out += i + 2 < in.size() ? kChars[n & 63] : '=';
+  }
+  return out;
+}
+
 std::string Base64Decode(const std::string& in) {
   std::string out;
   unsigned int buf = 0;

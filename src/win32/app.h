@@ -67,12 +67,13 @@ class GdiFonts : public FontProvider {
   FontMetrics Metrics(const FontDesc& font);
   float MeasureText(const FontDesc& font, const std::string& utf8);
   // Returns a cached HFONT for drawing at |scale| (zoom).
-  HFONT Get(const FontDesc& font, float scale);
+  HFONT Get(const FontDesc& font, float scale, bool grayscale = false);
   // Installs a downloaded font (sfnt data) for this process only and maps the
   // CSS family/weight/style to it.
   bool RegisterWebFont(const std::string& cssFamily, int weight, bool italic,
                        const std::string& sfnt, const std::string& internalName);
   bool IsWebFont(const FontDesc& font);
+  bool RasterizeText(const FontDesc& font, const std::string& utf8, TextMask& out);
 
  private:
   struct WebFont {
@@ -102,6 +103,7 @@ class ImageCache : public ImageProvider {
   };
   State GetImage(const std::string& url, int& width, int& height);
   const DecodedImage* Find(const std::string& url);
+  const DecodedImage* Pixels(const std::string& url) { return Find(url); }
   void SetLoading(const std::string& url);
   void SetLoaded(const std::string& url, DecodedImage& img);
   void SetFailed(const std::string& url);
@@ -114,6 +116,7 @@ class ImageCache : public ImageProvider {
  private:
   std::map<std::string, Entry> entries_;
   std::map<std::string, DecodedImage> scaled_;
+  std::map<std::string, std::pair<unsigned, DecodedImage> > canvasScaled_;
   std::list<std::string> scaledOrder_;
   size_t scaledBytes_ = 0;
   unsigned clock_ = 0;
