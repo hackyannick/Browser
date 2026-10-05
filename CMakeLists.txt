@@ -36,13 +36,33 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # ---------------------------------------------------------------------------
+# libwebp decoder (BSD licensed, vendored in third_party/libwebp)
+file(GLOB WEBP_SOURCES
+  ${CMAKE_SOURCE_DIR}/third_party/libwebp/src/dec/*.c
+  ${CMAKE_SOURCE_DIR}/third_party/libwebp/src/dsp/*.c
+  ${CMAKE_SOURCE_DIR}/third_party/libwebp/src/utils/*.c)
+add_library(webpdec STATIC ${WEBP_SOURCES})
+target_include_directories(webpdec PUBLIC ${CMAKE_SOURCE_DIR}/third_party/libwebp)
+
+# Brotli decoder (MIT licensed, vendored in third_party/brotli)
+file(GLOB BROTLI_SOURCES
+  ${CMAKE_SOURCE_DIR}/third_party/brotli/dec/*.c
+  ${CMAKE_SOURCE_DIR}/third_party/brotli/common/*.c)
+add_library(brotlidec STATIC ${BROTLI_SOURCES})
+target_include_directories(brotlidec PUBLIC ${CMAKE_SOURCE_DIR}/third_party/brotli/include)
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(webpdec PRIVATE -w)
+  target_compile_options(brotlidec PRIVATE -w)
+endif()
+
+# ---------------------------------------------------------------------------
 # Kite engine (portable C++11: HTML, CSS, layout, paint, network)
 file(GLOB_RECURSE KITE_ENGINE_SOURCES ${CMAKE_SOURCE_DIR}/src/engine/*.cpp)
 add_library(kite_engine STATIC ${KITE_ENGINE_SOURCES})
 target_include_directories(kite_engine PUBLIC
   ${CMAKE_SOURCE_DIR}/src/engine
   ${CMAKE_SOURCE_DIR}/third_party/stb)
-target_link_libraries(kite_engine PUBLIC bearssl quickjs)
+target_link_libraries(kite_engine PUBLIC bearssl quickjs webpdec brotlidec)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(kite_engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()

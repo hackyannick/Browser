@@ -460,8 +460,8 @@ std::vector<WebFontRequest> Page::PendingFonts() {
         std::string fmt = f.sources[q].second;
         std::string lower = AsciiLower(f.sources[q].first);
         lower = lower.substr(0, lower.find_first_of("?#"));
-        bool ok = fmt == "woff" || fmt == "truetype" || fmt == "opentype" ||
-                  (fmt.empty() && (EndsWith(lower, ".woff") || EndsWith(lower, ".ttf") ||
+        bool ok = fmt == "woff" || fmt == "woff2" || fmt == "truetype" || fmt == "opentype" ||
+                  (fmt.empty() && (EndsWith(lower, ".woff") || EndsWith(lower, ".woff2") || EndsWith(lower, ".ttf") ||
                                    EndsWith(lower, ".otf")));
         if (ok) {
           Url u = base.Resolve(f.sources[q].first);

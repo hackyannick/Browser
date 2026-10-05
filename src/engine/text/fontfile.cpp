@@ -4,6 +4,7 @@
 #include <vector>
 
 #include "base/strings.h"
+#include "text/woff2.h"
 
 extern "C" {
 char* stbi_zlib_decode_malloc_guesssize_headerflag(const char* buffer, int len, int initial_size,
@@ -42,7 +43,7 @@ void Put32(std::string& s, unsigned long v) {
 bool FontToSfnt(const std::string& data, std::string& out) {
   if (data.size() < 12) return false;
   std::string sig = data.substr(0, 4);
-  if (sig == "wOF2") return false;
+  if (sig == "wOF2") return Woff2ToSfnt(data, out);
   if (sig != "wOFF") {
     unsigned long v = U32(data, 0);
     if (v == 0x00010000UL || sig == "OTTO" || sig == "true") {

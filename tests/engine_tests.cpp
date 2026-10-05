@@ -12,10 +12,12 @@
 #include "css/stylesheet.h"
 #include "html/entities.h"
 #include "html/parser.h"
+#include "image/image.h"
 #include "image/svg.h"
 #include "net/http.h"
 #include "net/url.h"
 #include "page/page.h"
+#include "text/fontfile.h"
 
 using namespace kite;
 
@@ -426,6 +428,50 @@ void TestSvg() {
   CHECK_EQ(h, 24.0f);
 }
 
+#include "fixtures.inc"
+
+unsigned SfntU16(const std::string& s, size_t p) { return ((unsigned char)s[p] << 8) | (unsigned char)s[p + 1]; }
+
+// Returns the byte length of table |tag| in an sfnt file (0 if missing).
+size_t SfntTableLength(const std::string& s, const char* tag) {
+  unsigned n = SfntU16(s, 4);
+  for (unsigned i = 0; i < n; ++i) {
+    size_t rec = 12 + i * 16;
+    if (s.compare(rec, 4, tag) == 0)
+      return ((size_t)(unsigned char)s[rec + 12] << 24) | ((size_t)(unsigned char)s[rec + 13] << 16) |
+             ((size_t)(unsigned char)s[rec + 14] << 8) | (unsigned char)s[rec + 15];
+  }
+  return 0;
+}
+
+void TestWebPAndWoff2() {
+  DecodedImage img;
+  CHECK(DecodeImage(kLossyWebp, img));
+  CHECK_EQ(img.width, 16);
+  if (!img.pixels.empty()) {
+    uint32_t p = img.pixels[8 * 16 + 8];
+    CHECK((p >> 16 & 255) > 240 && (p >> 8 & 255) < 20 && (p & 255) < 20);  // red
+  }
+  CHECK(DecodeImage(kLosslessWebp, img));
+  CHECK_EQ(img.height, 8);
+  CHECK(img.hasAlpha);
+  if (img.pixels.size() == 64) {
+    CHECK_EQ(img.pixels[0], 0u);                 // transparent top half
+    CHECK_EQ(img.pixels[63], 0xFF0000FFu);       // opaque blue
+  }
+  CHECK(DecodeImage(kAnimatedWebp, img));      // first frame
+  if (img.pixels.size() == 64) CHECK_EQ(img.pixels[0], 0xFF00FF00u);
+
+  std::string sfnt;
+  CHECK(FontToSfnt(kWoff2Font, sfnt));
+  CHECK_EQ(SfntFamilyName(sfnt), "DejaVu Sans");
+  CHECK_EQ(SfntTableLength(sfnt, "loca"), 8u * 4);  // 7 glyphs, long offsets
+  CHECK_EQ(SfntTableLength(sfnt, "hmtx") >= 7u * 2, true);
+  CHECK(SfntTableLength(sfnt, "glyf") > 0);
+  std::string broken = kWoff2Font.substr(0, kWoff2Font.size() / 2);
+  CHECK(!FontToSfnt(broken, sfnt));
+}
+
 class TestHost : public ScriptHost {
  public:
   std::string cookies, title, navigated, alerted;
@@ -595,6 +641,7 @@ int main() {
   TestHttpHelpers();
   TestSvg();
   TestScript();
+  TestWebPAndWoff2();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

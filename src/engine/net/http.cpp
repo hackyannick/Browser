@@ -12,6 +12,8 @@
 #include <sys/stat.h>
 #endif
 
+#include <brotli/decode.h>
+
 #include "base/strings.h"
 
 extern "C" {
@@ -209,8 +211,25 @@ bool Inflate(const std::string& in, const std::string& enc, std::string& out) {
     // Usually zlib-wrapped; some servers send raw deflate.
     parseHeader = len >= 2 && (((unsigned char)data[0] << 8) | (unsigned char)data[1]) % 31 == 0 &&
                           ((unsigned char)data[0] & 0x0f) == 8;
+  } else if (e == "br") {
+    BrotliDecoderState* st = BrotliDecoderCreateInstance(0, 0, 0);
+    if (!st) return false;
+    const uint8_t* next = (const uint8_t*)in.data();
+    size_t avail = in.size();
+    out.clear();
+    BrotliDecoderResult res;
+    do {
+      uint8_t buf[65536];
+      uint8_t* o = buf;
+      size_t room = sizeof buf;
+      res = BrotliDecoderDecompressStream(st, &avail, &next, &room, &o, 0);
+      out.append((const char*)buf, sizeof buf - room);
+      if (out.size() > 256u * 1024 * 1024) res = BROTLI_DECODER_RESULT_ERROR;
+    } while (res == BROTLI_DECODER_RESULT_NEEDS_MORE_OUTPUT);
+    BrotliDecoderDestroyInstance(st);
+    return res == BROTLI_DECODER_RESULT_SUCCESS;
   } else {
-    return false;  // br, zstd ... not supported (we never ask for them)
+    return false;  // zstd ... not supported (we never ask for it)
   }
   int outLen = 0;
   char* r = stbi_zlib_decode_malloc_guesssize_headerflag(data, len, len * 4 + 1024, &outLen,
@@ -510,7 +529,7 @@ FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const 
   r += "User-Agent: " + ua + "\r\n";
   r += "Accept: " + (req.accept.empty() ? std::string("text/html,application/xhtml+xml,application/xml;q=0.9,image/png,image/jpeg,image/gif,*/*;q=0.8") : req.accept) + "\r\n";
   r += "Accept-Language: de-DE,de;q=0.9,en;q=0.7\r\n";
-  r += "Accept-Encoding: gzip, deflate\r\n";
+  r += "Accept-Encoding: gzip, deflate, br\r\n";
   r += "Connection: close\r\n";
   r += "Upgrade-Insecure-Requests: 1\r\n";
   std::string cookie = cookies_.CookieHeader(url);

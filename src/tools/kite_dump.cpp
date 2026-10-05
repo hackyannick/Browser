@@ -14,6 +14,7 @@
 #include "image/svg.h"
 #include "net/http.h"
 #include "page/page.h"
+#include "text/fontfile.h"
 
 using namespace kite;
 
@@ -215,6 +216,20 @@ int main(int argc, char** argv) {
   float width = 1024, height = 768;
   bool tree = true, dl = false, images = false, js = false;
   std::string inspect;
+  if (argc == 4 && std::string(argv[1]) == "--font") {
+    // Converts a web font (WOFF/WOFF2) into a TrueType/OpenType file.
+    std::string sfnt;
+    if (!FontToSfnt(ReadFile(argv[2]), sfnt)) {
+      fprintf(stderr, "conversion failed\n");
+      return 1;
+    }
+    FILE* f = fopen(argv[3], "wb");
+    if (!f) return 1;
+    fwrite(sfnt.data(), 1, sfnt.size(), f);
+    fclose(f);
+    printf("family: %s\n", SfntFamilyName(sfnt).c_str());
+    return 0;
+  }
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
     if (a == "--width" && i + 1 < argc) width = (float)atof(argv[++i]);

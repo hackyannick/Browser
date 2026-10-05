@@ -1,4 +1,4 @@
-// Kite Engine - image decoding (PNG, JPEG, GIF, BMP via stb_image)
+// Kite Engine - image decoding (PNG, JPEG, GIF, BMP via stb_image; WebP via libwebp)
 #ifndef KITE_IMAGE_IMAGE_H
 #define KITE_IMAGE_IMAGE_H
 

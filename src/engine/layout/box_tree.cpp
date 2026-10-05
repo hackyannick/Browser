@@ -266,6 +266,26 @@ class Builder {
     if (dataSrc.empty()) dataSrc = Trim(el->Attr("data-original"));
     if (!dataSrc.empty() && (src.empty() || StartsWithIgnoreCase(src, "data:")))
       src = dataSrc;
+    // <picture>: the first <source> with a supported type wins (media
+    // conditions are not evaluated; such sources are skipped).
+    if (el->tag == "img" && el->parent && el->parent->Is("picture")) {
+      for (size_t i = 0; i < el->parent->children.size(); ++i) {
+        Node* c = el->parent->children[i].get();
+        if (c == el) break;
+        if (!c->Is("source") || c->HasAttr("media")) continue;
+        std::string type = AsciiLower(Trim(c->Attr("type")));
+        if (!type.empty() && type != "image/webp" && type != "image/png" && type != "image/jpeg" &&
+            type != "image/gif" && type != "image/svg+xml" && type != "image/bmp")
+          continue;  // e.g. AVIF, JPEG XL
+        std::string set = c->Attr("srcset");
+        if (set.empty()) set = c->Attr("data-srcset");
+        std::vector<std::string> first = SplitWhitespace(Split(set, ',')[0]);
+        if (!first.empty()) {
+          src = first[0];
+          break;
+        }
+      }
+    }
     if (src.empty()) {
       std::string srcset = el->Attr("srcset");
       if (srcset.empty()) srcset = el->Attr("data-srcset");

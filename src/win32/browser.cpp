@@ -262,7 +262,8 @@ bool IsTextMime(const std::string& m) {
 
 bool IsImageMime(const std::string& m) {
   return m == "image/svg+xml" || m == "image/png" || m == "image/jpeg" || m == "image/jpg" || m == "image/gif" ||
-         m == "image/bmp" || m == "image/x-ms-bmp" || m == "image/pjpeg" || m == "image/x-png";
+         m == "image/bmp" || m == "image/x-ms-bmp" || m == "image/pjpeg" || m == "image/x-png" ||
+         m == "image/webp";
 }
 
 }  // namespace
@@ -1105,7 +1106,7 @@ void Browser::RequestImages(Tab* t) {
     job->notify = hwnd_;
     job->request.url = u;
     job->request.referrer = t->url;
-    job->request.accept = "image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
+    job->request.accept = "image/webp,image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
     job->request.maxBytes = 16 * 1024 * 1024;
     ++t->pendingImages;
     StartFetch(job);
@@ -1122,7 +1123,7 @@ void Browser::RequestFonts(Tab* t) {
     job->notify = hwnd_;
     job->request.url = fonts[i].url;
     job->request.referrer = t->url;
-    job->request.accept = "font/woff,font/ttf,application/font-woff,*/*;q=0.5";
+    job->request.accept = "font/woff2,font/woff,font/ttf,application/font-woff,*/*;q=0.5";
     job->request.maxBytes = 8 * 1024 * 1024;
     job->fontFamily = fonts[i].family;
     job->fontWeight = fonts[i].weight;
