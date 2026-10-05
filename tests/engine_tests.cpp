@@ -22,6 +22,7 @@
 #include "image/image.h"
 #include "image/svg.h"
 #include "net/hpack.h"
+#include "net/tls13.h"
 #include "net/websocket.h"
 #include "script/storage.h"
 #include "net/http.h"
@@ -1166,6 +1167,49 @@ void TestAsyncApis() {
   CHECK_EQ(p.Eval("st"), "ab");
 }
 
+void TestTls13() {
+  // RFC 8448 section 3 (simple 1-RTT handshake): the key schedule.
+  std::string zeros(32, '\0');
+  std::string early = Tls13Client::HkdfExtract(false, "", zeros);
+  CHECK_EQ(early, Hex("33ad0a1c607ec03b09e6cd9893680ce210adf300aa1f2660e1b22e10f170f92a"));
+  std::string emptyHash = Hex("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+  std::string derived = Tls13Client::HkdfExpandLabel(false, early, "derived", emptyHash, 32);
+  CHECK_EQ(derived, Hex("6f2615a108c702c5678f54fc9dbab69716c076189c48250cebeac3576c3611ba"));
+  std::string hs = Tls13Client::HkdfExtract(false, derived, Hex("8bd4054fb55b9d63fdfbacf9f04b9f0d35e6d63f537563efd46272900f89492d"));
+  CHECK_EQ(hs, Hex("1dc826e93606aa6fdc0aadc12f741b01046aa6b99f691ed221a9f0ca043fbeac"));
+  std::string th = Hex("860c06edc07858ee8e78f0e7428c58edd6b43f2ca3e6e95f02ed063cf0e1cad8");
+  CHECK_EQ(Tls13Client::HkdfExpandLabel(false, hs, "c hs traffic", th, 32),
+           Hex("b3eddb126e067f35a780b3abf45e2d8f3b1a950738f52e9600746a0e27a55a21"));
+  std::string shs = Tls13Client::HkdfExpandLabel(false, hs, "s hs traffic", th, 32);
+  CHECK_EQ(shs, Hex("b67b7d690cc16c4e75e54213cb2d37b4e9c912bcded9105d42befd59d391ad38"));
+  CHECK_EQ(Tls13Client::HkdfExpandLabel(false, shs, "key", "", 16), Hex("3fce516009c21727d0f2e4e86ee403bc"));
+  CHECK_EQ(Tls13Client::HkdfExpandLabel(false, shs, "iv", "", 12), Hex("5d313eb2671276ee13000b30"));
+
+  // RSA-PSS (SHA-256, salt = hash length), signed with OpenSSL.
+  std::string n = Hex(
+      "b5ed33983effb7206d448cc7428858f34f2d9705fb99a4daacf5b2b302700dc6a099f3332a5511cf9a53e2ae696adbdb1b0e86fb1627"
+      "004be73994043314bc95d59ea75f637f44b2ecb35c4edac345a3595aa62d64ddf3c7c5d1bb8292da69db9aee0ad450de50b0fee3eeab9b"
+      "4580e56a735c86934aed710f572c17966c724f");
+  std::string sig = Hex(
+      "396c575fe8c2ef00f8ddd3fb1406dfe94d86d55b67eb0d2f820befce1945337f58ba289c8cc52b8d97e9c52512c8f216f860a9f8893866"
+      "336288b57b36ecf1d992b2c5c76ccc565e2d09b408860720a5f96f31fed28c2600dcb3a5e5cc1ef5ce8cbaafd016e17d8c475d10bd6dde"
+      "3b406fee1d75099f11e54a47c884f3aa798c");
+  std::string mh = Hex("b66395e2d31ea117ab0c2578428439bed83cea0f5f0b67ff3a1e999dd87df498");
+  std::string e = Hex("010001");
+  const unsigned char* un = (const unsigned char*)n.data();
+  const unsigned char* ue = (const unsigned char*)e.data();
+  CHECK(Tls13Client::VerifyPss(un, n.size(), ue, e.size(), 256, (const unsigned char*)mh.data(),
+                               (const unsigned char*)sig.data(), sig.size()));
+  std::string bad = sig;
+  bad[10] ^= 1;
+  CHECK(!Tls13Client::VerifyPss(un, n.size(), ue, e.size(), 256, (const unsigned char*)mh.data(),
+                                (const unsigned char*)bad.data(), bad.size()));
+  std::string otherHash = mh;
+  otherHash[0] ^= 1;
+  CHECK(!Tls13Client::VerifyPss(un, n.size(), ue, e.size(), 256, (const unsigned char*)otherHash.data(),
+                                (const unsigned char*)sig.data(), sig.size()));
+}
+
 void TestHpack() {
   // RFC 7541 C.4: requests with Huffman coding and a shared dynamic table.
   HpackDecoder d;
@@ -1251,6 +1295,7 @@ int main() {
   TestWebApis();
   TestWebComponents();
   TestAsyncApis();
+  TestTls13();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

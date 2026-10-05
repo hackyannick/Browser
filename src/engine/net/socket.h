@@ -61,6 +61,11 @@ class TlsStream : public Stream {
   bool Handshake(const std::string& host, const char* const* alpn = 0, int alpnCount = 0);
   // Protocol chosen by the server ("" without ALPN).
   std::string selectedProtocol() const;
+  // TLS 1.3 is tried first; a server that only speaks TLS 1.2 makes the
+  // handshake fail with this flag set: reconnect and call Handshake again
+  // (the host is then remembered and TLS 1.2 is used directly).
+  bool needsTls12Retry() const { return needs12_; }
+  std::string version() const;
   int Read(char* buf, int len);
   bool WriteAll(const char* buf, int len);
   // True when decrypted data is buffered or the socket becomes readable.
@@ -72,7 +77,11 @@ class TlsStream : public Stream {
   Impl* impl_;
   TcpSocket* sock_;
   std::string error_;
+  bool needs12_ = false;
 };
+
+// TLS 1.3 support (on by default).
+void SetTls13Enabled(bool on);
 
 // Must be called once before using sockets (WSAStartup on Windows).
 void NetInit();

@@ -44,6 +44,7 @@ struct FetchResponse {
   std::string body;      // decoded (gzip/deflate removed)
   bool secure;           // delivered over TLS
   std::string protocol;  // "http/1.1" or "h2"
+  std::string tlsVersion;  // "TLS 1.3" / "TLS 1.2" (https only)
 
   FetchResponse() : ok(false), status(0), secure(false) {}
   std::string Header(const std::string& name) const;

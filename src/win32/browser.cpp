@@ -128,6 +128,7 @@ class Tab {
   float renderedW = 0, renderedH = 0;
   TabScriptHost jsHost;
   std::string protocol;  // of the current document ("h2", "http/1.1")
+  std::string tlsVersion;  // "TLS 1.3" / "TLS 1.2"
   int pendingScripts = 0;
   // Navigation requested by a script; performed outside of script execution.
   bool jsNavPending = false;
@@ -1090,6 +1091,7 @@ void Browser::OnDocument(Tab* t, FetchJob* job) {
   }
   CommitNavigation(t, finalUrl, r.secure);
   t->protocol = r.protocol;
+  t->tlsVersion = r.tlsVersion;
   globalHistory_.push_back(std::make_pair(finalUrl, std::string()));
   if (globalHistory_.size() > 200) globalHistory_.erase(globalHistory_.begin());
   t->status = "Lade Stylesheets ...";
@@ -1368,7 +1370,7 @@ void Browser::UpdateUi() {
   SetStatus(t->status);
   std::wstring zoomText = Widen(IntToString(zoom_) + " %");
   SendMessageW(status_, SB_SETTEXTW, 2, (LPARAM)zoomText.c_str());
-  std::string sec = StartsWith(t->url, "https:") ? (t->secure ? (t->protocol == "h2" ? "Sicher (TLS, HTTP/2)" : "Sicher (TLS)") : "") :
+  std::string sec = StartsWith(t->url, "https:") ? (t->secure ? "Sicher (" + (t->tlsVersion.empty() ? std::string("TLS") : t->tlsVersion) + (t->protocol == "h2" ? ", HTTP/2)" : ")") : "") :
                     StartsWith(t->url, "http:") ? "Nicht sicher" : "";
   SendMessageW(status_, SB_SETTEXTW, 3, (LPARAM)Widen(sec).c_str());
   std::string prog = t->loading ? "Laden ..." : "";

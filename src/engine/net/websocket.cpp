@@ -171,35 +171,39 @@ void WebSocketClient::Run() {
   };
   int port = u.port() > 0 ? u.port() : (tls ? 443 : 80);
   std::string hostPort = u.host() + ":" + IntToString(port);
-  if (!sock.Connect(proxy.enabled() ? proxy.host : u.host(), proxy.enabled() ? proxy.port : port, 20000, 0)) {
-    fail(sock.error());
-    return;
-  }
-  if (proxy.enabled()) {
-    std::string connect = "CONNECT " + hostPort + " HTTP/1.1\r\nHost: " + hostPort + "\r\n\r\n";
-    std::string reply;
-    char c;
-    if (!sock.WriteAll(connect.data(), (int)connect.size())) {
-      fail("Proxy-Verbindung fehlgeschlagen");
+  for (int attempt = 0;; ++attempt) {
+    sock.Close();
+    if (!sock.Connect(proxy.enabled() ? proxy.host : u.host(), proxy.enabled() ? proxy.port : port, 20000, 0)) {
+      fail(sock.error());
       return;
     }
-    while (reply.find("\r\n\r\n") == std::string::npos && reply.size() < 16384) {
-      if (sock.Read(&c, 1) != 1) break;
-      reply += c;
+    if (proxy.enabled()) {
+      std::string connect = "CONNECT " + hostPort + " HTTP/1.1\r\nHost: " + hostPort + "\r\n\r\n";
+      std::string reply;
+      char c;
+      if (!sock.WriteAll(connect.data(), (int)connect.size())) {
+        fail("Proxy-Verbindung fehlgeschlagen");
+        return;
+      }
+      while (reply.find("\r\n\r\n") == std::string::npos && reply.size() < 16384) {
+        if (sock.Read(&c, 1) != 1) break;
+        reply += c;
+      }
+      if (reply.find(" 200") == std::string::npos || reply.find(" 200") > reply.find("\r\n")) {
+        fail("Proxy hat die Verbindung abgelehnt");
+        return;
+      }
     }
-    if (reply.find(" 200") == std::string::npos || reply.find(" 200") > reply.find("\r\n")) {
-      fail("Proxy hat die Verbindung abgelehnt");
-      return;
-    }
-  }
-  if (tls) {
+    if (!tls) break;
     static const char* const kAlpn[] = {"http/1.1"};
     tlsStream.reset(new TlsStream(&sock));
-    if (!tlsStream->Handshake(u.host(), kAlpn, 1)) {
-      fail("TLS: " + tlsStream->error());
-      return;
+    if (tlsStream->Handshake(u.host(), kAlpn, 1)) {
+      stream = tlsStream.get();
+      break;
     }
-    stream = tlsStream.get();
+    if (tlsStream->needsTls12Retry() && attempt == 0) continue;
+    fail("TLS: " + tlsStream->error());
+    return;
   }
   // Opening handshake.
   std::string keyRaw;

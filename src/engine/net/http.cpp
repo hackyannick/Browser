@@ -575,6 +575,7 @@ bool Network::FetchHttp2(const std::shared_ptr<Http2Connection>& conn, const Url
   resp.finalUrl = url.Spec();
   resp.secure = true;
   resp.protocol = "h2";
+  resp.tlsVersion = conn->tlsVersion();
   if (!r.ok) {
     // Idempotent requests are repeated on a fresh connection.
     if (r.retryable && (method == "GET" || method == "HEAD")) return false;
@@ -647,62 +648,69 @@ FetchResponse Network::FetchHttp(const Url& url, const FetchRequest& req, const 
     connecting_.push_back(poolKey);
   }
   CancelSocketGuard cancelGuard = {req.cancel.get()};
-  std::unique_ptr<TcpSocket> sockOwner(new TcpSocket);
-  TcpSocket& sock = *sockOwner;
+  std::unique_ptr<TcpSocket> sockOwner;
+  std::unique_ptr<TlsStream> tlsStream;
   std::string connectHost = proxy.enabled() ? proxy.host : url.host();
   int connectPort = proxy.enabled() ? proxy.port : url.EffectivePort();
-  if (!sock.Connect(connectHost, connectPort, 20000, req.cancel.get())) {
-    resp.error = sock.error();
-    return resp;
-  }
-  if (proxy.enabled() && tls) {
-    std::string connect = "CONNECT " + url.host() + ":" + IntToString(url.EffectivePort()) +
-                          " HTTP/1.1\r\nHost: " + url.host() + ":" +
-                          IntToString(url.EffectivePort()) + "\r\nUser-Agent: " + ua + "\r\n\r\n";
-    if (!sock.WriteAll(connect.data(), (int)connect.size())) {
-      resp.error = "Proxy-Verbindung fehlgeschlagen";
+  for (int attempt = 0;; ++attempt) {
+    sockOwner.reset(new TcpSocket);
+    TcpSocket& sock = *sockOwner;
+    if (!sock.Connect(connectHost, connectPort, 20000, req.cancel.get())) {
+      resp.error = sock.error();
       return resp;
     }
-    // Read the proxy reply byte-wise so no TLS data is consumed.
-    std::string reply;
-    char c;
-    while (reply.find("\r\n\r\n") == std::string::npos && reply.size() < 16384) {
-      if (sock.Read(&c, 1) != 1) break;
-      reply += c;
+    if (proxy.enabled() && tls) {
+      std::string connect = "CONNECT " + url.host() + ":" + IntToString(url.EffectivePort()) +
+                            " HTTP/1.1\r\nHost: " + url.host() + ":" +
+                            IntToString(url.EffectivePort()) + "\r\nUser-Agent: " + ua + "\r\n\r\n";
+      if (!sock.WriteAll(connect.data(), (int)connect.size())) {
+        resp.error = "Proxy-Verbindung fehlgeschlagen";
+        return resp;
+      }
+      // Read the proxy reply byte-wise so no TLS data is consumed.
+      std::string reply;
+      char c;
+      while (reply.find("\r\n\r\n") == std::string::npos && reply.size() < 16384) {
+        if (sock.Read(&c, 1) != 1) break;
+        reply += c;
+      }
+      if (reply.find(" 200") == std::string::npos || reply.find(" 200") > reply.find("\r\n")) {
+        resp.error = "Proxy hat die Verbindung abgelehnt: " + reply.substr(0, reply.find("\r\n"));
+        return resp;
+      }
     }
-    if (reply.find(" 200") == std::string::npos || reply.find(" 200") > reply.find("\r\n")) {
-      resp.error = "Proxy hat die Verbindung abgelehnt: " + reply.substr(0, reply.find("\r\n"));
-      return resp;
-    }
-  }
-  std::unique_ptr<TlsStream> tlsStream;
-  Stream* stream = &sock;
-  if (tls) {
+    if (!tls) break;
     static const char* const kAlpn[] = {"h2", "http/1.1"};
     tlsStream.reset(new TlsStream(&sock));
     bool offerH2 = http2Enabled();
-    if (!tlsStream->Handshake(url.host(), offerH2 ? kAlpn : 0, offerH2 ? 2 : 0)) {
-      resp.error = "Sichere Verbindung fehlgeschlagen: " + tlsStream->error();
+    if (tlsStream->Handshake(url.host(), offerH2 ? kAlpn : 0, offerH2 ? 2 : 0)) break;
+    // A TLS 1.2-only server: connect again (TLS 1.2 is used from now on).
+    if (tlsStream->needsTls12Retry() && attempt == 0 && !(req.cancel && req.cancel->cancelled())) continue;
+    resp.error = "Sichere Verbindung fehlgeschlagen: " + tlsStream->error();
+    return resp;
+  }
+  TcpSocket& sock = *sockOwner;
+  Stream* stream = &sock;
+  if (tls) {
+    resp.tlsVersion = tlsStream->version();
+  if (tlsStream->selectedProtocol() == "h2") {
+    // The connection is shared from now on: cancelling one request must
+    // not close the socket.
+    if (req.cancel) req.cancel->SetSocket(-1);
+    std::shared_ptr<Http2Connection> conn(new Http2Connection(std::move(sockOwner), std::move(tlsStream)));
+    if (!conn->Start()) {
+      resp.error = "HTTP/2-Verbindung fehlgeschlagen";
       return resp;
     }
-    if (tlsStream->selectedProtocol() == "h2") {
-      // The connection is shared from now on: cancelling one request must
-      // not close the socket.
-      if (req.cancel) req.cancel->SetSocket(-1);
-      std::shared_ptr<Http2Connection> conn(new Http2Connection(std::move(sockOwner), std::move(tlsStream)));
-      if (!conn->Start()) {
-        resp.error = "HTTP/2-Verbindung fehlgeschlagen";
-        return resp;
-      }
-      {
-        MutexLock l(mu_);
-        h2Pool_.push_back(std::make_pair(poolKey, conn));
-        if (std::find(h2Known_.begin(), h2Known_.end(), poolKey) == h2Known_.end()) h2Known_.push_back(poolKey);
-      }
-      connecting.Done();
-      if (!FetchHttp2(conn, url, req, method, body, resp)) resp.error = "HTTP/2-Verbindung abgelehnt";
-      return resp;
+    {
+      MutexLock l(mu_);
+      h2Pool_.push_back(std::make_pair(poolKey, conn));
+      if (std::find(h2Known_.begin(), h2Known_.end(), poolKey) == h2Known_.end()) h2Known_.push_back(poolKey);
     }
+    connecting.Done();
+    if (!FetchHttp2(conn, url, req, method, body, resp)) resp.error = "HTTP/2-Verbindung abgelehnt";
+    return resp;
+  }
     stream = tlsStream.get();
   }
   std::string target = proxy.enabled() && !tls ? url.SpecNoFragment() : url.PathAndQuery();

@@ -259,6 +259,7 @@ int main(int argc, char** argv) {
     else if (a == "--images") images = true;
     else if (a == "--js") js = true;
     else if (a == "--no-h2") Network::Get().SetHttp2Enabled(false);
+    else if (a == "--no-tls13") SetTls13Enabled(false);
     else if (a == "--inspect" && i + 1 < argc) inspect = argv[++i];
     else if (a == "--pre" && i + 1 < argc) preScript = argv[++i];  // JavaScript run before the page's scripts
     else target = a;
@@ -294,8 +295,8 @@ int main(int argc, char** argv) {
     fprintf(stderr, "fetch failed: %s (anchors loaded: %d)\n", r.error.c_str(), anchors);
     return 1;
   }
-  fprintf(stderr, "status %d, %zu bytes, type %s, %s, final %s\n", r.status, r.body.size(),
-          r.MimeType().c_str(), r.protocol.c_str(), r.finalUrl.c_str());
+  fprintf(stderr, "status %d, %zu bytes, type %s, %s %s, final %s\n", r.status, r.body.size(),
+          r.MimeType().c_str(), r.tlsVersion.c_str(), r.protocol.c_str(), r.finalUrl.c_str());
   std::string charset = r.Charset();
   if (charset.empty()) charset = SniffHtmlCharset(r.body);
   std::string html = ConvertToUtf8(r.body, charset);

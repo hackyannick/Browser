@@ -84,6 +84,7 @@ void App::Init(HINSTANCE inst) {
   settings.loadImages = IniGet(L"LoadImages", "1") != "0";
   settings.javaScript = IniGet(L"JavaScript", "1") != "0";
   settings.http2 = IniGet(L"Http2", "1") != "0";
+  settings.tls13 = IniGet(L"Tls13", "1") != "0";
   if (ParseInt(IniGet(L"DefaultZoom", "100"), v)) settings.defaultZoom = (int)v;
 
   NetInit();
@@ -109,6 +110,7 @@ void App::ApplyNetworkSettings() {
   pc.port = settings.proxyPort;
   Network::Get().SetProxy(pc);
   Network::Get().SetHttp2Enabled(settings.http2);
+  SetTls13Enabled(settings.tls13);
 }
 
 void App::SaveSettings() {
@@ -119,6 +121,7 @@ void App::SaveSettings() {
   IniSet(L"LoadImages", settings.loadImages ? "1" : "0");
   IniSet(L"JavaScript", settings.javaScript ? "1" : "0");
   IniSet(L"Http2", settings.http2 ? "1" : "0");
+  IniSet(L"Tls13", settings.tls13 ? "1" : "0");
   IniSet(L"DefaultZoom", IntToString(settings.defaultZoom));
 }
 

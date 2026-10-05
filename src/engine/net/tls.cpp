@@ -1,11 +1,15 @@
 // TLS 1.0-1.2 client built on BearSSL (portable C, no OS crypto needed, which
 // is what makes modern HTTPS possible on Windows 2000).
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <vector>
 
 #include "base/mutex.h"
 #include "base/strings.h"
 #include "net/socket.h"
+#include "net/tls13.h"
 
 extern "C" {
 #include "bearssl.h"
@@ -145,7 +149,31 @@ static const br_x509_class kDedupClass = {
     sizeof(DedupX509), DedupStartChain, DedupStartCert, DedupAppend,
     DedupEndCert,      DedupEndChain,   DedupGetPkey};
 
+// Hosts that answered a TLS 1.3 ClientHello with TLS 1.2 (or not at all).
+namespace {
+Mutex g_tls12Mu;
+std::vector<std::string> g_tls12Hosts;
+bool g_tls13 = true;
+bool IsTls12Only(const std::string& host) {
+  MutexLock l(g_tls12Mu);
+  for (size_t i = 0; i < g_tls12Hosts.size(); ++i)
+    if (g_tls12Hosts[i] == host) return true;
+  return !g_tls13;
+}
+void MarkTls12Only(const std::string& host) {
+  MutexLock l(g_tls12Mu);
+  if (g_tls12Hosts.size() > 1000) g_tls12Hosts.clear();
+  g_tls12Hosts.push_back(host);
+}
+}  // namespace
+
+void SetTls13Enabled(bool on) {
+  MutexLock l(g_tls12Mu);
+  g_tls13 = on;
+}
+
 struct TlsStream::Impl {
+  std::unique_ptr<Tls13Client> t13;
   br_ssl_client_context sc;
   br_x509_minimal_context xc;
   DedupX509 dedup;
@@ -169,6 +197,9 @@ TlsStream::TlsStream(TcpSocket* sock) : impl_(new Impl), sock_(sock) {
 }
 
 TlsStream::~TlsStream() { delete impl_; }
+
+static std::string TlsErrorText(int err);
+std::string X509ErrorText(int err) { return TlsErrorText(err); }
 
 static std::string TlsErrorText(int err) {
   switch (err) {
@@ -199,6 +230,21 @@ bool TlsStream::Handshake(const std::string& host, const char* const* alpn, int 
     AnchorStore& st = Store();
     tas = st.anchors.empty() ? 0 : &st.anchors[0];
     count = st.anchors.size();
+  }
+  needs12_ = false;
+  if (!IsTls12Only(host)) {
+    impl_->t13.reset(new Tls13Client(sock_));
+    Tls13Client::Result r = impl_->t13->Handshake(host, alpn, alpnCount, tas, count);
+    if (r == Tls13Client::kOk) return true;
+    error_ = impl_->t13->error();
+    impl_->t13.reset();
+    if (r == Tls13Client::kNeedsTls12) {
+      if (getenv("KITE_TLS_DEBUG")) fprintf(stderr, "TLS 1.3 -> 1.2 for %s: %s\n", host.c_str(), error_.c_str());
+      MarkTls12Only(host);
+      needs12_ = true;
+      if (error_.empty()) error_ = "Server spricht nur TLS 1.2";
+    }
+    return false;
   }
   br_ssl_client_init_full(&impl_->sc, &impl_->xc, tas, count);
   impl_->dedup.vtable = &kDedupClass;
@@ -250,18 +296,27 @@ bool TlsStream::Handshake(const std::string& host, const char* const* alpn, int 
   }
 }
 
+std::string TlsStream::version() const { return impl_->t13 ? "TLS 1.3" : "TLS 1.2"; }
+
 std::string TlsStream::selectedProtocol() const {
+  if (impl_->t13) return impl_->t13->alpn();
   const char* p = br_ssl_engine_get_selected_protocol(const_cast<br_ssl_engine_context*>(&impl_->sc.eng));
   return p ? p : "";
 }
 
 bool TlsStream::WaitReadable(int timeoutMs) {
+  if (impl_->t13) return impl_->t13->HasBuffered() || sock_->WaitReadable(timeoutMs);
   unsigned state = br_ssl_engine_current_state(&impl_->sc.eng);
   if (state & (BR_SSL_RECVAPP | BR_SSL_CLOSED)) return true;
   return sock_->WaitReadable(timeoutMs);
 }
 
 int TlsStream::Read(char* buf, int len) {
+  if (impl_->t13) {
+    int r = impl_->t13->Read(buf, len);
+    if (r < 0) error_ = impl_->t13->error();
+    return r;
+  }
   int r = br_sslio_read(&impl_->ioc, buf, len);
   if (r < 0) {
     int err = br_ssl_engine_last_error(&impl_->sc.eng);
@@ -275,6 +330,11 @@ int TlsStream::Read(char* buf, int len) {
 }
 
 bool TlsStream::WriteAll(const char* buf, int len) {
+  if (impl_->t13) {
+    if (impl_->t13->WriteAll(buf, len)) return true;
+    error_ = impl_->t13->error();
+    return false;
+  }
   if (br_sslio_write_all(&impl_->ioc, buf, len) < 0 || br_sslio_flush(&impl_->ioc) < 0) {
     error_ = TlsErrorText(br_ssl_engine_last_error(&impl_->sc.eng));
     return false;

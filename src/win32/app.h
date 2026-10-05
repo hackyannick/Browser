@@ -36,6 +36,7 @@ struct Settings {
   bool loadImages;
   bool javaScript;
   bool http2;                 // kite.ini: Http2=0 disables HTTP/2
+  bool tls13 = true;          // kite.ini: Tls13=0 uses TLS 1.2 only
   int defaultZoom;            // percent
   Settings() : proxyPort(0), loadImages(true), javaScript(true), http2(true), defaultZoom(100) {}
 };

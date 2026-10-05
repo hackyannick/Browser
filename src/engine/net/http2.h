@@ -44,6 +44,7 @@ class Http2Connection {
   // Can accept new streams.
   bool usable();
   int activeStreams();
+  std::string tlsVersion() const { return tls_ ? tls_->version() : std::string(); }
 
   // Frame helpers (exposed for tests).
   static std::string Frame(int type, int flags, uint32_t stream, const std::string& payload);

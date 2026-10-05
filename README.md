@@ -4,7 +4,7 @@
 
 Kite ist ein Webbrowser mit **eigener, in C++ geschriebener Rendering-Engine**,
 der unter **Windows 2000** (und allen späteren Windows-Versionen) läuft. Er
-bringt das heutige Web – HTTPS mit TLS 1.2, modernes CSS mit Flexbox, Grid,
+bringt das heutige Web – HTTPS mit TLS 1.3, modernes CSS mit Flexbox, Grid,
 CSS-Variablen und SVG – auf ein Betriebssystem aus dem Jahr 2000, ohne auf
 den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 
@@ -39,7 +39,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 | Canvas | **`<canvas>` 2D** per Software-Rasterizer: Pfade, Bögen, Füllregeln, Linienstile und Strichelung, Transformationen, Clipping, lineare/radiale/konische Verläufe, Muster, Compositing-Modi, Schatten, Text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, `Path2D` |
 | Schriften | **Webfonts** (`@font-face`, TTF/OTF/WOFF/WOFF2) werden geladen und prozesslokal installiert |
 | JavaScript | **QuickJS** (ES2023) mit eigener DOM-Anbindung: `document`/`window`, Elemente, `querySelector`, `innerHTML`, `classList`, `style`, `dataset`, Events mit Bubbling und `preventDefault`, Timer, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `localStorage`/`sessionStorage` (dauerhaft gespeichert), **ES-Module** (`type=module`, Import-Maps, dynamisches `import()`), `MutationObserver`, History-API (`pushState`, `popstate`), **Web Components** (Custom Elements mit Lebenszyklus-Callbacks, **Shadow DOM** mit Slots, gekapselten Styles, `:host`, `::slotted()`), `TreeWalker`, **Web Worker** (auch Modul-Worker), **WebSockets**, `Intl` (Zahlen, Datum, Plural, Listen, relative Zeiten), Streams (`ReadableStream`/`WritableStream`/`TransformStream`), `Blob`/`FileReader`/`FormData` mit Binärdaten, `crypto.getRandomValues`/`randomUUID`/`subtle.digest`, `structuredClone`, `URL`, `document.cookie`, `getBoundingClientRect`/`getComputedStyle`, `<noscript>` |
-| Netzwerk | HTTP/1.1, **HTTP/2** (ALPN, Multiplexing über eine Verbindung pro Server, HPACK, Flusskontrolle), **TLS 1.2 (BearSSL)** mit Zertifikatsprüfung, gzip/deflate/Brotli, Weiterleitungen, Cookies, Proxy (CONNECT, lokale Adressen direkt), **WebSockets** (`ws:`/`wss:`), `data:`- und `file:`-URLs |
+| Netzwerk | HTTP/1.1, **HTTP/2** (ALPN, Multiplexing über eine Verbindung pro Server, HPACK, Flusskontrolle), **TLS 1.3** (eigene Implementierung: ChaCha20-Poly1305, AES-GCM, X25519/P-256, RSA-PSS/ECDSA) und **TLS 1.2** (BearSSL) mit Zertifikatsprüfung, gzip/deflate/Brotli, Weiterleitungen, Cookies, Proxy (CONNECT, lokale Adressen direkt), **WebSockets** (`ws:`/`wss:`), `data:`- und `file:`-URLs |
 
 ![PyPI in Kite](docs/screenshots/pypi.png)
 
@@ -52,9 +52,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
   laufen daher oft nur teilweise.
 - 3D-Szenen werden ebenenweise nach Tiefe sortiert, sich durchdringende Flächen
   werden nicht geschnitten; HDR-Tonemapping für AVIF fehlt.
-- TLS 1.3 wird nicht unterstützt (BearSSL kann nur bis TLS 1.2; alle gängigen
-  Server bieten TLS 1.2 weiterhin an). HTTP/2 lässt sich mit `Http2=0` in der
-  `kite.ini` abschalten.
+- HTTP/2 lässt sich mit `Http2=0`, TLS 1.3 mit `Tls13=0` in der `kite.ini` abschalten.
 - Windows 2000 bringt nur begrenzte Unicode-Schriften mit; Emoji und manche
   Schriftsysteme erscheinen als Kästchen.
 
