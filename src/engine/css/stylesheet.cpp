@@ -157,15 +157,33 @@ class SelectorParser {
       }
       if (comb) {
         if (out.compounds.empty()) {
-          // Relative selector like "> a" (only valid when nesting).
-          return false;
+          // Relative selector like "> a" (in :has(); otherwise only valid
+          // when nesting).
+          if (!relative_ || comb == ' ') return false;
+          out.leading = comb;
+          comb = 0;
         }
+      }
+      if (comb) {
         if (out.pseudo != kPseudoNone) return false;  // nothing may follow
         out.combinators.push_back(comb);
       }
       CompoundSelector comp;
       if (!ParseCompound(comp, out)) return false;
       out.compounds.push_back(comp);
+      if (!slotted_.empty()) {
+        // A::slotted(B): B is slotted into a slot matching A.
+        std::string arg;
+        arg.swap(slotted_);
+        SelectorParser sub(arg);  // keeps a reference to |arg|
+        ComplexSelector inner;
+        if (!sub.ParseComplex(inner) || inner.compounds.size() != 1 || inner.pseudo != kPseudoNone) return false;
+        out.combinators.push_back('s');
+        out.compounds.push_back(inner.compounds[0]);
+        SkipWs();
+        if (p_ < s_.size()) return false;  // nothing may follow
+        break;
+      }
     }
     if (out.compounds.empty()) return false;
     out.specificity = ComputeSpecificity(out);
@@ -209,6 +227,8 @@ class SelectorParser {
   }
 
  private:
+  bool relative_ = false;   // :has() argument
+  std::string slotted_;     // pending ::slotted() argument
   bool SkipWs() {
     bool any = false;
     while (p_ < s_.size() && IsAsciiSpace((unsigned char)s_[p_])) {
@@ -295,6 +315,15 @@ class SelectorParser {
           continue;
         }
         if (owner.pseudo != kPseudoNone) return false;
+        if (doubleColon && name == "slotted" && p_ < s_.size() && s_[p_] == '(') {
+          size_t close = FindClose(p_);
+          if (close == std::string::npos) return false;
+          slotted_ = Trim(s_.substr(p_ + 1, close - p_ - 1));
+          p_ = close + 1;
+          if (slotted_.empty()) return false;
+          if (comp.parts.empty()) comp.parts.push_back(SimpleSelector());
+          return true;
+        }
         if (name == "before" || name == "after") {
           owner.pseudo = name == "before" ? kPseudoBefore : kPseudoAfter;
           continue;
@@ -403,7 +432,21 @@ class SelectorParser {
       if (of != std::string::npos) a = Trim(a.substr(0, of));
       return ParseNth(a, sel.nthA, sel.nthB);
     }
-    if (n == "has" || n == "host" || n == "host-context" || n == "state" ||
+    if (n == "host" || n == "host-context") {
+      SelectorParser sub(arg);
+      return sub.ParseList(sel.args, false) && !sel.args.empty();
+    }
+    if (n == "has") {
+      std::vector<std::string> parts = SplitTopLevel(arg, ',');
+      for (size_t i = 0; i < parts.size(); ++i) {
+        SelectorParser sub(parts[i]);
+        sub.relative_ = true;
+        ComplexSelector cs;
+        if (sub.ParseComplex(cs)) sel.args.push_back(cs);
+      }
+      return !sel.args.empty();
+    }
+    if (n == "state" ||
         n == "lang" || n == "dir" || n == "nth-col" || n == "current" ||
         n == "past" || n == "future") {
       sel.value = AsciiLower(Trim(arg));

@@ -111,7 +111,7 @@ bool MatchPseudo(const SimpleSelector& s, const Node* el, const ElementState& st
   if (n == "placeholder-shown")
     return el->HasAttr("placeholder") &&
            (el->formValueSet ? el->formValue.empty() : el->Attr("value").empty());
-  if (n == "defined" || n == "valid" || n == "in-range" || n == "paused") return true;
+  if (n == "valid" || n == "in-range" || n == "paused") return true;
   if (n == "open") return el->HasAttr("open");
   if (n == "closed") return !el->HasAttr("open");
   if (n == "dir") return s.value == "ltr";
@@ -135,10 +135,72 @@ bool MatchPseudo(const SimpleSelector& s, const Node* el, const ElementState& st
       if (MatchesSelector(s.args[i], el, st)) return true;
     return false;
   }
-  return false;  // visited, active, target, has(), host ...
+  if (n == "host") {
+    if (!st.scope || el != st.scope->host) return false;
+    ElementState outer = st;
+    outer.scope = 0;
+    for (size_t i = 0; i < s.args.size(); ++i)
+      if (MatchesSelector(s.args[i], el, outer)) return true;
+    return s.args.empty();
+  }
+  if (n == "host-context") {
+    if (!st.scope || el != st.scope->host) return false;
+    ElementState outer = st;
+    outer.scope = 0;
+    for (const Node* p = el; p && p->type == Node::kElement; p = p->parent)
+      for (size_t i = 0; i < s.args.size(); ++i)
+        if (MatchesSelector(s.args[i], p, outer)) return true;
+    return false;
+  }
+  if (n == "has") {
+    // Relative selectors: ' ' descendant, '>' child, '+' next, '~' later sibling.
+    for (size_t i = 0; i < s.args.size(); ++i) {
+      const ComplexSelector& rel = s.args[i];
+      if (rel.leading == '>' || rel.leading == ' ') {
+        std::vector<const Node*> stack;
+        for (size_t k = el->children.size(); k-- > 0;) stack.push_back(el->children[k].get());
+        while (!stack.empty()) {
+          const Node* c = stack.back();
+          stack.pop_back();
+          if (!c->IsElement()) continue;
+          if (MatchesSelector(rel, c, st)) return true;
+          if (rel.leading == ' ')
+            for (size_t k = c->children.size(); k-- > 0;) stack.push_back(c->children[k].get());
+        }
+      } else {
+        for (const Node* c = el->NextElementSibling(); c; c = c->NextElementSibling()) {
+          if (MatchesSelector(rel, c, st)) return true;
+          if (rel.leading == '+') break;
+        }
+      }
+    }
+    return false;
+  }
+  if (n == "defined") return el->tag.find('-') == std::string::npos || el->customDefined;
+  return false;  // visited, active, target ...
+}
+
+// Parent for ancestor combinators: inside a shadow tree, the walk ends at
+// the shadow root, except that :host compounds may match the host.
+const Node* MatchParent(const Node* el, const ElementState& st) {
+  const Node* p = el->parent;
+  if (!p) return 0;
+  if (p->type == Node::kElement) return p;
+  if (p->type == Node::kShadowRoot && p == st.scope) return p->host;
+  return 0;
 }
 
 bool MatchCompound(const CompoundSelector& c, const Node* el, const ElementState& st) {
+  if (st.scope && el == st.scope->host) {
+    // Seen from inside its shadow tree, the host only matches :host().
+    bool host = false;
+    for (size_t i = 0; i < c.parts.size(); ++i) {
+      const SimpleSelector& s = c.parts[i];
+      if (s.kind == SimpleSelector::kPseudoClass && (s.name == "host" || s.name == "host-context")) host = true;
+      else if (s.kind != SimpleSelector::kUniversal && s.kind != SimpleSelector::kPseudoClass) return false;
+    }
+    if (!host) return false;
+  }
   for (size_t i = 0; i < c.parts.size(); ++i) {
     const SimpleSelector& s = c.parts[i];
     switch (s.kind) {
@@ -176,8 +238,12 @@ bool MatchFrom(const ComplexSelector& sel, int idx, const Node* el, const Elemen
   char comb = sel.combinators[idx - 1];
   switch (comb) {
     case '>': {
-      const Node* p = el->ParentElement();
+      const Node* p = MatchParent(el, st);
       return p && MatchFrom(sel, idx - 1, p, st);
+    }
+    case 's': {  // ::slotted(): el is assigned to a slot of the scope
+      const Node* slot = el->AssignedSlot();
+      return slot && st.scope && slot->TreeRoot() == st.scope && MatchFrom(sel, idx - 1, slot, st);
     }
     case '+': {
       const Node* p = el->PreviousElementSibling();
@@ -189,7 +255,7 @@ bool MatchFrom(const ComplexSelector& sel, int idx, const Node* el, const Elemen
       return false;
     }
     default: {
-      for (const Node* p = el->ParentElement(); p; p = p->ParentElement())
+      for (const Node* p = MatchParent(el, st); p; p = MatchParent(p, st))
         if (MatchFrom(sel, idx - 1, p, st)) return true;
       return false;
     }
@@ -508,11 +574,13 @@ StyleResolver::StyleResolver() : rootFontSize_(16) {
   sheets_.push_back(e);
 }
 
-void StyleResolver::AddAuthorSheet(std::shared_ptr<Stylesheet> sheet, const std::string& baseUrl) {
+void StyleResolver::AddAuthorSheet(std::shared_ptr<Stylesheet> sheet, const std::string& baseUrl,
+                                   const Node* scope) {
   SheetEntry e;
   e.sheet = sheet;
   e.baseUrl = baseUrl;
   e.origin = 1;
+  e.scope = scope;
   sheets_.push_back(e);
 }
 
@@ -545,6 +613,18 @@ void StyleResolver::BuildIndex(const MediaContext& media) {
         ir.sheetIndex = (int)si;
         ir.origin = sheets_[si].origin;
         ir.order = (si << 22) + rule.order;
+        ir.scope = sheets_[si].scope;
+        ir.hasHost = ir.hasSlotted = false;
+        if (ir.scope) {
+          for (size_t c = 0; c < sel.combinators.size(); ++c)
+            if (sel.combinators[c] == 's') ir.hasSlotted = true;
+          for (size_t c = 0; c < sel.compounds.size(); ++c)
+            for (size_t p = 0; p < sel.compounds[c].parts.size(); ++p) {
+              const SimpleSelector& sp = sel.compounds[c].parts[p];
+              if (sp.kind == SimpleSelector::kPseudoClass && (sp.name == "host" || sp.name == "host-context"))
+                ir.hasHost = true;
+            }
+        }
         const CompoundSelector& last = sel.compounds.back();
         std::string id, cls, tag;
         for (size_t p = 0; p < last.parts.size(); ++p) {
@@ -564,24 +644,35 @@ void StyleResolver::BuildIndex(const MediaContext& media) {
 
 void StyleResolver::CollectMatches(const Node* el, const ElementState& state,
                                    std::vector<IndexedRule>& out) {
+  // Shadow DOM: rules only see their own tree, except :host rules (which
+  // match the host) and ::slotted() rules (host children in slots).
+  const Node* root = el->TreeRoot();
+  const Node* elScope = root->type == Node::kShadowRoot ? root : nullptr;
+  ElementState st = state;
+  auto consider = [&](const IndexedRule& ir) {
+    if (ir.origin != 0 && ir.scope != elScope) {
+      if (!ir.scope) return;
+      bool host = ir.hasHost && ir.scope->host == el;
+      bool slotted = ir.hasSlotted && el->parent == ir.scope->host;
+      if (!host && !slotted) return;
+    }
+    st.scope = ir.origin == 0 ? elScope : ir.scope;
+    if (MatchesSelector(*ir.selector, el, st)) out.push_back(ir);
+  };
   std::map<std::string, std::vector<IndexedRule> >::const_iterator it;
   if (!el->id.empty() && (it = index_.byId.find(el->id)) != index_.byId.end())
-    for (size_t i = 0; i < it->second.size(); ++i)
-      if (MatchesSelector(*it->second[i].selector, el, state)) out.push_back(it->second[i]);
+    for (size_t i = 0; i < it->second.size(); ++i) consider(it->second[i]);
   for (size_t c = 0; c < el->classes.size(); ++c) {
     bool dup = false;
     for (size_t d = 0; d < c; ++d)
       if (el->classes[d] == el->classes[c]) dup = true;
     if (dup) continue;
     if ((it = index_.byClass.find(el->classes[c])) != index_.byClass.end())
-      for (size_t i = 0; i < it->second.size(); ++i)
-        if (MatchesSelector(*it->second[i].selector, el, state)) out.push_back(it->second[i]);
+      for (size_t i = 0; i < it->second.size(); ++i) consider(it->second[i]);
   }
   if ((it = index_.byTag.find(el->tag)) != index_.byTag.end())
-    for (size_t i = 0; i < it->second.size(); ++i)
-      if (MatchesSelector(*it->second[i].selector, el, state)) out.push_back(it->second[i]);
-  for (size_t i = 0; i < index_.universal.size(); ++i)
-    if (MatchesSelector(*index_.universal[i].selector, el, state)) out.push_back(index_.universal[i]);
+    for (size_t i = 0; i < it->second.size(); ++i) consider(it->second[i]);
+  for (size_t i = 0; i < index_.universal.size(); ++i) consider(index_.universal[i]);
 }
 
 namespace {
@@ -748,10 +839,11 @@ void StyleResolver::ResolveElement(Node* el, const ComputedStyle& parent,
     }
     return;
   }
-  for (size_t i = 0; i < el->children.size(); ++i) {
-    Node* c = el->children[i].get();
-    if (c->IsElement()) ResolveElement(c, *s, media, docUrl, state);
-  }
+  // Inheritance follows the flat tree (shadow trees, slotted children).
+  std::vector<Node*> kids;
+  el->FlatChildren(kids);
+  for (size_t i = 0; i < kids.size(); ++i)
+    if (kids[i]->IsElement()) ResolveElement(kids[i], *s, media, docUrl, state);
 }
 
 void StyleResolver::ResolveDocument(Document& doc, const MediaContext& media,

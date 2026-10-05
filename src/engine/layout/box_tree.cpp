@@ -430,8 +430,10 @@ class Builder {
 
   void BuildChildren(Node* el, LayoutBox* box) {
     const ComputedStyle* s = el->style;
-    for (size_t i = 0; i < el->children.size(); ++i) {
-      Node* c = el->children[i].get();
+    std::vector<Node*> kids;  // flat tree: shadow trees and slotted nodes
+    el->FlatChildren(kids);
+    for (size_t i = 0; i < kids.size(); ++i) {
+      Node* c = kids[i];
       if (c->IsText()) {
         if (c->text.empty()) continue;
         std::string t = ProcessWhitespace(c->text, s->whiteSpace);
@@ -635,6 +637,7 @@ class Builder {
 static void ClearBoxPointers(Node* n) {
   n->layoutBox = 0;
   for (size_t i = 0; i < n->children.size(); ++i) ClearBoxPointers(n->children[i].get());
+  if (n->shadowRoot) ClearBoxPointers(n->shadowRoot.get());
 }
 
 std::unique_ptr<LayoutBox> BuildLayoutTree(Document& doc, const std::string& baseUrl) {

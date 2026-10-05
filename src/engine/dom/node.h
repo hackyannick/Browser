@@ -19,7 +19,7 @@ struct Attribute {
 
 class Node {
  public:
-  enum Type { kDocument, kElement, kText, kComment, kDoctype };
+  enum Type { kDocument, kElement, kText, kComment, kDoctype, kShadowRoot };
 
   explicit Node(Type t) : type(t), parent(0), style(0), index(0) {}
   ~Node();
@@ -39,6 +39,11 @@ class Node {
   int scriptHandle = 0;            // JavaScript wrapper id (0 = none)
   int canvasId = 0;                // <canvas> bitmap (see canvas/canvas.h)
   bool scriptDone = false;         // <script> already executed
+  // Shadow DOM: the shadow tree attached to this element (a kShadowRoot
+  // node whose |host| points back here).
+  std::unique_ptr<Node> shadowRoot;
+  Node* host = nullptr;
+  bool customDefined = false;  // custom element whose definition ran (:defined)
 
   // Cached values for selector matching.
   std::string id;
@@ -72,6 +77,14 @@ class Node {
   Node* ParentElement() const {
     return parent && parent->type == kElement ? parent : 0;
   }
+
+  // Shadow DOM: the tree root (document root or shadow root) and, for a
+  // child of a shadow host, the <slot> it is assigned to (or null).
+  const Node* TreeRoot() const;
+  Node* AssignedSlot() const;
+  // Children in the flat tree (shadow tree of a host, assigned nodes of a
+  // slot, the ordinary children otherwise).
+  void FlatChildren(std::vector<Node*>& out) const;
 
   // Concatenated text of all descendants.
   std::string TextContent() const;

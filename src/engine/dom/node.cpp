@@ -7,6 +7,60 @@ namespace kite {
 
 Node::~Node() { delete style; }
 
+const Node* Node::TreeRoot() const {
+  const Node* n = this;
+  while (n->parent) n = n->parent;
+  return n;
+}
+
+namespace {
+
+// Elements of a shadow tree, in tree order, that are <slot>s.
+void CollectSlots(const Node* n, std::vector<Node*>& out) {
+  for (size_t i = 0; i < n->children.size(); ++i) {
+    Node* c = n->children[i].get();
+    if (!c->IsElement()) continue;
+    if (c->tag == "slot") out.push_back(c);
+    CollectSlots(c, out);
+  }
+}
+
+// The slot of |root| a host child with slot name |name| goes to.
+Node* FindSlot(const Node* root, const std::string& name) {
+  std::vector<Node*> slots;
+  CollectSlots(root, slots);
+  for (size_t i = 0; i < slots.size(); ++i)
+    if (slots[i]->Attr("name") == name) return slots[i];
+  return 0;
+}
+
+}  // namespace
+
+Node* Node::AssignedSlot() const {
+  if (!parent || !parent->shadowRoot || (type != kElement && type != kText)) return 0;
+  return FindSlot(parent->shadowRoot.get(), type == kElement ? Attr("slot") : std::string());
+}
+
+void Node::FlatChildren(std::vector<Node*>& out) const {
+  if (shadowRoot) {
+    for (size_t i = 0; i < shadowRoot->children.size(); ++i) out.push_back(shadowRoot->children[i].get());
+    return;
+  }
+  if (type == kElement && tag == "slot") {
+    const Node* root = TreeRoot();
+    if (root->type == kShadowRoot && root->host) {
+      size_t before = out.size();
+      const Node* host = root->host;
+      for (size_t i = 0; i < host->children.size(); ++i) {
+        Node* c = host->children[i].get();
+        if (c->AssignedSlot() == this) out.push_back(c);
+      }
+      if (out.size() > before) return;
+    }
+  }
+  for (size_t i = 0; i < children.size(); ++i) out.push_back(children[i].get());
+}
+
 const std::string* Node::GetAttr(const std::string& name) const {
   for (size_t i = 0; i < attrs.size(); ++i)
     if (attrs[i].name == name) return &attrs[i].value;

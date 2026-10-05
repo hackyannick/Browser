@@ -16,6 +16,8 @@ namespace kite {
 struct ElementState {
   const Node* focused;
   const Node* hovered;
+  // Shadow root whose stylesheet is being matched (null: the document).
+  const Node* scope = nullptr;
   ElementState() : focused(0), hovered(0) {}
 };
 
@@ -30,7 +32,9 @@ class StyleResolver {
   StyleResolver();
 
   // Author stylesheets are applied in the order they are added.
-  void AddAuthorSheet(std::shared_ptr<Stylesheet> sheet, const std::string& baseUrl);
+  // |scope|: the shadow root a <style> belongs to (null for the document).
+  void AddAuthorSheet(std::shared_ptr<Stylesheet> sheet, const std::string& baseUrl,
+                      const Node* scope = nullptr);
   void ClearAuthorSheets();
 
   // Computes styles for every element in |doc| (stored on Node::style).
@@ -48,6 +52,7 @@ class StyleResolver {
     std::shared_ptr<Stylesheet> sheet;
     std::string baseUrl;
     int origin;  // 0 = user agent, 1 = author
+    const Node* scope = nullptr;
   };
   struct IndexedRule {
     const StyleRule* rule;
@@ -55,6 +60,8 @@ class StyleResolver {
     int sheetIndex;
     int origin;
     size_t order;
+    const Node* scope;
+    bool hasHost, hasSlotted;  // :host / ::slotted() (match outside the scope)
   };
   struct RuleIndex {
     std::map<std::string, std::vector<IndexedRule> > byId, byClass, byTag;

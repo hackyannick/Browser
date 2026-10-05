@@ -92,6 +92,7 @@ bool HtmlTokenizer::Next(HtmlToken& tok) {
     return true;
   }
   if (pos_ + 1 < in_.size() && (in_[pos_ + 1] == '!' || in_[pos_ + 1] == '?')) {
+    size_t pos0 = pos_;
     size_t end = in_.find('>', pos_);
     if (end == std::string::npos) end = in_.size();
     std::string body = in_.substr(pos_ + 2, end - pos_ - 2);
@@ -103,7 +104,7 @@ bool HtmlTokenizer::Next(HtmlToken& tok) {
       tok.data = body;
     } else {
       tok.type = HtmlToken::kComment;
-      tok.data = body;
+      tok.data = in_[pos0 + 1] == '?' ? "?" + body : body;  // <?x> keeps the '?'
     }
     return true;
   }
@@ -341,8 +342,13 @@ class TreeBuilder {
       case HtmlToken::kDoctype:
         sawDoctype_ = true;
         return;
-      case HtmlToken::kComment:
+      case HtmlToken::kComment: {
+        // Kept in the tree: scripts use comments as markers.
+        std::unique_ptr<Node> n(new Node(Node::kComment));
+        n->text = tok.data;
+        Current()->AppendChild(std::move(n));
         return;
+      }
       case HtmlToken::kText:
         ProcessText(tok.data);
         return;

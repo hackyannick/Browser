@@ -61,7 +61,7 @@ void Page::LoadImageDocument(const std::string& url) {
 
 std::string Page::Title() const { return doc_ ? doc_->Title() : std::string(); }
 
-void Page::AddSheetsFromNode(Node* n) {
+void Page::AddSheetsFromNode(Node* n, const Node* scope) {
   if (n->IsElement()) {
     if (n->tag == "style") {
       std::string type = AsciiLower(n->Attr("type"));
@@ -70,6 +70,7 @@ void Page::AddSheetsFromNode(Node* n) {
         e.isLink = false;
         e.css = n->TextContent();
         e.media = n->Attr("media");
+        e.scope = scope;
         e.loaded = true;
         e.failed = false;
         e.sheet.reset(new Stylesheet);
@@ -104,6 +105,7 @@ void Page::AddSheetsFromNode(Node* n) {
           if (!dup) {
             SheetEntry e;
             e.isLink = true;
+            e.scope = scope;
             e.url = spec;
             e.media = n->Attr("media");
             e.loaded = e.failed = false;
@@ -140,7 +142,8 @@ void Page::AddSheetsFromNode(Node* n) {
     if (n->tag == "template" || n->tag == "svg") return;
     if (n->tag == "noscript" && scriptingEnabled()) return;
   }
-  for (size_t i = 0; i < n->children.size(); ++i) AddSheetsFromNode(n->children[i].get());
+  for (size_t i = 0; i < n->children.size(); ++i) AddSheetsFromNode(n->children[i].get(), scope);
+  if (n->shadowRoot) AddSheetsFromNode(n->shadowRoot.get(), n->shadowRoot.get());
 }
 
 void Page::CollectDocumentInfo() {
@@ -456,7 +459,7 @@ void Page::Restyle(float viewportW, float viewportH) {
     const SheetEntry& e = sheets_[i];
     if (!e.loaded || !e.sheet) continue;
     if (!e.media.empty() && !EvaluateMediaQueryList(e.media, mc)) continue;
-    resolver_.AddAuthorSheet(e.sheet, e.isLink ? e.url : baseUrl_.Spec());
+    resolver_.AddAuthorSheet(e.sheet, e.isLink ? e.url : baseUrl_.Spec(), e.scope);
   }
   ElementState st;
   anim_.BeforeRestyle(doc_.get());
@@ -513,6 +516,7 @@ std::vector<WebFontRequest> Page::PendingFonts() {
       }
     }
     for (size_t i = 0; i < n->children.size(); ++i) stack.push_back(n->children[i].get());
+    if (n->shadowRoot) stack.push_back(n->shadowRoot.get());
   }
   for (size_t i = 0; i < sheets_.size(); ++i) {
     const SheetEntry& e = sheets_[i];

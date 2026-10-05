@@ -87,6 +87,7 @@ KITE_FN(NodeType) {
     case Node::kText: return JS_NewInt32(ctx, 3);
     case Node::kComment: return JS_NewInt32(ctx, 8);
     case Node::kDocument: return JS_NewInt32(ctx, 9);
+    case Node::kShadowRoot: return JS_NewInt32(ctx, 11);
     default: return JS_NewInt32(ctx, 10);
   }
 }
@@ -1006,6 +1007,66 @@ std::string SerializeNode(const Node* n, bool outer) {
 }
 
 
+// Shadow DOM and custom elements.
+KITE_FN(AttachShadow) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  if (!n || !n->IsElement() || n->shadowRoot) return JS_NewInt32(ctx, 0);
+  n->shadowRoot.reset(new Node(Node::kShadowRoot));
+  n->shadowRoot->tag = "#shadow-root";
+  n->shadowRoot->host = n;
+  Engine(ctx)->MarkDirty();
+  return Handle(ctx, n->shadowRoot.get());
+}
+
+KITE_FN(ShadowOf) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  return Handle(ctx, n ? n->shadowRoot.get() : 0);
+}
+
+KITE_FN(HostOf) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  return Handle(ctx, n && n->type == Node::kShadowRoot ? n->host : 0);
+}
+
+KITE_FN(SetDefined) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  if (n && !n->customDefined) {
+    n->customDefined = true;
+    Engine(ctx)->MarkDirty();  // :defined changed
+  }
+  return JS_UNDEFINED;
+}
+
+// Elements with a '-' in their name in the subtree of |h| (itself and
+// shadow trees included), in tree order.
+KITE_FN(Customs) {
+  ARGS_AT_LEAST(1);
+  Node* root = Arg(ctx, argv[0]);
+  std::vector<Node*> found;
+  std::vector<Node*> stack;
+  if (root) stack.push_back(root);
+  while (!stack.empty()) {
+    Node* n = stack.back();
+    stack.pop_back();
+    if (n->IsElement() && n->tag.find('-') != std::string::npos) found.push_back(n);
+    if (n->shadowRoot) stack.push_back(n->shadowRoot.get());
+    for (size_t i = n->children.size(); i-- > 0;) stack.push_back(n->children[i].get());
+  }
+  return HandleArray(ctx, found);
+}
+
+// Connected to the document (across shadow boundaries).
+KITE_FN(Connected) {
+  ARGS_AT_LEAST(1);
+  for (Node* n = Arg(ctx, argv[0]); n; n = n->type == Node::kShadowRoot ? n->host : n->parent)
+    if (n->type == Node::kDocument) return JS_TRUE;
+  return JS_FALSE;
+}
+
 // pushState(url, replace, stateId) -> bool
 KITE_FN(PushState) {
   ARGS_AT_LEAST(3);
@@ -1145,7 +1206,9 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"cvMeasure", CvMeasure, 2}, {"cvImage", CvImage, 10}, {"cvGetData", CvGetData, 5},
       {"cvPutData", CvPutData, 10}, {"cvDataUrl", CvDataUrl, 1}, {"imgLoad", ImgLoad, 1},
       {"imgSize", ImgSize, 1}, {"cvSvgPath", CvSvgPath, 2},
-      {"storage", StorageOp, 4}, {"pushState", PushState, 3}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
+      {"storage", StorageOp, 4}, {"pushState", PushState, 3},
+      {"attachShadow", AttachShadow, 1}, {"shadow", ShadowOf, 1}, {"host", HostOf, 1},
+      {"setDefined", SetDefined, 1}, {"customs", Customs, 1}, {"connected", Connected, 1}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
   };
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)
     JS_SetPropertyStr(ctx, k, fns[i].name, JS_NewCFunction(ctx, fns[i].fn, fns[i].name, fns[i].argc));
@@ -1395,6 +1458,7 @@ void ScriptEngine::Adopt(std::unique_ptr<Node> n) {
 static void ClearLayout(Node* n) {
   n->layoutBox = nullptr;  // boxes belong to the document's layout tree
   for (size_t i = 0; i < n->children.size(); ++i) ClearLayout(n->children[i].get());
+  if (n->shadowRoot) ClearLayout(n->shadowRoot.get());
 }
 
 std::unique_ptr<Node> ScriptEngine::DetachNode(Node* n) {

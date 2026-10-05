@@ -1057,6 +1057,67 @@ void TestWebApis() {
   CHECK_EQ(p.Eval("pops.join() + ':' + history.state"), "null:null");
 }
 
+void TestWebComponents() {
+  ScriptPage p(
+      "<style>p{color:green} x-card{display:block}</style>"
+      "<div id=out></div><x-card id=c title=T><span id=s>light</span><b slot=foot id=f>foot</b></x-card>"
+      "<p id=outside>outside</p><!-- kept -->"
+      "<script>"
+      "window.log = [];"
+      "class XCard extends HTMLElement {"
+      "  static get observedAttributes() { return ['title']; }"
+      "  constructor() { super(); log.push('ctor'); this.attachShadow({mode: 'open'}).innerHTML ="
+      "    '<style>p{color:red} :host{border-top:3px solid blue} ::slotted(span){color:purple}</style>"
+      "<p id=inner>shadow</p><slot></slot><slot name=foot></slot>'; }"
+      "  connectedCallback() { log.push('connected'); }"
+      "  disconnectedCallback() { log.push('disconnected'); }"
+      "  attributeChangedCallback(n, o, v) { log.push(n + ':' + o + '>' + v); }"
+      "}"
+      "customElements.define('x-card', XCard);"
+      "</script>");
+  p.page.ScriptMutated();
+  CHECK_EQ(p.Eval("log.join()"), "ctor,title:null>T,connected");
+  CHECK_EQ(p.Eval("document.getElementById('c') instanceof XCard"), "true");
+  CHECK_EQ(p.Eval("document.getElementById('c').shadowRoot.getElementById('inner').textContent"), "shadow");
+  CHECK_EQ(p.Eval("document.querySelector('#inner')"), "null");  // encapsulated
+  CHECK_EQ(p.Eval("document.getElementById('s').assignedSlot.getAttribute('name')"), "null");
+  CHECK_EQ(p.Eval("document.getElementById('f').assignedSlot.name"), "foot");
+  CHECK_EQ(p.Eval("document.getElementById('c').shadowRoot.querySelector('slot').assignedElements().length"), "1");
+  // Styles: scoped, :host, ::slotted, and document rules stay outside.
+  Node* host = p.ById("c");
+  Node* inner = host->shadowRoot ? host->shadowRoot->FindById("inner") : 0;
+  CHECK(inner && inner->style);
+  if (inner && inner->style) CHECK_EQ(inner->style->color.r, 255);
+  CHECK_EQ(p.ById("outside")->style->color.g, 128);
+  CHECK_EQ(host->style->border[0].width, 3.0f);
+  CHECK_EQ(p.ById("s")->style->color.r, 128);  // purple
+  // The flat tree: the box tree shows shadow content and slotted children.
+  CHECK(inner && inner->layoutBox != 0);
+  CHECK(p.ById("f")->layoutBox != 0);
+  // Lifecycle callbacks.
+  p.Eval("(function(){ var c = document.getElementById('c'); c.setAttribute('title', 'U'); c.setAttribute('other', 1);"
+         "c.remove(); document.body.appendChild(c); return 1; })()");
+  CHECK_EQ(p.Eval("log.slice(3).join()"), "title:T>U,disconnected,connected");
+  CHECK_EQ(p.Eval("document.createElement('x-card').shadowRoot.childNodes.length"), "4");
+  CHECK_EQ(p.Eval("(function(){ try { customElements.define('nodash', class extends HTMLElement {}); return 'ok'; }"
+                  " catch (e) { return e.name; } })()"),
+           "SyntaxError");
+  // Events from inside the shadow tree are retargeted to the host.
+  p.Eval("(function(){ window.seen = ''; document.body.addEventListener('click', function(e){ seen = e.target.id + ':' + e.composedPath().length; });"
+         "document.getElementById('c').shadowRoot.getElementById('inner').dispatchEvent(new MouseEvent('click', {bubbles: true, composed: true}));"
+         "return 1; })()");
+  CHECK_EQ(p.Eval("seen.split(':')[0]"), "c");
+  // Comments are part of the DOM; TreeWalker visits them.
+  CHECK_EQ(p.Eval("(function(){ var w = document.createTreeWalker(document.body, NodeFilter.SHOW_COMMENT); var n = w.nextNode(); return n && n.data; })()"),
+           " kept ");
+  // :has() and :defined.
+  TestPage h("<style>div:has(> img){width:50px} div:has(.x){height:7px} q-q:not(:defined){display:none}</style>"
+             "<div id=a><img></div><div id=b><p><span class=x></span></p></div><q-q id=q>q</q-q>");
+  CHECK_EQ(h.RectOf("a").w, 50.0f);
+  CHECK_EQ(h.RectOf("b").h, 7.0f);
+  CHECK(h.ById("q")->layoutBox == 0);
+}
+
 void TestHpack() {
   // RFC 7541 C.4: requests with Huffman coding and a shared dynamic table.
   HpackDecoder d;
@@ -1140,6 +1201,7 @@ int main() {
   TestPerspective();
   TestModules();
   TestWebApis();
+  TestWebComponents();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

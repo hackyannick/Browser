@@ -583,6 +583,7 @@ void AnimationController::Clear() {
 static void CollectElements(Node* n, std::vector<Node*>& out) {
   if (n->IsElement() && n->style) out.push_back(n);
   for (size_t i = 0; i < n->children.size(); ++i) CollectElements(n->children[i].get(), out);
+  if (n->shadowRoot) CollectElements(n->shadowRoot.get(), out);
 }
 
 void AnimationController::BeforeRestyle(Document* doc) {

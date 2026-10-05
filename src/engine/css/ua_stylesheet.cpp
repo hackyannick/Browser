@@ -89,6 +89,7 @@ input[type=file] { width: 220px; }
 input[type=range], input[type=color] { width: 120px; }
 details > summary:first-of-type { display: list-item; list-style-type: disc; list-style-position: inside; cursor: pointer; }
 details:not([open]) > :not(summary) { display: none; }
+slot { display: contents; }
 ruby { display: ruby; }
 rt { font-size: 50%; }
 marquee { display: inline-block; }

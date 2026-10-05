@@ -44,8 +44,11 @@ struct ComplexSelector {
   // compounds[i + 1]: ' ' descendant, '>' child, '+' adjacent, '~' sibling.
   std::vector<CompoundSelector> compounds;
   std::vector<char> combinators;
+  // combinators may also be 's': compounds[i + 1] is assigned to a slot
+  // matching compounds[i] (::slotted()).
   int specificity;
   PseudoElement pseudo;
+  char leading = ' ';  // relative selectors in :has(): ' ', '>', '+', '~'
   ComplexSelector() : specificity(0), pseudo(kPseudoNone) {}
 };
 

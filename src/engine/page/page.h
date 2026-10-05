@@ -144,9 +144,10 @@ class Page {
     bool failed;
     std::shared_ptr<Stylesheet> sheet;
     bool imported = false;  // via @import from a fetched sheet
+    const Node* scope = nullptr;  // shadow root of a <style> in a shadow tree
   };
   void CollectDocumentInfo();
-  void AddSheetsFromNode(Node* n);
+  void AddSheetsFromNode(Node* n, const Node* scope = nullptr);
   void CollectScripts(Node* n);
   void RecollectSheets();
   struct ScriptEntry {

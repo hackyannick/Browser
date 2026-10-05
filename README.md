@@ -32,13 +32,13 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 | Bereich | Umfang |
 |---|---|
 | HTML | HTML5-Tokenizer und Tree-Builder mit Fehlerkorrektur, Zeichenreferenzen, Zeichensatz-Erkennung (UTF-8, Windows-1252, ISO-8859-1/-15, UTF-16) |
-| CSS | Kaskade mit Spezifität und `!important`, Selektoren bis Level 4 (`:is()`, `:where()`, `:not()`, `:nth-child()`, Attributselektoren …), `@media` (inkl. Bereichs-Syntax), `@supports`, `@import`, `@layer`, CSS-Verschachtelung, Custom Properties (`var()`), `calc()`/`min()`/`max()`/`clamp()`, `::before`/`::after` |
+| CSS | Kaskade mit Spezifität und `!important`, Selektoren bis Level 4 (`:is()`, `:where()`, `:not()`, `:has()`, `:nth-child()`, Attributselektoren …), `@media` (inkl. Bereichs-Syntax), `@supports`, `@import`, `@layer`, CSS-Verschachtelung, Custom Properties (`var()`), `calc()`/`min()`/`max()`/`clamp()`, `::before`/`::after` |
 | Layout | Block- und Inline-Formatierung mit Zeilenumbruch, Margin-Collapsing, Floats und `clear`, Tabellen (colspan/rowspan, automatische Spaltenbreiten), **Flexbox**, **Grid** (Spalten, `repeat()`, `fr`, `minmax()`, `auto-fill`), relative und absolute Positionierung (`fixed` vereinfacht), `overflow`-Clipping, Listen |
 | Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, **2D- und 3D-Transformationen** (`translate`, `rotate`, `scale`, `skew`, `matrix`, `rotateX/Y`, `rotate3d`, `translateZ`, `matrix3d`, **`perspective`** und `perspective-origin`, `transform-style: preserve-3d` mit Tiefensortierung, `backface-visibility`, `transform-origin`, Einzeleigenschaften `rotate:`/`scale:`), PNG/JPEG/GIF/BMP/**WebP**/**AVIF** (auch `<picture>`; **animierte GIF, WebP und AVIF** werden abgespielt), **SVG** (Inline und als Bild, mit Kantenglättung, Verläufen, Masken und Clip-Pfaden) |
 | Animation | **CSS-Animationen** (`@keyframes`, alle `animation-*`-Eigenschaften, Timing-Funktionen inkl. `cubic-bezier()`/`steps()`) und **Transitions** für Deckkraft, Farben, Transformationen (auch Drehung und Skalierung), Schatten, Größen und Abstände; `animationend`/`transitionend`-Events |
 | Canvas | **`<canvas>` 2D** per Software-Rasterizer: Pfade, Bögen, Füllregeln, Linienstile und Strichelung, Transformationen, Clipping, lineare/radiale/konische Verläufe, Muster, Compositing-Modi, Schatten, Text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, `Path2D` |
 | Schriften | **Webfonts** (`@font-face`, TTF/OTF/WOFF/WOFF2) werden geladen und prozesslokal installiert |
-| JavaScript | **QuickJS** (ES2023) mit eigener DOM-Anbindung: `document`/`window`, Elemente, `querySelector`, `innerHTML`, `classList`, `style`, `dataset`, Events mit Bubbling und `preventDefault`, Timer, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `localStorage`/`sessionStorage` (dauerhaft gespeichert), **ES-Module** (`type=module`, Import-Maps, dynamisches `import()`), `MutationObserver`, History-API (`pushState`, `popstate`), `URL`, `document.cookie`, `getBoundingClientRect`/`getComputedStyle`, `<noscript>` |
+| JavaScript | **QuickJS** (ES2023) mit eigener DOM-Anbindung: `document`/`window`, Elemente, `querySelector`, `innerHTML`, `classList`, `style`, `dataset`, Events mit Bubbling und `preventDefault`, Timer, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `localStorage`/`sessionStorage` (dauerhaft gespeichert), **ES-Module** (`type=module`, Import-Maps, dynamisches `import()`), `MutationObserver`, History-API (`pushState`, `popstate`), **Web Components** (Custom Elements mit Lebenszyklus-Callbacks, **Shadow DOM** mit Slots, gekapselten Styles, `:host`, `::slotted()`), `TreeWalker`, `URL`, `document.cookie`, `getBoundingClientRect`/`getComputedStyle`, `<noscript>` |
 | Netzwerk | HTTP/1.1, **HTTP/2** (ALPN, Multiplexing über eine Verbindung pro Server, HPACK, Flusskontrolle), **TLS 1.2 (BearSSL)** mit Zertifikatsprüfung, gzip/deflate/Brotli, Weiterleitungen, Cookies, Proxy (CONNECT), `data:`- und `file:`-URLs |
 
 ![PyPI in Kite](docs/screenshots/pypi.png)
@@ -47,8 +47,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 
 ## Was (noch) nicht geht
 
-- JavaScript: Web Components/Shadow DOM, WebGL, WebSockets, Web Workers und
-  Medienwiedergabe fehlen. Große Single-Page-Anwendungen (React, Angular …)
+- JavaScript: WebGL, WebSockets, Web Workers und Medienwiedergabe fehlen. Große Single-Page-Anwendungen (React, Angular …)
   laufen daher oft nur teilweise.
 - 3D-Szenen werden ebenenweise nach Tiefe sortiert, sich durchdringende Flächen
   werden nicht geschnitten; HDR-Tonemapping für AVIF fehlt.
