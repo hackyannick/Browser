@@ -107,6 +107,15 @@ struct BoxShadow {
   BoxShadow() : x(0), y(0), blur(0), spread(0), inset(false) {}
 };
 
+// One function of a CSS transform list (2D).
+struct TransformOp {
+  enum Kind { kTranslate, kScale, kRotate, kSkew, kMatrix };
+  Kind kind;
+  Length tx, ty;    // kTranslate (percentages refer to the border box)
+  float v[6];       // kScale: sx, sy; kRotate: radians; kSkew: ax, ay (radians); kMatrix: a..f
+  TransformOp() : kind(kTranslate) { v[0] = v[1] = v[2] = v[3] = v[4] = v[5] = 0; }
+};
+
 struct ComputedStyle {
   ComputedStyle();
 
@@ -170,6 +179,14 @@ struct ComputedStyle {
   std::vector<BoxShadow> shadows;
   Length translateX, translateY;  // transform: translate(...)
   bool transformHidden;           // scale(0)
+  // Transforms other than plain translations: the full transform list
+  // (translateX/Y are then 0), the individual rotate/scale properties and
+  // the transform origin.
+  std::vector<TransformOp> transformOps;
+  float rotateRad;
+  float scaleX, scaleY;
+  Length originX, originY;
+  bool HasLinearTransform() const { return !transformOps.empty() || rotateRad != 0 || scaleX != 1 || scaleY != 1; }
   bool hasAnimation;  // animation-name is set
   // Animations and transitions (raw, comma separated lists).
   std::string animName, animDuration, animDelay, animIterations, animDirection, animFillMode,
@@ -226,6 +243,12 @@ struct LengthContext {
   float rootFontSize;
   float viewportW, viewportH;
 };
+
+// Linear part of the element's transform (rotate, scale and the transform
+// list, without the translate offsets the painter applies directly) as a
+// 2D affine matrix [a b c d e f] relative to the transform origin. |w|/|h|
+// is the border box size (for percentages).
+void TransformMatrix(const ComputedStyle& s, float w, float h, float out[6]);
 
 // Parses a CSS length/percentage/calc() value. Returns false if invalid.
 bool ParseLength(const std::string& value, const LengthContext& ctx, Length& out,

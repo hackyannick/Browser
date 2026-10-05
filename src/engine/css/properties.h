@@ -110,6 +110,9 @@ namespace kite {
   X(BoxShadow, "box-shadow", false)                        \
   X(Transform, "transform", false)                         \
   X(Translate, "translate", false)                         \
+  X(Rotate, "rotate", false)                               \
+  X(Scale, "scale", false)                                 \
+  X(TransformOrigin, "transform-origin", false)            \
   X(AnimationName, "animation-name", false)               \
   X(AnimationDuration, "animation-duration", false)       \
   X(AnimationDelay, "animation-delay", false)             \

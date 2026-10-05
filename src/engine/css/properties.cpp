@@ -357,7 +357,12 @@ void CopyPropertyImpl(int id, ComputedStyle& d, const ComputedStyle& s) {
       d.radius[id - kPropBorderTopLeftRadius] = s.radius[id - kPropBorderTopLeftRadius]; break;
     case kPropBoxShadow: d.shadows = s.shadows; break;
     case kPropTransform: case kPropTranslate:
-      d.translateX = s.translateX; d.translateY = s.translateY; d.transformHidden = s.transformHidden; break;
+      d.translateX = s.translateX; d.translateY = s.translateY; d.transformHidden = s.transformHidden;
+      if (id == kPropTransform) d.transformOps = s.transformOps;
+      break;
+    case kPropRotate: d.rotateRad = s.rotateRad; break;
+    case kPropScale: d.scaleX = s.scaleX; d.scaleY = s.scaleY; d.transformHidden = s.transformHidden; break;
+    case kPropTransformOrigin: d.originX = s.originX; d.originY = s.originY; break;
     case kPropAnimationName: d.hasAnimation = s.hasAnimation; d.animName = s.animName; break;
     case kPropAnimationDuration: d.animDuration = s.animDuration; break;
     case kPropAnimationDelay: d.animDelay = s.animDelay; break;
@@ -539,7 +544,7 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
         un == "flex-grow" || un == "flex-shrink" || un == "flex-basis" ||
         un == "justify-content" || un == "align-items" || un == "align-self" ||
         un == "box-sizing" || un == "order" || un == "background-clip" ||
-        un == "border-radius" || un == "box-shadow" || un == "transform" ||
+        un == "border-radius" || un == "box-shadow" || StartsWith(un, "transform") ||
         StartsWith(un, "animation") || StartsWith(un, "transition"))
       name = un;
     else
@@ -890,6 +895,111 @@ bool IsCssPropertySupported(const std::string& prop, const std::string& value) {
       v.find("anchor") != std::string::npos || v.find("dvh") != std::string::npos ||
       v.find("svh") != std::string::npos)
     return false;
+  return true;
+}
+
+bool ParseAngle(const std::string& raw, float& out) {
+  std::string t = AsciiLower(Trim(raw));
+  size_t used = 0;
+  double v = ParseDoublePrefix(t, used);
+  if (used == 0) return false;
+  std::string unit = t.substr(used);
+  const double pi = 3.14159265358979;
+  if (unit == "deg") out = (float)(v * pi / 180);
+  else if (unit == "rad") out = (float)v;
+  else if (unit == "turn") out = (float)(v * 2 * pi);
+  else if (unit == "grad") out = (float)(v * pi / 200);
+  else if (unit.empty() && v == 0) out = 0;
+  else return false;
+  return true;
+}
+
+bool ParseScaleFactor(const std::string& raw, float& out) {
+  std::string t = Trim(raw);
+  if (!t.empty() && t[t.size() - 1] == '%') {
+    size_t used = 0;
+    double v = ParseDoublePrefix(t, used);
+    if (used != t.size() - 1) return false;
+    out = (float)(v / 100);
+    return true;
+  }
+  return ParseNumber(t, out);
+}
+
+bool ParseTransformList(const std::string& v, const LengthContext& lc, std::vector<TransformOp>& ops) {
+  size_t p = 0;
+  while (p < v.size()) {
+    size_t open = v.find('(', p);
+    if (open == std::string::npos) break;
+    // Matching parenthesis (arguments may contain calc()).
+    int depth = 0;
+    size_t close = open;
+    for (; close < v.size(); ++close) {
+      if (v[close] == '(') ++depth;
+      else if (v[close] == ')' && --depth == 0) break;
+    }
+    if (close >= v.size()) return false;
+    std::string fn = Trim(v.substr(p, open - p));
+    std::vector<std::string> a = SplitValueCommas(v.substr(open + 1, close - open - 1));
+    if (a.size() == 1) a = SplitValueTokens(a[0]);
+    for (size_t k = 0; k < a.size(); ++k) a[k] = Trim(a[k]);
+    TransformOp op;
+    Length l;
+    float f, g;
+    if (fn == "translate" || fn == "translate3d" || fn == "translatex" || fn == "translatey") {
+      op.kind = TransformOp::kTranslate;
+      op.tx = op.ty = Length::Px(0);
+      if (a.empty()) return false;
+      if (fn == "translatey") {
+        if (!ParseLength(a[0], lc, l) || !l.IsFixed()) return false;
+        op.ty = l;
+      } else {
+        if (!ParseLength(a[0], lc, l) || !l.IsFixed()) return false;
+        op.tx = l;
+        if (fn != "translatex" && a.size() > 1) {
+          if (!ParseLength(a[1], lc, l) || !l.IsFixed()) return false;
+          op.ty = l;
+        }
+      }
+    } else if (fn == "scale" || fn == "scale3d" || fn == "scalex" || fn == "scaley") {
+      op.kind = TransformOp::kScale;
+      if (a.empty() || !ParseScaleFactor(a[0], f)) return false;
+      g = f;
+      if ((fn == "scale" || fn == "scale3d") && a.size() > 1 && !ParseScaleFactor(a[1], g)) return false;
+      op.v[0] = fn == "scaley" ? 1 : f;
+      op.v[1] = fn == "scalex" ? 1 : g;
+    } else if (fn == "rotate" || fn == "rotatez") {
+      op.kind = TransformOp::kRotate;
+      if (a.empty() || !ParseAngle(a[0], f)) return false;
+      op.v[0] = f;
+    } else if (fn == "skew" || fn == "skewx" || fn == "skewy") {
+      op.kind = TransformOp::kSkew;
+      if (a.empty() || !ParseAngle(a[0], f)) return false;
+      g = 0;
+      if (fn == "skew" && a.size() > 1 && !ParseAngle(a[1], g)) return false;
+      op.v[0] = fn == "skewy" ? 0 : f;
+      op.v[1] = fn == "skewy" ? f : g;
+    } else if (fn == "matrix" && a.size() == 6) {
+      op.kind = TransformOp::kMatrix;
+      for (int k = 0; k < 6; ++k)
+        if (!ParseNumber(a[k], op.v[k])) return false;
+    } else if (fn == "matrix3d" && a.size() == 16) {
+      op.kind = TransformOp::kMatrix;
+      const int idx[6] = {0, 1, 4, 5, 12, 13};
+      for (int k = 0; k < 6; ++k)
+        if (!ParseNumber(a[idx[k]], op.v[k])) return false;
+    } else if (fn == "rotatex" || fn == "rotatey" || fn == "translatez" || fn == "perspective" ||
+               fn == "rotate3d" || fn == "scalez") {
+      // 3D: ignored (flat projection).
+      p = close + 1;
+      continue;
+    } else {
+      return false;
+    }
+    ops.push_back(op);
+    p = close + 1;
+    while (p < v.size() && (IsAsciiSpace((unsigned char)v[p]))) ++p;
+  }
   return true;
 }
 
@@ -1438,41 +1548,77 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       }
       return;
     }
-    case kPropTranslate:
+    case kPropTranslate: {
+      s.translateX = Length::Px(0);
+      s.translateY = Length::Px(0);
+      if (v == "none") return;
+      std::vector<std::string> a = SplitValueTokens(v);
+      Length l;
+      if (!a.empty() && ParseLength(a[0], lc, l) && l.IsFixed()) s.translateX = l;
+      if (a.size() > 1 && ParseLength(a[1], lc, l) && l.IsFixed()) s.translateY = l;
+      return;
+    }
+    case kPropRotate: {
+      s.rotateRad = 0;
+      std::vector<std::string> a = SplitValueTokens(v);
+      if (a.empty() || v == "none") return;
+      float ang;
+      // "rotate: z 45deg" / "rotate: 0 0 1 45deg": only rotation about z counts.
+      if (ParseAngle(a.back(), ang)) s.rotateRad = ang;
+      return;
+    }
+    case kPropScale: {
+      s.scaleX = s.scaleY = 1;
+      if (v == "none") return;
+      std::vector<std::string> a = SplitValueTokens(v);
+      float f;
+      if (!a.empty() && ParseScaleFactor(a[0], f)) s.scaleX = s.scaleY = f;
+      if (a.size() > 1 && ParseScaleFactor(a[1], f)) s.scaleY = f;
+      s.transformHidden = s.scaleX == 0 || s.scaleY == 0;
+      return;
+    }
+    case kPropTransformOrigin: {
+      std::vector<std::string> a = SplitValueTokens(v);
+      Length x = Length::Pct(50), y = Length::Pct(50);
+      for (size_t i = 0; i < a.size() && i < 2; ++i) {
+        const std::string& t = a[i];
+        Length l;
+        if (t == "left") x = Length::Pct(0);
+        else if (t == "right") x = Length::Pct(100);
+        else if (t == "top") y = Length::Pct(0);
+        else if (t == "bottom") y = Length::Pct(100);
+        else if (t == "center") continue;
+        else if (ParseLength(t, lc, l) && l.IsFixed()) {
+          if (i == 0) x = l;
+          else y = l;
+        }
+      }
+      s.originX = x;
+      s.originY = y;
+      return;
+    }
     case kPropTransform: {
       s.translateX = Length::Px(0);
       s.translateY = Length::Px(0);
       s.transformHidden = false;
+      s.transformOps.clear();
       if (v == "none") return;
-      std::string src = id == kPropTranslate ? "translate(" + v + ")" : v;
-      size_t p = 0;
-      while (p < src.size()) {
-        size_t open = src.find('(', p);
-        if (open == std::string::npos) break;
-        size_t close = src.find(')', open);
-        if (close == std::string::npos) break;
-        std::string fn = Trim(src.substr(p, open - p));
-        std::string args = src.substr(open + 1, close - open - 1);
-        for (size_t k = 0; k < args.size(); ++k)
-          if (args[k] == ',') args[k] = ' ';
-        std::vector<std::string> a = SplitValueTokens(args);
-        Length l1, l2;
-        if ((fn == "translate" || fn == "translate3d") && !a.empty()) {
-          if (ParseLength(a[0], lc, l1) && l1.IsFixed()) {
-            s.translateX.px += l1.px; s.translateX.pct += l1.pct;
-          }
-          if (a.size() > 1 && ParseLength(a[1], lc, l2) && l2.IsFixed()) {
-            s.translateY.px += l2.px; s.translateY.pct += l2.pct;
-          }
-        } else if (fn == "translatex" && !a.empty() && ParseLength(a[0], lc, l1) && l1.IsFixed()) {
-          s.translateX.px += l1.px; s.translateX.pct += l1.pct;
-        } else if (fn == "translatey" && !a.empty() && ParseLength(a[0], lc, l1) && l1.IsFixed()) {
-          s.translateY.px += l1.px; s.translateY.pct += l1.pct;
-        } else if ((fn == "scale" || fn == "scalex" || fn == "scaley") && !a.empty()) {
-          float f;
-          if (ParseNumber(a[0], f) && f == 0) s.transformHidden = true;
+      std::vector<TransformOp> ops;
+      if (!ParseTransformList(v, lc, ops)) return;
+      bool onlyTranslate = true;
+      for (size_t i = 0; i < ops.size(); ++i) {
+        if (ops[i].kind != TransformOp::kTranslate) onlyTranslate = false;
+        if (ops[i].kind == TransformOp::kScale && (ops[i].v[0] == 0 || ops[i].v[1] == 0)) s.transformHidden = true;
+      }
+      if (onlyTranslate) {
+        for (size_t i = 0; i < ops.size(); ++i) {
+          s.translateX.px += ops[i].tx.px;
+          s.translateX.pct += ops[i].tx.pct;
+          s.translateY.px += ops[i].ty.px;
+          s.translateY.pct += ops[i].ty.pct;
         }
-        p = close + 1;
+      } else {
+        s.transformOps = ops;
       }
       return;
     }

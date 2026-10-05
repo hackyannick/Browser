@@ -14,7 +14,7 @@ namespace kite {
 
 struct DisplayItem {
   enum Type { kRect, kText, kImage, kPushClip, kPopClip, kEllipse, kSvg, kRoundRect, kShadow,
-              kBeginFixed, kEndFixed };
+              kBeginFixed, kEndFixed, kBeginTransform, kEndTransform };
   Type type;
   Rect rect;        // rect / ellipse bounds / image destination area / clip
   Color color;
@@ -38,13 +38,23 @@ struct DisplayItem {
   float radii[4];
   float ring;
   float blur;
+  // kBeginTransform: document-space affine matrix [a b c d e f] applied to
+  // the items up to the matching kEndTransform (index in |matchIndex|);
+  // |rect| bounds the untransformed items.
+  float matrix[6];
+  int matchIndex;
+  // kRoundRect ring: only the part belonging to this border side (0 top,
+  // 1 right, 2 bottom, 3 left; split along the diagonals), -1 = whole ring.
+  int side = -1;
   bool HasRadii() const { return radii[0] > 0 || radii[1] > 0 || radii[2] > 0 || radii[3] > 0; }
 
   DisplayItem()
       : type(kRect), baseline(0), underline(false), lineThrough(false), overline(false),
         tileX(0), tileY(0), tileW(0), tileH(0), repeatX(false), repeatY(false), alpha(1),
-        hollow(false), svgNode(0), ring(0), blur(0) {
+        hollow(false), svgNode(0), ring(0), blur(0), matchIndex(-1) {
     radii[0] = radii[1] = radii[2] = radii[3] = 0;
+    matrix[0] = matrix[3] = 1;
+    matrix[1] = matrix[2] = matrix[4] = matrix[5] = 0;
   }
 };
 

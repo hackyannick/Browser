@@ -63,6 +63,11 @@ ComputedStyle::ComputedStyle()
       translateX(Length::Px(0)),
       translateY(Length::Px(0)),
       transformHidden(false),
+      rotateRad(0),
+      scaleX(1),
+      scaleY(1),
+      originX(Length::Pct(50)),
+      originY(Length::Pct(50)),
       hasAnimation(false),
       aspectRatio(0),
       objectFit(kFitFill),
@@ -190,6 +195,12 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   for (int i = 0; i < 4; ++i) radius[i] = o.radius[i];
   shadows = o.shadows;
   translateX = o.translateX;
+  transformOps = o.transformOps;
+  rotateRad = o.rotateRad;
+  scaleX = o.scaleX;
+  scaleY = o.scaleY;
+  originX = o.originX;
+  originY = o.originY;
   translateY = o.translateY;
   transformHidden = o.transformHidden;
   hasAnimation = o.hasAnimation;
@@ -685,6 +696,53 @@ std::string ExtractUrl(const std::string& value) {
     u = value.substr(value.find(q, start) + 1, close - value.find(q, start) - 1);
   }
   return u;
+}
+
+static void MulMatrix(float m[6], const float n[6]) {  // m = m * n
+  float r[6] = {m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3],
+                m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]};
+  for (int i = 0; i < 6; ++i) m[i] = r[i];
+}
+
+void TransformMatrix(const ComputedStyle& s, float w, float h, float out[6]) {
+  float m[6] = {1, 0, 0, 1, 0, 0};
+  if (s.rotateRad != 0) {
+    float c = std::cos(s.rotateRad), sn = std::sin(s.rotateRad);
+    float r[6] = {c, sn, -sn, c, 0, 0};
+    MulMatrix(m, r);
+  }
+  if (s.scaleX != 1 || s.scaleY != 1) {
+    float r[6] = {s.scaleX, 0, 0, s.scaleY, 0, 0};
+    MulMatrix(m, r);
+  }
+  for (size_t i = 0; i < s.transformOps.size(); ++i) {
+    const TransformOp& op = s.transformOps[i];
+    float r[6] = {1, 0, 0, 1, 0, 0};
+    switch (op.kind) {
+      case TransformOp::kTranslate:
+        r[4] = op.tx.Resolve(w);
+        r[5] = op.ty.Resolve(h);
+        break;
+      case TransformOp::kScale:
+        r[0] = op.v[0];
+        r[3] = op.v[1];
+        break;
+      case TransformOp::kRotate:
+        r[0] = r[3] = std::cos(op.v[0]);
+        r[1] = std::sin(op.v[0]);
+        r[2] = -r[1];
+        break;
+      case TransformOp::kSkew:
+        r[2] = std::tan(op.v[0]);
+        r[1] = std::tan(op.v[1]);
+        break;
+      case TransformOp::kMatrix:
+        for (int k = 0; k < 6; ++k) r[k] = op.v[k];
+        break;
+    }
+    MulMatrix(m, r);
+  }
+  for (int i = 0; i < 6; ++i) out[i] = m[i];
 }
 
 }  // namespace kite

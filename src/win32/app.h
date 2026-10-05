@@ -177,6 +177,15 @@ class Renderer {
 
  private:
   void ApplyClip();
+  struct PaintCtx {
+    const DisplayList* dl = 0;
+    float zoom = 1, scrollX = 0, scrollY = 0;
+    float layerX = 0, layerY = 0;  // offset of the current layer in parent device space
+    int width = 0, height = 0;
+    int fixedDepth = 0;
+  };
+  void PaintRange(PaintCtx& pc, size_t begin, size_t end);
+  void DrawTransformed(PaintCtx& pc, size_t begin, size_t end, float ox, float oy);
 
   HDC memDc_;
   HBITMAP bitmap_;

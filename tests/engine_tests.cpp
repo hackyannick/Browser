@@ -760,6 +760,65 @@ void TestAnimations() {
   SetAnimationClockForTesting(0);
 }
 
+void TestTransforms() {
+  TestPage p(
+      "<style>div{width:100px;height:50px}"
+      "#r{transform:rotate(90deg)}#s{scale:2 0.5;transform-origin:0 0}"
+      "#t{transform:translate(-50%,10px)}#m{transform:translateX(10px) rotate(45deg) scale(2)}"
+      "#z{transform:scale(0)}</style>"
+      "<div id=r>r</div><div id=s>s</div><div id=t>t</div><div id=m>m</div><div id=z>z</div>");
+  Node* r = p.ById("r");
+  Node* t = p.ById("t");
+  CHECK_EQ(r->style->transformOps.size(), 1u);
+  CHECK(t->style->transformOps.empty());  // translate-only stays a plain offset
+  CHECK_NEAR(t->style->translateX.pct, -50.0f, 1e-4f);
+  CHECK(p.ById("z")->style->transformHidden);
+  float m[6];
+  TransformMatrix(*r->style, 100, 50, m);
+  CHECK_NEAR(m[0], 0.0f, 1e-5f);
+  CHECK_NEAR(m[1], 1.0f, 1e-5f);
+  CHECK_NEAR(m[2], -1.0f, 1e-5f);
+  TransformMatrix(*p.ById("s")->style, 100, 50, m);
+  CHECK_NEAR(m[0], 2.0f, 1e-5f);
+  CHECK_NEAR(m[3], 0.5f, 1e-5f);
+  TransformMatrix(*p.ById("m")->style, 100, 50, m);
+  CHECK_NEAR(m[0], 1.41421f, 1e-4f);
+  CHECK_NEAR(m[4], 10.0f, 1e-4f);
+  // The painter wraps transformed content and rotates its hit region about
+  // the center: a 100x50 box turned by 90 degrees covers 50x100.
+  int begins = 0, ends = 0;
+  const DisplayList& dl = p.page.display();
+  for (size_t i = 0; i < dl.items.size(); ++i) {
+    if (dl.items[i].type == DisplayItem::kBeginTransform) {
+      ++begins;
+      CHECK(dl.items[i].matchIndex > (int)i);
+      if (dl.items[i].matchIndex > (int)i)
+        CHECK_EQ(dl.items[dl.items[i].matchIndex].type, DisplayItem::kEndTransform);
+    }
+    if (dl.items[i].type == DisplayItem::kEndTransform) ++ends;
+  }
+  CHECK_EQ(begins, 3);
+  CHECK_EQ(ends, 3);
+  Rect box;
+  CHECK(p.page.BoxRect(r, box));
+  Node* above = p.page.HitTest(box.x + 50, box.y - 15);  // only the rotated box reaches up here
+  CHECK(above == r || (above && above->parent == r));
+  CHECK(p.page.HitTest(box.x + 5, box.y + 25) != r);    // corner rotated away
+
+  // Spinner-style animation interpolates the rotation.
+  SetAnimationClockForTesting(FakeClock);
+  g_fakeNow = 0;
+  TestPage a("<style>@keyframes spin{to{transform:rotate(360deg)}}"
+             "#k{width:10px;height:10px;animation:spin 1s linear infinite}"
+             "#q{transition:transform 1s linear}</style><div id=k></div><div id=q></div>");
+  g_fakeNow = 250;
+  a.page.TickAnimations();
+  CHECK_EQ(a.ById("k")->style->transformOps.size(), 1u);
+  if (a.ById("k")->style->transformOps.size() == 1)
+    CHECK_NEAR(a.ById("k")->style->transformOps[0].v[0], 3.14159f / 2, 1e-3f);
+  SetAnimationClockForTesting(0);
+}
+
 }  // namespace
 
 int main() {
@@ -788,6 +847,7 @@ int main() {
   TestWebPAndWoff2();
   TestCanvas();
   TestAnimations();
+  TestTransforms();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

@@ -298,6 +298,21 @@ void Painter::PaintBoxDecorations(LayoutBox* b, const Rect& r, float alpha, bool
     it.ring = maxW;
     it.color = WithAlpha(c0, alpha);
     out_->items.push_back(it);
+  } else if (rounded) {
+    // Rounded border with differently colored sides (e.g. spinners).
+    for (int k = 0; k < 4; ++k) {
+      if (w[k] <= 0) continue;
+      Color ck = s->border[k].colorIsCurrent ? s->color : s->border[k].color;
+      if (ck.a == 0) continue;
+      DisplayItem it;
+      it.type = DisplayItem::kRoundRect;
+      it.rect = r;
+      for (int q = 0; q < 4; ++q) it.radii[q] = radii[q];
+      it.ring = maxW;
+      it.side = k;
+      it.color = WithAlpha(ck, alpha);
+      out_->items.push_back(it);
+    }
   } else {
     PaintBorders(s, r, w, alpha, skipLeft, skipRight);
   }
@@ -674,6 +689,38 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     out_->items.push_back(fi);
     ++fixedDepth_;
   }
+  // rotate / scale / skew: the subtree is drawn into a layer that the
+  // platform maps with this matrix.
+  int transformItem = -1;
+  size_t hitStart = out_->hits.size();
+  float tm[6];
+  if (s->HasLinearTransform()) {
+    float lin[6];
+    TransformMatrix(*s, b->w, b->h, lin);
+    float ox = ax + s->originX.Resolve(b->w), oy = ay + s->originY.Resolve(b->h);
+    // T(origin) * lin * T(-origin)
+    tm[0] = lin[0];
+    tm[1] = lin[1];
+    tm[2] = lin[2];
+    tm[3] = lin[3];
+    tm[4] = lin[4] + ox - (lin[0] * ox + lin[2] * oy);
+    tm[5] = lin[5] + oy - (lin[1] * ox + lin[3] * oy);
+    float det = tm[0] * tm[3] - tm[1] * tm[2];
+    if (std::fabs(det) < 1e-6f) {
+      if (fixed) {
+        DisplayItem fe;
+        fe.type = DisplayItem::kEndFixed;
+        out_->items.push_back(fe);
+        --fixedDepth_;
+      }
+      return;  // degenerate (e.g. scale(0)): nothing visible
+    }
+    DisplayItem ti;
+    ti.type = DisplayItem::kBeginTransform;
+    for (int k = 0; k < 6; ++k) ti.matrix[k] = tm[k];
+    transformItem = (int)out_->items.size();
+    out_->items.push_back(ti);
+  }
   Rect r(ax, ay, b->w, b->h);
   if (s->visible && b->kind != LayoutBox::kTableRowGroup && b->kind != LayoutBox::kTableRow) {
     PaintBoxDecorations(b, r, alpha, false, false);
@@ -717,6 +764,43 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     it.type = DisplayItem::kPopClip;
     out_->items.push_back(it);
     clipStack_.pop_back();
+  }
+  if (transformItem >= 0) {
+    // Bounds of the untransformed content.
+    Rect bounds(ax, ay, b->w, b->h);
+    for (size_t i = transformItem + 1; i < out_->items.size(); ++i) {
+      const DisplayItem& it = out_->items[i];
+      if (it.type == DisplayItem::kPushClip || it.type == DisplayItem::kPopClip ||
+          it.type == DisplayItem::kBeginFixed || it.type == DisplayItem::kEndFixed ||
+          it.type == DisplayItem::kEndTransform)
+        continue;
+      Rect r = it.rect;
+      if (it.type == DisplayItem::kText) r = Rect(it.rect.x, it.baseline - it.font.size * 1.2f, it.rect.w, it.font.size * 1.7f);
+      if (it.type == DisplayItem::kShadow) r = Rect(r.x - it.blur, r.y - it.blur, r.w + 2 * it.blur, r.h + 2 * it.blur);
+      if (r.w <= 0 || r.h <= 0) continue;
+      float x0 = std::min(bounds.x, r.x), y0 = std::min(bounds.y, r.y);
+      float x1 = std::max(bounds.right(), r.right()), y1 = std::max(bounds.bottom(), r.bottom());
+      bounds = Rect(x0, y0, x1 - x0, y1 - y0);
+    }
+    DisplayItem te;
+    te.type = DisplayItem::kEndTransform;
+    out_->items[transformItem].rect = bounds;
+    out_->items[transformItem].matchIndex = (int)out_->items.size();
+    out_->items.push_back(te);
+    // Hit regions follow the transformed content (bounding boxes).
+    for (size_t i = hitStart; i < out_->hits.size(); ++i) {
+      Rect& r = out_->hits[i].rect;
+      float xs[4] = {r.x, r.right(), r.right(), r.x}, ys[4] = {r.y, r.y, r.bottom(), r.bottom()};
+      float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+      for (int k = 0; k < 4; ++k) {
+        float px = tm[0] * xs[k] + tm[2] * ys[k] + tm[4], py = tm[1] * xs[k] + tm[3] * ys[k] + tm[5];
+        x0 = std::min(x0, px);
+        y0 = std::min(y0, py);
+        x1 = std::max(x1, px);
+        y1 = std::max(y1, py);
+      }
+      r = Rect(x0, y0, x1 - x0, y1 - y0);
+    }
   }
   if (fixed) {
     DisplayItem fi;

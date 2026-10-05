@@ -157,6 +157,7 @@ bool IsLayoutProperty(int id) {
     case kPropOpacity: case kPropColor: case kPropBackgroundColor: case kPropBorderTopColor:
     case kPropBorderRightColor: case kPropBorderBottomColor: case kPropBorderLeftColor:
     case kPropTransform: case kPropTranslate: case kPropBoxShadow: case kPropFilter:
+    case kPropRotate: case kPropScale: case kPropTransformOrigin:
     case kPropBorderTopLeftRadius: case kPropBorderTopRightRadius: case kPropBorderBottomRightRadius:
     case kPropBorderBottomLeftRadius: case kPropBackgroundPositionX: case kPropBackgroundPositionY:
     case kPropVisibility: case kPropTextDecorationColor: case kPropFill: case kPropStroke:
@@ -215,6 +216,7 @@ float* FloatField(int id, ComputedStyle& s) {
     case kPropFlexGrow: return &s.flexGrow;
     case kPropFlexShrink: return &s.flexShrink;
     case kPropFilter: return &s.blur;
+    case kPropRotate: return &s.rotateRad;
     case kPropBorderTopWidth: case kPropBorderRightWidth: case kPropBorderBottomWidth:
     case kPropBorderLeftWidth:
       return &s.border[id - kPropBorderTopWidth].width;
@@ -238,9 +240,20 @@ bool PropEqual(int id, const ComputedStyle& a, const ComputedStyle& b) {
   if (Color* ca = ColorField(id, ma)) return *ca == *ColorField(id, mb);
   if (float* fa = FloatField(id, ma)) return *fa == *FloatField(id, mb);
   switch (id) {
-    case kPropTransform: case kPropTranslate:
-      return SameLength(a.translateX, b.translateX) && SameLength(a.translateY, b.translateY) &&
-             a.transformHidden == b.transformHidden;
+    case kPropTransform: case kPropTranslate: {
+      if (!(SameLength(a.translateX, b.translateX) && SameLength(a.translateY, b.translateY) &&
+            a.transformHidden == b.transformHidden && a.transformOps.size() == b.transformOps.size()))
+        return false;
+      for (size_t i = 0; i < a.transformOps.size(); ++i) {
+        const TransformOp &x = a.transformOps[i], &y = b.transformOps[i];
+        if (x.kind != y.kind || !SameLength(x.tx, y.tx) || !SameLength(x.ty, y.ty)) return false;
+        for (int k = 0; k < 6; ++k)
+          if (x.v[k] != y.v[k]) return false;
+      }
+      return true;
+    }
+    case kPropScale: return a.scaleX == b.scaleX && a.scaleY == b.scaleY;
+    case kPropTransformOrigin: return SameLength(a.originX, b.originX) && SameLength(a.originY, b.originY);
     case kPropVisibility: return a.visible == b.visible;
     case kPropBoxShadow: {
       if (a.shadows.size() != b.shadows.size()) return false;
@@ -266,7 +279,72 @@ const int kTransitionable[] = {
     kPropLeft, kPropBorderTopLeftRadius, kPropBorderTopRightRadius, kPropBorderBottomRightRadius,
     kPropBorderBottomLeftRadius, kPropFontSize, kPropLetterSpacing, kPropVisibility,
     kPropBorderTopWidth, kPropBorderRightWidth, kPropBorderBottomWidth, kPropBorderLeftWidth,
-    kPropBackgroundPositionX, kPropBackgroundPositionY};
+    kPropBackgroundPositionX, kPropBackgroundPositionY, kPropRotate, kPropScale, kPropTransformOrigin};
+
+// Transform list as written (translate-only lists live in translateX/Y).
+std::vector<TransformOp> EffectiveOps(const ComputedStyle& s) {
+  if (!s.transformOps.empty()) return s.transformOps;
+  std::vector<TransformOp> ops;
+  if (!s.translateX.IsZero() || !s.translateY.IsZero()) {
+    TransformOp op;
+    op.kind = TransformOp::kTranslate;
+    op.tx = s.translateX;
+    op.ty = s.translateY;
+    ops.push_back(op);
+  }
+  return ops;
+}
+
+TransformOp IdentityLike(const TransformOp& o) {
+  TransformOp id;
+  id.kind = o.kind;
+  id.tx = id.ty = Length::Px(0);
+  if (o.kind == TransformOp::kScale) id.v[0] = id.v[1] = 1;
+  if (o.kind == TransformOp::kMatrix) id.v[0] = id.v[3] = 1;
+  return id;
+}
+
+void MixTransform(const ComputedStyle& a, const ComputedStyle& b, float t, ComputedStyle& out) {
+  std::vector<TransformOp> oa = EffectiveOps(a), ob = EffectiveOps(b);
+  // A missing list counts as the identity of the other one's functions.
+  if (oa.empty())
+    for (size_t i = 0; i < ob.size(); ++i) oa.push_back(IdentityLike(ob[i]));
+  if (ob.empty())
+    for (size_t i = 0; i < oa.size(); ++i) ob.push_back(IdentityLike(oa[i]));
+  bool same = oa.size() == ob.size();
+  for (size_t i = 0; same && i < oa.size(); ++i) same = oa[i].kind == ob[i].kind;
+  std::vector<TransformOp> res;
+  if (!same) {
+    res = t < 0.5f ? oa : ob;  // different function lists: no smooth path
+  } else {
+    for (size_t i = 0; i < oa.size(); ++i) {
+      TransformOp r = oa[i];
+      if (r.kind == TransformOp::kTranslate) {
+        Length l;
+        if (MixLength(oa[i].tx, ob[i].tx, t, l)) r.tx = l;
+        if (MixLength(oa[i].ty, ob[i].ty, t, l)) r.ty = l;
+      } else {
+        for (int k = 0; k < 6; ++k) r.v[k] = Mix(oa[i].v[k], ob[i].v[k], t);
+      }
+      res.push_back(r);
+    }
+  }
+  out.transformOps.clear();
+  out.translateX = out.translateY = Length::Px(0);
+  bool onlyTranslate = true;
+  for (size_t i = 0; i < res.size(); ++i)
+    if (res[i].kind != TransformOp::kTranslate) onlyTranslate = false;
+  if (onlyTranslate) {
+    for (size_t i = 0; i < res.size(); ++i) {
+      out.translateX.px += res[i].tx.px;
+      out.translateX.pct += res[i].tx.pct;
+      out.translateY.px += res[i].ty.px;
+      out.translateY.pct += res[i].ty.pct;
+    }
+  } else {
+    out.transformOps = res;
+  }
+}
 
 // Writes the value of |id| interpolated between |a| and |b| into |out|.
 // Non-interpolable values flip at t = 0.5.
@@ -298,11 +376,26 @@ void MixProperty(int id, const ComputedStyle& a, const ComputedStyle& b, float t
     case kPropTransform:
     case kPropTranslate: {
       Length r;
-      if (MixLength(a.translateX, b.translateX, t, r)) out.translateX = r;
-      if (MixLength(a.translateY, b.translateY, t, r)) out.translateY = r;
+      if (id == kPropTransform && (!a.transformOps.empty() || !b.transformOps.empty())) {
+        MixTransform(a, b, t, out);
+      } else {
+        if (MixLength(a.translateX, b.translateX, t, r)) out.translateX = r;
+        if (MixLength(a.translateY, b.translateY, t, r)) out.translateY = r;
+      }
       // scale(0) <-> scale(1): visible as soon as the element starts growing.
       out.transformHidden = t <= 0 ? a.transformHidden : t >= 1 ? b.transformHidden
                                                                 : (a.transformHidden && b.transformHidden);
+      return;
+    }
+    case kPropScale:
+      out.scaleX = Mix(a.scaleX, b.scaleX, t);
+      out.scaleY = Mix(a.scaleY, b.scaleY, t);
+      out.transformHidden = out.scaleX == 0 || out.scaleY == 0;
+      return;
+    case kPropTransformOrigin: {
+      Length r;
+      out.originX = MixLength(a.originX, b.originX, t, r) ? r : (t < 0.5f ? a.originX : b.originX);
+      out.originY = MixLength(a.originY, b.originY, t, r) ? r : (t < 0.5f ? a.originY : b.originY);
       return;
     }
     case kPropVisibility:
