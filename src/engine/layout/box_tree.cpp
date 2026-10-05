@@ -534,10 +534,22 @@ class Builder {
   void FixupFlex(LayoutBox* box) {
     const ComputedStyle* ps = box->style;
     DropWhitespaceText(box);
+    // Inline children are blockified into flex items of their own; only
+    // runs of bare text get anonymous wrappers.
+    for (size_t i = 0; i < box->children.size(); ++i) {
+      LayoutBox* c = box->children[i].get();
+      if (c->kind != LayoutBox::kInline) continue;
+      ComputedStyle* ns = new ComputedStyle;
+      ns->CopyFrom(*c->style);
+      ns->display = kDisplayBlock;
+      c->style = ns;
+      c->ownStyle.reset(ns);
+      c->kind = LayoutBox::kBlockFlow;
+      FixupBlock(c);
+    }
     WrapRuns(box,
              [](LayoutBox* c) {
-               return c->kind == LayoutBox::kText || c->kind == LayoutBox::kInline ||
-                      c->kind == LayoutBox::kLineBreak;
+               return c->kind == LayoutBox::kText || c->kind == LayoutBox::kLineBreak;
              },
              [this, ps]() {
                LayoutBox* b = MakeAnonymous(LayoutBox::kBlockFlow, ps, kDisplayBlock);

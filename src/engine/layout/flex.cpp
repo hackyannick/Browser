@@ -130,10 +130,18 @@ float FlexLayout::LayoutFlex(LayoutBox* box, float definiteH) {
         float grow = 0;
         for (size_t i = a; i < b; ++i) grow += fi[i].box->style->flexGrow;
         if (grow > 0) {
-          float share = grow < 1 ? free * grow : free;
+          // Distribute from the flex base sizes of the growing items, then
+          // clamp to their min/max sizes.
+          float baseFree = cw - gap * (b - a - 1);
           for (size_t i = a; i < b; ++i)
-            fi[i].main = std::min(fi[i].maxMain,
-                                  fi[i].hypo + share * fi[i].box->style->flexGrow / grow);
+            baseFree -= fi[i].marginMain + (fi[i].box->style->flexGrow > 0 ? fi[i].base : fi[i].hypo);
+          float share = grow < 1 ? baseFree * grow : baseFree;
+          for (size_t i = a; i < b; ++i) {
+            float g = fi[i].box->style->flexGrow;
+            if (g <= 0) continue;
+            fi[i].main = std::max(fi[i].minMain,
+                                  std::min(fi[i].maxMain, fi[i].base + share * g / grow));
+          }
         }
       } else if (free < 0) {
         // Shrink, iterating so that items clamped at their minimum give
