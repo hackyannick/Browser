@@ -659,9 +659,7 @@ void Painter::PaintPositioned(LayoutBox* b, float ax, float ay, float alpha, boo
 void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   const ComputedStyle* s = b->style;
   if (s->transformHidden) return;
-  // Content that starts invisible and is faded in by a CSS animation is
-  // shown directly (animations are not run).
-  alpha *= (s->hasAnimation && s->opacity < 0.05f) ? 1.0f : s->opacity;
+  alpha *= s->opacity;
   if (s->clippedAway) return;
   // Heavy blur (glow effects) cannot be rendered: show only a faint tint.
   if (s->blur >= 8) alpha *= std::max(0.08f, 1.0f - s->blur / 40.0f) * 0.4f;

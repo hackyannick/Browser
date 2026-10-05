@@ -170,7 +170,11 @@ struct ComputedStyle {
   std::vector<BoxShadow> shadows;
   Length translateX, translateY;  // transform: translate(...)
   bool transformHidden;           // scale(0)
-  bool hasAnimation;  // clip: rect(0 0 0 0) / clip-path: inset(50%)  // filter: blur() radius in px (approximated)
+  bool hasAnimation;  // animation-name is set
+  // Animations and transitions (raw, comma separated lists).
+  std::string animName, animDuration, animDelay, animIterations, animDirection, animFillMode,
+      animTiming, animPlayState;
+  std::string transProperty, transDuration, transDelay, transTiming;
   float aspectRatio;  // 0 = none
   ObjectFit objectFit;
 

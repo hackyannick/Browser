@@ -130,6 +130,9 @@ float GradientT(const CanvasGradient& g, float x, float y) {
 
 }  // namespace
 
+float GradientParameter(const CanvasGradient& g, float x, float y) { return GradientT(g, x, y); }
+void GradientRamp(const CanvasGradient& g, float alpha, uint32_t ramp[256]) { BuildRamp(g, alpha, ramp); }
+
 Canvas2D* FindCanvas(int id) {
   std::map<int, Canvas2D*>::iterator it = Registry().find(id);
   return it == Registry().end() ? 0 : it->second;

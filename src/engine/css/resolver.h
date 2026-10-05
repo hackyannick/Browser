@@ -19,6 +19,9 @@ struct ElementState {
   ElementState() : focused(0), hovered(0) {}
 };
 
+// Replaces var() references using the custom properties of |style|.
+bool SubstituteCssVars(const std::string& value, const ComputedStyle& style, std::string& out);
+
 bool MatchesSelector(const ComplexSelector& sel, const Node* element,
                      const ElementState& state);
 
@@ -35,6 +38,10 @@ class StyleResolver {
                        const std::string& documentUrl, const ElementState& state);
 
   static const char* UserAgentCss();
+
+  // @keyframes rule with |name| from the author sheets (last one wins).
+  const KeyframesRule* FindKeyframes(const std::string& name) const;
+  float rootFontSize() const { return rootFontSize_; }
 
  private:
   struct SheetEntry {

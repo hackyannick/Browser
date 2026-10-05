@@ -16,6 +16,7 @@
 #include "image/svg.h"
 #include "net/http.h"
 #include "net/url.h"
+#include "page/animation.h"
 #include "page/page.h"
 #include "text/fontfile.h"
 
@@ -424,6 +425,19 @@ void TestSvg() {
   float w, h;
   std::unique_ptr<Document> doc = ParseHtml("<svg width=48 viewBox='0 0 24 12'></svg>");
   CHECK(SvgIntrinsicSize(doc->root->FindFirst("svg"), w, h));
+  // Real gradients, masks and clip paths.
+  DecodedImage g;
+  CHECK(RenderSvgDocument("<svg xmlns='http://www.w3.org/2000/svg' width='100' height='10'>"
+                          "<linearGradient id='l'><stop offset='0' stop-color='#f00'/><stop offset='1' stop-color='#00f'/>"
+                          "</linearGradient><mask id='m'><rect width='50' height='10' fill='#fff'/></mask>"
+                          "<rect width='100' height='10' fill='url(#l)' mask='url(#m)'/></svg>",
+                          0, 0, 1, g));
+  if (g.pixels.size() == 1000) {
+    uint32_t left = g.pixels[5 * 100 + 1], mid = g.pixels[5 * 100 + 45], right = g.pixels[5 * 100 + 90];
+    CHECK((left >> 16 & 255) > 240 && (left & 255) < 20);  // red end of the gradient
+    CHECK((mid >> 16 & 255) > 110 && (mid & 255) > 90);     // mixed
+    CHECK_EQ(right >> 24, 0u);                              // masked away
+  }
   CHECK_EQ(w, 48.0f);
   CHECK_EQ(h, 24.0f);
 }
@@ -679,6 +693,73 @@ void TestCanvas() {
   CHECK(painted);
 }
 
+double g_fakeNow = 1000;
+double FakeClock() { return g_fakeNow; }
+
+void TestAnimations() {
+  TimingFunction ease = TimingFunction::Parse("ease");
+  CHECK_NEAR(ease.Apply(0.5f), 0.8024f, 0.002f);
+  CHECK_NEAR(TimingFunction::Parse("linear").Apply(0.3f), 0.3f, 1e-6f);
+  CHECK_NEAR(TimingFunction::Parse("steps(4)").Apply(0.3f), 0.25f, 1e-6f);
+  CHECK_NEAR(TimingFunction::Parse("steps(4, start)").Apply(0.3f), 0.5f, 1e-6f);
+  CHECK_NEAR(TimingFunction::Parse("cubic-bezier(0,0,1,1)").Apply(0.7f), 0.7f, 0.002f);
+
+  SetAnimationClockForTesting(FakeClock);
+  g_fakeNow = 1000;
+  ScriptPage p(
+      "<html><head><style>"
+      "@keyframes fade { from { opacity: 0 } to { opacity: 1 } }"
+      "@-webkit-keyframes slide { 0% { transform: translateX(0) } 100% { transform: translateX(100px) } }"
+      "@keyframes pulse { 50% { background-color: rgb(255, 0, 0) } }"
+      "#a { animation: fade 1s linear }"
+      "#b { animation: slide 1s linear 2 alternate forwards }"
+      "#c { animation: pulse 2s linear infinite; background-color: rgb(0, 0, 255) }"
+      "#d { opacity: 1; transition: opacity 1s linear, width 2s }"
+      "#d.hide { opacity: 0 }"
+      "#e { animation: fade 1s steps(2) 500ms both }"
+      "</style></head><body><div id=out></div>"
+      "<div id=a>a</div><div id=b>b</div><div id=c>c</div><div id=d>d</div><div id=e>e</div>"
+      "<script>window.ends = []; document.getElementById('d').addEventListener('transitionend',"
+      " function() { ends.push('d'); }); document.getElementById('a').addEventListener('animationend',"
+      " function() { ends.push('a'); });</script></body></html>");
+  Node* a = p.ById("a");
+  Node* b = p.ById("b");
+  Node* c = p.ById("c");
+  Node* d = p.ById("d");
+  Node* e = p.ById("e");
+  CHECK_NEAR(a->style->opacity, 0.0f, 1e-4f);
+  CHECK(p.page.AnimationsActive());
+  g_fakeNow = 1500;
+  CHECK_EQ(p.page.TickAnimations(), 1);  // repaint only
+  CHECK_NEAR(a->style->opacity, 0.5f, 1e-3f);
+  CHECK_NEAR(b->style->translateX.px, 50.0f, 0.1f);
+  CHECK(std::abs((int)c->style->backgroundColor.r - 127) <= 1 && std::abs((int)c->style->backgroundColor.b - 127) <= 1);
+  CHECK_NEAR(e->style->opacity, 0.0f, 1e-4f);  // delay, fill backwards
+  g_fakeNow = 2250;  // second iteration of #b runs backwards
+  p.page.TickAnimations();
+  CHECK_NEAR(a->style->opacity, 1.0f, 1e-4f);  // finished, back to the base value
+  CHECK_NEAR(b->style->translateX.px, 75.0f, 0.1f);
+  CHECK_NEAR(e->style->opacity, 0.5f, 1e-4f);  // steps(2)
+  g_fakeNow = 5000;
+  p.page.TickAnimations();
+  CHECK_NEAR(b->style->translateX.px, 0.0f, 0.1f);  // fill forwards keeps the last frame
+  CHECK_NEAR(e->style->opacity, 1.0f, 1e-4f);
+  // Transitions start when a style change is applied.
+  p.page.script()->Execute("document.getElementById('d').className = 'hide'", "t", 0);
+  p.page.script()->TakeDirty();
+  p.page.ScriptMutated();
+  CHECK_NEAR(d->style->opacity, 1.0f, 1e-4f);
+  g_fakeNow = 5250;
+  p.page.TickAnimations();
+  CHECK_NEAR(d->style->opacity, 0.75f, 1e-3f);
+  g_fakeNow = 6100;
+  p.page.TickAnimations();
+  CHECK_NEAR(d->style->opacity, 0.0f, 1e-4f);
+  CHECK_EQ(p.Eval("ends.join()"), "a,d");
+  CHECK(p.page.AnimationsActive());  // #c runs forever
+  SetAnimationClockForTesting(0);
+}
+
 }  // namespace
 
 int main() {
@@ -706,6 +787,7 @@ int main() {
   TestScript();
   TestWebPAndWoff2();
   TestCanvas();
+  TestAnimations();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

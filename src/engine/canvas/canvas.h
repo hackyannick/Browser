@@ -168,6 +168,11 @@ class Canvas2D {
   std::vector<uint32_t> source_;
 };
 
+// Gradient evaluation (also used by the SVG renderer): parameter at a point
+// in gradient space (< -1 = not painted) and a 256-entry premultiplied ramp.
+float GradientParameter(const CanvasGradient& g, float x, float y);
+void GradientRamp(const CanvasGradient& g, float alpha, uint32_t ramp[256]);
+
 // Global lookup used by the platform renderer ("kite-canvas:<id>" URLs).
 Canvas2D* FindCanvas(int id);
 const DecodedImage* CanvasPixelsForUrl(const std::string& url, unsigned* version);

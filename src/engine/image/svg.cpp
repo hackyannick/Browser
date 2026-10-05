@@ -10,6 +10,7 @@
 #include "css/resolver.h"
 #include "css/style.h"
 #include "css/stylesheet.h"
+#include "canvas/canvas.h"
 #include "html/parser.h"
 #include "image/raster.h"
 
@@ -268,6 +269,8 @@ struct PaintState {
   float strokeOpacity;
   bool evenOdd;
   Color current;
+  const Node* fillGradient = 0;    // <linearGradient>/<radialGradient>
+  const Node* strokeGradient = 0;
   LineJoin join = kJoinMiter;
   LineCap cap = kCapButt;
   float miterLimit = 4;
@@ -398,7 +401,8 @@ class SvgRenderer {
     return false;
   }
 
-  bool ParsePaint(const std::string& raw, const PaintState& ps, Color& out) {
+  bool ParsePaint(const std::string& raw, const PaintState& ps, Color& out, const Node** gradient = 0) {
+    if (gradient) *gradient = 0;
     std::string v = AsciiLower(Trim(raw));
     if (v == "none" || v == "transparent") return false;
     if (v == "currentcolor") {
@@ -412,7 +416,9 @@ class SvgRenderer {
       id = Trim(ReplaceAll(ReplaceAll(id, "\"", ""), "'", ""));
       std::map<std::string, const Node*>::iterator it = ids_.find(id);
       if (it != ids_.end()) {
-        // Average of the gradient stops.
+        if (gradient && (it->second->tag == "lineargradient" || it->second->tag == "radialgradient"))
+          *gradient = it->second;
+        // Average of the gradient stops (fallback / used for patterns).
         std::vector<Node*> stops;
         const_cast<Node*>(it->second)->FindAll("stop", stops);
         const Node* g = it->second;
@@ -468,12 +474,12 @@ class SvgRenderer {
     if (Prop(n, "color", v)) ParseColor(v, ps.current, ps.current);
     if (Prop(n, "fill", v)) {
       Color c;
-      ps.hasFill = ParsePaint(v, ps, c);
+      ps.hasFill = ParsePaint(v, ps, c, &ps.fillGradient);
       if (ps.hasFill) ps.fill = c;
     }
     if (Prop(n, "stroke", v)) {
       Color c;
-      ps.hasStroke = ParsePaint(v, ps, c);
+      ps.hasStroke = ParsePaint(v, ps, c, &ps.strokeGradient);
       if (ps.hasStroke) ps.stroke = c;
     }
     if (Prop(n, "stroke-width", v)) ps.strokeWidth = Num(v, 1);
@@ -502,11 +508,19 @@ class SvgRenderer {
     if (ps.hasFill && ps.fillOpacity > 0) {
       raster_->Clear();
       raster_->Fill(polys, ps.evenOdd);
-      Composite(*raster_, ps.fill, opacity * ps.fillOpacity, out);
+      if (!ps.fillGradient || !CompositeGradient(ps.fillGradient, polys, m, ps, opacity * ps.fillOpacity, out))
+        Composite(*raster_, ps.fill, opacity * ps.fillOpacity, out);
     }
     if (ps.hasStroke && ps.strokeWidth > 0 && ps.strokeOpacity > 0) {
       StrokeStyle st;
-      st.width = std::max(0.7f, ps.strokeWidth * m.Scale());
+      // Hairlines thinner than a pixel are drawn one pixel wide but
+      // proportionally fainter (approximates their real coverage).
+      float width = ps.strokeWidth * m.Scale(), faint = 1;
+      if (width < 1) {
+        faint = std::max(0.05f, width);
+        width = 1;
+      }
+      st.width = width;
       st.join = ps.join;
       st.cap = ps.cap;
       st.miterLimit = ps.miterLimit;
@@ -514,7 +528,216 @@ class SvgRenderer {
       std::vector<Poly> outline = StrokePolys(polys, closed, st);
       raster_->Clear();
       raster_->Fill(outline, false);
-      Composite(*raster_, ps.stroke, opacity * ps.strokeOpacity, out);
+      if (!ps.strokeGradient ||
+          !CompositeGradient(ps.strokeGradient, polys, m, ps, opacity * ps.strokeOpacity * faint, out))
+        Composite(*raster_, ps.stroke, opacity * ps.strokeOpacity * faint, out);
+    }
+  }
+
+  // Gradient attribute, following href references.
+  std::string GradAttr(const Node* g, const char* name) {
+    for (int i = 0; g && i < 8; ++i) {
+      if (g->HasAttr(name)) return g->Attr(name);
+      std::string href = g->Attr("href");
+      if (href.empty()) href = g->Attr("xlink:href");
+      if (href.size() < 2 || href[0] != '#') break;
+      std::map<std::string, const Node*>::iterator it = ids_.find(href.substr(1));
+      if (it == ids_.end() || it->second == g) break;
+      g = it->second;
+    }
+    return std::string();
+  }
+
+  // Coordinate: number or percentage (of |ref|); |def| if missing.
+  float GradCoord(const Node* g, const char* name, float def, float ref) {
+    std::string v = Trim(GradAttr(g, name));
+    if (v.empty()) return def;
+    size_t u;
+    float f = (float)ParseDoublePrefix(v, u);
+    if (!u) return def;
+    if (v.find('%') != std::string::npos) return f / 100 * ref;
+    return f;
+  }
+
+  bool CompositeGradient(const Node* g, const std::vector<Poly>& polys, const Matrix& m, const PaintState& ps,
+                         float opacity, DecodedImage& out) {
+    CanvasGradient grad;
+    // Stops (from the first gradient in the href chain that has any).
+    std::vector<Node*> stops;
+    const Node* sg = g;
+    for (int i = 0; sg && i < 8 && stops.empty(); ++i) {
+      const_cast<Node*>(sg)->FindAll("stop", stops);
+      if (!stops.empty()) break;
+      std::string href = sg->Attr("href");
+      if (href.empty()) href = sg->Attr("xlink:href");
+      if (href.size() < 2 || href[0] != '#') break;
+      std::map<std::string, const Node*>::iterator it = ids_.find(href.substr(1));
+      sg = it == ids_.end() || it->second == sg ? 0 : it->second;
+    }
+    if (stops.empty()) return false;
+    float lastOffset = 0;
+    for (size_t i = 0; i < stops.size(); ++i) {
+      std::string v;
+      float off = 0;
+      if (Prop(stops[i], "offset", v)) {
+        size_t u;
+        off = (float)ParseDoublePrefix(Trim(v), u);
+        if (v.find('%') != std::string::npos) off /= 100;
+      }
+      off = std::max(lastOffset, std::min(1.0f, std::max(0.0f, off)));
+      lastOffset = off;
+      Color c(0, 0, 0);
+      if (Prop(stops[i], "stop-color", v)) ParseColor(AsciiLower(Trim(v)), c, ps.current);
+      if (Prop(stops[i], "stop-opacity", v)) c.a = (uint8_t)(c.a * std::max(0.0f, std::min(1.0f, Num(v, 1))));
+      grad.stops.push_back(std::make_pair(off, c));
+    }
+    // Gradient space -> device.
+    bool bbox = AsciiLower(GradAttr(g, "gradientunits")) != "userspaceonuse";
+    Matrix gm = m;
+    float refW = 1, refH = 1;
+    if (bbox) {
+      Matrix inv;
+      if (!m.Invert(inv)) return false;
+      float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+      for (size_t i = 0; i < polys.size(); ++i)
+        for (size_t k = 0; k < polys[i].size(); ++k) {
+          float ux, uy;
+          inv.Apply(polys[i][k].x, polys[i][k].y, ux, uy);
+          x0 = std::min(x0, ux);
+          y0 = std::min(y0, uy);
+          x1 = std::max(x1, ux);
+          y1 = std::max(y1, uy);
+        }
+      if (x1 <= x0 || y1 <= y0) return false;
+      gm = m * Matrix(x1 - x0, 0, 0, y1 - y0, x0, y0);
+    } else {
+      SvgIntrinsicSize(root_, refW, refH);
+    }
+    std::string gt = GradAttr(g, "gradienttransform");
+    if (!gt.empty()) gm = gm * ParseTransform(gt);
+    if (g->tag == "lineargradient") {
+      grad.kind = CanvasGradient::kLinear;
+      grad.x0 = GradCoord(g, "x1", 0, refW);
+      grad.y0 = GradCoord(g, "y1", 0, refH);
+      grad.x1 = GradCoord(g, "x2", bbox ? 1 : refW, refW);
+      grad.y1 = GradCoord(g, "y2", 0, refH);
+    } else {
+      grad.kind = CanvasGradient::kRadial;
+      float ref = bbox ? 1 : std::sqrt((refW * refW + refH * refH) / 2);
+      float cx = GradCoord(g, "cx", bbox ? 0.5f : refW / 2, refW);
+      float cy = GradCoord(g, "cy", bbox ? 0.5f : refH / 2, refH);
+      float r = GradCoord(g, "r", bbox ? 0.5f : ref / 2, ref);
+      grad.x0 = GradCoord(g, "fx", cx, refW);
+      grad.y0 = GradCoord(g, "fy", cy, refH);
+      grad.r0 = GradCoord(g, "fr", 0, ref);
+      grad.x1 = cx;
+      grad.y1 = cy;
+      grad.r1 = r;
+    }
+    Matrix inv;
+    if (!gm.Invert(inv)) return false;
+    uint32_t ramp[256];
+    GradientRamp(grad, 1, ramp);
+    const Raster& r = *raster_;
+    for (int y = r.y0; y < r.y1; ++y) {
+      const float* cov = r.Row(y);
+      uint32_t* px = &out.pixels[(size_t)y * out.width];
+      for (int x = r.x0; x < r.x1; ++x) {
+        float cv = cov[x];
+        if (cv <= 0) continue;
+        float gx, gy;
+        inv.Apply(x + 0.5f, y + 0.5f, gx, gy);
+        float t = GradientParameter(grad, gx, gy);
+        if (t < -1.5f) continue;
+        uint32_t c = ramp[(int)(std::max(0.0f, std::min(1.0f, t)) * 255 + 0.5f)];
+        float k = std::min(1.0f, cv) * opacity;
+        float sa = (c >> 24) / 255.0f * k;
+        if (sa <= 0) continue;
+        uint32_t d = px[x];
+        float inv1 = 1 - sa;
+        unsigned na = (unsigned)(sa * 255 + (d >> 24) * inv1 + 0.5f);
+        unsigned nr = (unsigned)(((c >> 16) & 255) * k + ((d >> 16) & 255) * inv1 + 0.5f);
+        unsigned ng = (unsigned)(((c >> 8) & 255) * k + ((d >> 8) & 255) * inv1 + 0.5f);
+        unsigned nb = (unsigned)((c & 255) * k + (d & 255) * inv1 + 0.5f);
+        na = std::min(na, 255u);
+        px[x] = (na << 24) | (std::min(nr, na) << 16) | (std::min(ng, na) << 8) | std::min(nb, na);
+      }
+    }
+    return true;
+  }
+
+  // Referenced element of a url(#id) value, or null.
+  const Node* UrlRef(const std::string& value) {
+    size_t hash = value.find('#');
+    if (hash == std::string::npos || AsciiLower(Trim(value)).find("url(") != 0) return 0;
+    size_t close = value.find(')', hash);
+    std::string id = Trim(ReplaceAll(ReplaceAll(value.substr(hash + 1, close == std::string::npos ? std::string::npos
+                                                                                                : close - hash - 1),
+                                                "\"", ""),
+                                     "'", ""));
+    std::map<std::string, const Node*>::iterator it = ids_.find(id);
+    return it == ids_.end() ? 0 : it->second;
+  }
+
+  // Draws |n| into a separate layer, then composites it masked by <mask>
+  // or <clipPath> content.
+  void DrawMasked(const Node* n, const Node* mask, const Node* clip, const Matrix& parentM,
+                  const PaintState& parentPs, int depth, DecodedImage& out) {
+    DecodedImage layer;
+    layer.width = out.width;
+    layer.height = out.height;
+    layer.pixels.assign(out.pixels.size(), 0);
+    ++maskDepth_;
+    Draw(n, parentM, parentPs, depth, layer, true);
+    std::vector<float> factor(out.pixels.size(), 1.0f);
+    Matrix m = parentM;
+    if (n->HasAttr("transform")) m = m * ParseTransform(n->Attr("transform"));
+    if (mask) {
+      DecodedImage mk;
+      mk.width = out.width;
+      mk.height = out.height;
+      mk.pixels.assign(out.pixels.size(), 0);
+      PaintState ps;
+      ps.current = parentPs.current;
+      ApplyStyle(mask, ps);
+      for (size_t i = 0; i < mask->children.size(); ++i) Draw(mask->children[i].get(), m, ps, depth + 1, mk);
+      std::string type;
+      bool alpha = (Prop(mask, "mask-type", type) && AsciiLower(Trim(type)) == "alpha");
+      for (size_t i = 0; i < factor.size(); ++i) {
+        uint32_t p = mk.pixels[i];
+        factor[i] = alpha ? (p >> 24) / 255.0f
+                          : (0.2125f * ((p >> 16) & 255) + 0.7154f * ((p >> 8) & 255) + 0.0721f * (p & 255)) / 255.0f;
+      }
+    }
+    if (clip) {
+      DecodedImage cp;
+      cp.width = out.width;
+      cp.height = out.height;
+      cp.pixels.assign(out.pixels.size(), 0);
+      PaintState ps;
+      ps.hasStroke = false;
+      Matrix cm = m;
+      if (clip->HasAttr("transform")) cm = cm * ParseTransform(clip->Attr("transform"));
+      for (size_t i = 0; i < clip->children.size(); ++i) {
+        PaintState cps = ps;
+        cps.fill = Color(0, 0, 0);
+        Draw(clip->children[i].get(), cm, cps, depth + 1, cp);
+      }
+      for (size_t i = 0; i < factor.size(); ++i) factor[i] *= (cp.pixels[i] >> 24) / 255.0f;
+    }
+    --maskDepth_;
+    for (size_t i = 0; i < out.pixels.size(); ++i) {
+      uint32_t s = layer.pixels[i];
+      float f = factor[i];
+      if (!s || f <= 0) continue;
+      unsigned sa = (unsigned)((s >> 24) * f + 0.5f), sr = (unsigned)(((s >> 16) & 255) * f + 0.5f),
+               sg = (unsigned)(((s >> 8) & 255) * f + 0.5f), sb = (unsigned)((s & 255) * f + 0.5f);
+      uint32_t d = out.pixels[i];
+      unsigned inv = 255 - sa;
+      unsigned na = sa + ((d >> 24) * inv + 127) / 255, nr = sr + (((d >> 16) & 255) * inv + 127) / 255,
+               ng = sg + (((d >> 8) & 255) * inv + 127) / 255, nb = sb + ((d & 255) * inv + 127) / 255;
+      na = std::min(na, 255u);
+      out.pixels[i] = (na << 24) | (std::min(nr, na) << 16) | (std::min(ng, na) << 8) | std::min(nb, na);
     }
   }
 
@@ -525,7 +748,7 @@ class SvgRenderer {
   }
 
   void Draw(const Node* n, const Matrix& parentM, const PaintState& parentPs, int depth,
-            DecodedImage& out) {
+            DecodedImage& out, bool skipMask = false) {
     if (!n->IsElement() || depth > 40) return;
     const std::string& t = n->tag;
     if (t == "defs" || t == "lineargradient" || t == "radialgradient" || t == "clippath" ||
@@ -537,6 +760,17 @@ class SvgRenderer {
     if (Prop(n, "display", v) && AsciiLower(Trim(v)) == "none") return;
     if (n->style && n->style->display == kDisplayNone && n != root_) return;
     if (Prop(n, "visibility", v) && AsciiLower(Trim(v)) == "hidden") return;
+    if (!skipMask && maskDepth_ < 4) {
+      std::string mv, cv;
+      const Node* mask = Prop(n, "mask", mv) ? UrlRef(mv) : 0;
+      const Node* clip = Prop(n, "clip-path", cv) ? UrlRef(cv) : 0;
+      if (mask && mask->tag != "mask") mask = 0;
+      if (clip && clip->tag != "clippath") clip = 0;
+      if (mask || clip) {
+        DrawMasked(n, mask, clip, parentM, parentPs, depth, out);
+        return;
+      }
+    }
     Matrix m = parentM;
     if (n->HasAttr("transform")) m = m * ParseTransform(n->Attr("transform"));
     PaintState ps = parentPs;
@@ -646,6 +880,7 @@ class SvgRenderer {
   std::map<std::string, const Node*> ids_;
   std::vector<std::shared_ptr<Stylesheet> > sheets_;
   std::unique_ptr<Raster> raster_;
+  int maskDepth_ = 0;
 };
 
 }  // namespace

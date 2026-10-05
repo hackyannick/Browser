@@ -286,6 +286,7 @@ int main(int argc, char** argv) {
   Page page(&fonts, &imgs);
   HeadlessHost host;
   page.SetScripting(&host, js);
+  page.SetAnimationsInstant(true);  // no frame clock: show end states
   page.LoadHtml(html, r.finalUrl);
   for (int round = 0; round < 4; ++round) {
     std::vector<std::string> pending = page.PendingStylesheets();

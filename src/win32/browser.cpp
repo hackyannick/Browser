@@ -34,6 +34,7 @@ const UINT_PTR kTimerResize = 2;
 const UINT_PTR kTimerStyleFallbackBase = 0x1000;
 const UINT_PTR kTimerRefreshBase = 0x2000;
 const UINT_PTR kTimerScriptBase = 0x3000;
+const UINT_PTR kTimerAnimBase = 0x4000;  // CSS animation frames (~30 fps)
 // Deferred navigation requested by a script (location.href = ..., form.submit()).
 const UINT WM_KITE_JSNAV = WM_APP + 3;
 const int kZoomLevels[] = {30, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300};
@@ -207,6 +208,7 @@ class Browser {
   void AfterScript(Tab* t);
   void PumpScripts(Tab* t);
   void ScheduleScriptTimer(Tab* t);
+  void ScheduleAnimation(Tab* t);
   bool DispatchJs(Tab* t, Node* target, const char* type);
   void RunJavaScriptUrl(Tab* t, const std::string& url);
   void ShowConsole();
@@ -601,6 +603,7 @@ void Browser::CloseTab(Tab* t) {
   KillTimer(hwnd_, kTimerStyleFallbackBase + t->id);
   KillTimer(hwnd_, kTimerRefreshBase + t->id);
   KillTimer(hwnd_, kTimerScriptBase + t->id);
+  KillTimer(hwnd_, kTimerAnimBase + t->id);
   tabList_.erase(tabList_.begin() + idx);
   TabCtrl_DeleteItem(tabs_, idx);
   if (tabList_.empty()) {
@@ -631,6 +634,7 @@ void Browser::ActivateTab(Tab* t) {
   UpdateScrollBars();
   UpdateUi();
   InvalidateRect(view_, 0, FALSE);
+  ScheduleAnimation(t);
 }
 
 void Browser::UpdateTabLabel(Tab* t) {
@@ -1094,6 +1098,7 @@ void Browser::RenderTab(Tab* t, bool restyle) {
     InvalidateRect(view_, 0, FALSE);
     UpdateUi();
   }
+  ScheduleAnimation(t);
   if (first) PumpScripts(t);
 }
 
@@ -2067,6 +2072,28 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       break;
     case WM_TIMER: {
       UINT_PTR id = w;
+      if (id >= kTimerAnimBase) {
+        KillTimer(hwnd_, id);
+        Tab* t = TabById((int)(id - kTimerAnimBase));
+        if (!t || t != current_ || !t->rendered) return 0;
+        if (scriptDepth_ > 0) {
+          SetTimer(hwnd_, id, 50, 0);
+          return 0;
+        }
+        BeginScript();
+        int r = t->page->TickAnimations();
+        EndScript(t);  // event listeners may have changed the page
+        if (TabIndex(t) < 0) return 0;
+        if (r == 2) {
+          t->page->Relayout(ViewportWidth(), ViewportHeight());
+          UpdateScrollBars();
+        } else if (r == 1) {
+          t->page->Repaint();
+        }
+        if (r && t == current_) InvalidateRect(view_, 0, FALSE);
+        ScheduleAnimation(t);
+        return 0;
+      }
       if (id >= kTimerScriptBase) {
         KillTimer(hwnd_, id);
         Tab* t = TabById((int)(id - kTimerScriptBase));
@@ -2414,6 +2441,14 @@ void Browser::AfterScript(Tab* t) {
     }
   }
   ScheduleScriptTimer(t);
+  ScheduleAnimation(t);
+}
+
+void Browser::ScheduleAnimation(Tab* t) {
+  if (t == current_ && t->rendered && t->page->AnimationsActive())
+    SetTimer(hwnd_, kTimerAnimBase + t->id, 33, 0);
+  else
+    KillTimer(hwnd_, kTimerAnimBase + t->id);
 }
 
 void Browser::ScheduleScriptTimer(Tab* t) {

@@ -260,7 +260,7 @@ std::string UnquoteFamily(const std::string& raw) {
   return out;
 }
 
-void CopyProperty(int id, ComputedStyle& d, const ComputedStyle& s) {
+void CopyPropertyImpl(int id, ComputedStyle& d, const ComputedStyle& s) {
   switch (id) {
     case kPropFontSize: d.fontSize = s.fontSize; break;
     case kPropColor: d.color = s.color; break;
@@ -358,12 +358,105 @@ void CopyProperty(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropBoxShadow: d.shadows = s.shadows; break;
     case kPropTransform: case kPropTranslate:
       d.translateX = s.translateX; d.translateY = s.translateY; d.transformHidden = s.transformHidden; break;
-    case kPropAnimationName: d.hasAnimation = s.hasAnimation; break;
+    case kPropAnimationName: d.hasAnimation = s.hasAnimation; d.animName = s.animName; break;
+    case kPropAnimationDuration: d.animDuration = s.animDuration; break;
+    case kPropAnimationDelay: d.animDelay = s.animDelay; break;
+    case kPropAnimationIterationCount: d.animIterations = s.animIterations; break;
+    case kPropAnimationDirection: d.animDirection = s.animDirection; break;
+    case kPropAnimationFillMode: d.animFillMode = s.animFillMode; break;
+    case kPropAnimationTimingFunction: d.animTiming = s.animTiming; break;
+    case kPropAnimationPlayState: d.animPlayState = s.animPlayState; break;
+    case kPropTransitionProperty: d.transProperty = s.transProperty; break;
+    case kPropTransitionDuration: d.transDuration = s.transDuration; break;
+    case kPropTransitionDelay: d.transDelay = s.transDelay; break;
+    case kPropTransitionTimingFunction: d.transTiming = s.transTiming; break;
     default: break;
   }
 }
 
+bool IsCssTime(const std::string& t) {
+  if (t.size() < 2) return false;
+  size_t used = 0;
+  ParseDoublePrefix(t, used);
+  if (used == 0) return false;
+  std::string unit = t.substr(used);
+  return unit == "s" || unit == "ms";
+}
+
+bool IsTimingFunction(const std::string& t) {
+  return t == "linear" || t == "ease" || t == "ease-in" || t == "ease-out" || t == "ease-in-out" ||
+         t == "step-start" || t == "step-end" || StartsWith(t, "cubic-bezier(") || StartsWith(t, "steps(") ||
+         StartsWith(t, "linear(");
+}
+
+// Splits the animation shorthand into its longhand lists.
+void ExpandAnimation(const std::string& value, std::vector<std::pair<int, std::string> >& out) {
+  std::vector<std::string> parts = SplitValueCommas(value);
+  std::string lists[8];
+  for (size_t i = 0; i < parts.size(); ++i) {
+    std::vector<std::string> tokens = SplitValueTokens(parts[i]);
+    std::string name = "none", duration = "0s", delay = "0s", iter = "1", dir = "normal", fill = "none",
+                timing = "ease", play = "running";
+    bool haveDuration = false;
+    for (size_t k = 0; k < tokens.size(); ++k) {
+      std::string t = tokens[k], l = AsciiLower(t);
+      if (IsCssTime(l)) {
+        if (!haveDuration) duration = l;
+        else delay = l;
+        haveDuration = true;
+      } else if (IsTimingFunction(l)) {
+        timing = l;
+      } else if (l == "infinite" || (!l.empty() && (IsAsciiDigit((unsigned char)l[0]) || l[0] == '.'))) {
+        iter = l;
+      } else if (l == "normal" || l == "reverse" || l == "alternate" || l == "alternate-reverse") {
+        dir = l;
+      } else if (l == "forwards" || l == "backwards" || l == "both") {
+        fill = l;
+      } else if (l == "running" || l == "paused") {
+        play = l;
+      } else if (l != "none" || tokens.size() == 1) {
+        name = t;
+      }
+    }
+    const std::string vals[8] = {name, duration, delay, iter, dir, fill, timing, play};
+    for (int k = 0; k < 8; ++k) lists[k] += (i ? "," : "") + vals[k];
+  }
+  const int ids[8] = {kPropAnimationName, kPropAnimationDuration, kPropAnimationDelay,
+                      kPropAnimationIterationCount, kPropAnimationDirection, kPropAnimationFillMode,
+                      kPropAnimationTimingFunction, kPropAnimationPlayState};
+  for (int k = 0; k < 8; ++k) out.push_back(std::make_pair(ids[k], lists[k]));
+}
+
+void ExpandTransition(const std::string& value, std::vector<std::pair<int, std::string> >& out) {
+  std::vector<std::string> parts = SplitValueCommas(value);
+  std::string lists[4];
+  for (size_t i = 0; i < parts.size(); ++i) {
+    std::vector<std::string> tokens = SplitValueTokens(parts[i]);
+    std::string prop = "all", duration = "0s", delay = "0s", timing = "ease";
+    bool haveDuration = false;
+    for (size_t k = 0; k < tokens.size(); ++k) {
+      std::string l = AsciiLower(tokens[k]);
+      if (IsCssTime(l)) {
+        if (!haveDuration) duration = l;
+        else delay = l;
+        haveDuration = true;
+      } else if (IsTimingFunction(l)) {
+        timing = l;
+      } else if (l != "allow-discrete" && l != "normal") {
+        prop = l;
+      }
+    }
+    const std::string vals[4] = {prop, duration, delay, timing};
+    for (int k = 0; k < 4; ++k) lists[k] += (i ? "," : "") + vals[k];
+  }
+  const int ids[4] = {kPropTransitionProperty, kPropTransitionDuration, kPropTransitionDelay,
+                      kPropTransitionTimingFunction};
+  for (int k = 0; k < 4; ++k) out.push_back(std::make_pair(ids[k], lists[k]));
+}
+
 }  // namespace
+
+void CopyProperty(int id, ComputedStyle& dst, const ComputedStyle& src) { CopyPropertyImpl(id, dst, src); }
 
 std::vector<std::string> SplitValueTokens(const std::string& value) {
   std::vector<std::string> out;
@@ -446,8 +539,8 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
         un == "flex-grow" || un == "flex-shrink" || un == "flex-basis" ||
         un == "justify-content" || un == "align-items" || un == "align-self" ||
         un == "box-sizing" || un == "order" || un == "background-clip" ||
-        un == "border-radius" || un == "box-shadow" || un == "transform" || un == "animation" ||
-        un == "animation-name")
+        un == "border-radius" || un == "box-shadow" || un == "transform" ||
+        StartsWith(un, "animation") || StartsWith(un, "transition"))
       name = un;
     else
       return false;
@@ -753,9 +846,23 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
     if (global) r.assign(1, value);
     FourSides(r, kPropBorderTopLeftRadius, kPropBorderTopRightRadius,
               kPropBorderBottomRightRadius, kPropBorderBottomLeftRadius, out);
-  } else if (name == "animation") {
-    std::string l = AsciiLower(Trim(value));
-    out.push_back(std::make_pair((int)kPropAnimationName, std::string(l == "none" ? "none" : "anim")));
+  } else if (name == "animation" || name == "-webkit-animation") {
+    if (global) {
+      const int ids[8] = {kPropAnimationName, kPropAnimationDuration, kPropAnimationDelay,
+                          kPropAnimationIterationCount, kPropAnimationDirection, kPropAnimationFillMode,
+                          kPropAnimationTimingFunction, kPropAnimationPlayState};
+      for (int k = 0; k < 8; ++k) out.push_back(std::make_pair(ids[k], value));
+    } else {
+      ExpandAnimation(value, out);
+    }
+  } else if (name == "transition" || name == "-webkit-transition") {
+    if (global) {
+      const int ids[4] = {kPropTransitionProperty, kPropTransitionDuration, kPropTransitionDelay,
+                          kPropTransitionTimingFunction};
+      for (int k = 0; k < 4; ++k) out.push_back(std::make_pair(ids[k], value));
+    } else {
+      ExpandTransition(value, out);
+    }
   } else if (name == "word-wrap") {
     out.push_back(std::make_pair((int)kPropOverflowWrap, value));
   } else if (name == "text-wrap" || name == "text-wrap-mode") {
@@ -792,15 +899,15 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
   std::string value = Trim(rawValue);
   std::string v = AsciiLower(value);
   if (v == "inherit") {
-    CopyProperty(id, s, parent);
+    CopyPropertyImpl(id, s, parent);
     return;
   }
   if (v == "initial" || v == "unset" || v == "revert" || v == "revert-layer") {
     if (v != "initial" && IsInheritedProperty(id)) {
-      CopyProperty(id, s, parent);
+      CopyPropertyImpl(id, s, parent);
     } else {
       static ComputedStyle* initial = new ComputedStyle;
-      CopyProperty(id, s, *initial);
+      CopyPropertyImpl(id, s, *initial);
     }
     return;
   }
@@ -1020,10 +1127,14 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       return;
     case kPropZIndex: {
       long long n;
+      float f;
       if (v == "auto") s.zIndexAuto = true;
       else if (ParseInt(v, n)) {
         s.zIndexAuto = false;
         s.zIndex = (int)std::max(-100000LL, std::min(100000LL, n));
+      } else if (ParseNumber(v, f)) {  // calc(-10)
+        s.zIndexAuto = false;
+        s.zIndex = (int)std::max(-100000.0f, std::min(100000.0f, std::floor(f + 0.5f)));
       }
       return;
     }
@@ -1367,7 +1478,19 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
     }
     case kPropAnimationName:
       s.hasAnimation = v != "none" && !v.empty();
+      s.animName = s.hasAnimation ? value : std::string();
       return;
+    case kPropAnimationDuration: s.animDuration = v; return;
+    case kPropAnimationDelay: s.animDelay = v; return;
+    case kPropAnimationIterationCount: s.animIterations = v; return;
+    case kPropAnimationDirection: s.animDirection = v; return;
+    case kPropAnimationFillMode: s.animFillMode = v; return;
+    case kPropAnimationTimingFunction: s.animTiming = v; return;
+    case kPropAnimationPlayState: s.animPlayState = v; return;
+    case kPropTransitionProperty: s.transProperty = v == "none" ? std::string() : v; return;
+    case kPropTransitionDuration: s.transDuration = v; return;
+    case kPropTransitionDelay: s.transDelay = v; return;
+    case kPropTransitionTimingFunction: s.transTiming = v; return;
     case kPropClipPath:
       s.clippedAway = v == "inset(50%)" || v == "inset(100%)" || StartsWith(v, "circle(0") ||
                       v == "polygon(0 0,0 0,0 0)" || v == "polygon(0 0, 0 0, 0 0)";

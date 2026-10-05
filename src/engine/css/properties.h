@@ -110,7 +110,18 @@ namespace kite {
   X(BoxShadow, "box-shadow", false)                        \
   X(Transform, "transform", false)                         \
   X(Translate, "translate", false)                         \
-  X(AnimationName, "animation-name", false)
+  X(AnimationName, "animation-name", false)               \
+  X(AnimationDuration, "animation-duration", false)       \
+  X(AnimationDelay, "animation-delay", false)             \
+  X(AnimationIterationCount, "animation-iteration-count", false) \
+  X(AnimationDirection, "animation-direction", false)     \
+  X(AnimationFillMode, "animation-fill-mode", false)      \
+  X(AnimationTimingFunction, "animation-timing-function", false) \
+  X(AnimationPlayState, "animation-play-state", false)    \
+  X(TransitionProperty, "transition-property", false)     \
+  X(TransitionDuration, "transition-duration", false)     \
+  X(TransitionDelay, "transition-delay", false)           \
+  X(TransitionTimingFunction, "transition-timing-function", false)
 
 enum PropertyId {
 #define KITE_PROP_ENUM(id, name, inh) kProp##id,
@@ -139,6 +150,9 @@ struct ApplyContext {
 // (inherit/initial/unset) are handled here too.
 void ApplyProperty(int id, const std::string& value, ComputedStyle& style,
                    const ApplyContext& ctx);
+
+// Copies the computed value of property |id| from |src| to |dst|.
+void CopyProperty(int id, ComputedStyle& dst, const ComputedStyle& src);
 
 // Splits a value on top-level whitespace (keeping functions intact).
 std::vector<std::string> SplitValueTokens(const std::string& value);

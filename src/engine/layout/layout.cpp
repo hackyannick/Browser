@@ -1360,6 +1360,7 @@ void LayoutEngine::ReplacedSize(LayoutBox* b, float cbW, float cbH, float& outW,
   Node* el = b->node;
   float iw = 0, ih = 0;
   bool ratio = false;
+  bool svgAutoSize = false;  // <svg> with a viewBox but no width/height attributes
   std::string tag = el ? el->tag : std::string();
   FontMetrics fm = Metrics(s);
   float fontH = fm.ascent + fm.descent;
@@ -1434,6 +1435,7 @@ void LayoutEngine::ReplacedSize(LayoutBox* b, float cbW, float cbH, float& outW,
       iw = 24;
       ih = 24;
     }
+    svgAutoSize = ratio && !el->HasAttr("width") && !el->HasAttr("height");
   } else if (tag == "audio") {
     iw = 300;
     ih = 32;
@@ -1456,7 +1458,21 @@ void LayoutEngine::ReplacedSize(LayoutBox* b, float cbW, float cbH, float& outW,
     if (s->boxSizing == kBorderBox) h -= pbV;
   }
   float r = s->aspectRatio > 0 ? s->aspectRatio : (ratio && ih > 0 ? iw / ih : 0);
-  if (!wSet && !hSet) {
+  if (!wSet && !hSet && svgAutoSize && r > 0) {
+    // CSS 2.1 10.3.2: a replaced element with only an intrinsic ratio fills
+    // the containing block. Inline icons and flex items without any size
+    // get a small icon size instead, which is what pages expect.
+    bool blockish = s->IsOutOfFlow() ||
+                    (s->IsBlockLevel() && !(b->parent && (b->parent->kind == LayoutBox::kFlex ||
+                                                          b->parent->kind == LayoutBox::kGrid)));
+    if (blockish && cbW > 0) {
+      w = std::max(0.0f, cbW - b->margin.left - b->margin.right - pbH);
+      h = w / r;
+    } else {
+      h = 24;
+      w = 24 * r;
+    }
+  } else if (!wSet && !hSet) {
     w = iw;
     h = ih;
     if (s->aspectRatio > 0 && w > 0) h = w / s->aspectRatio;

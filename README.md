@@ -34,7 +34,9 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 | HTML | HTML5-Tokenizer und Tree-Builder mit Fehlerkorrektur, Zeichenreferenzen, Zeichensatz-Erkennung (UTF-8, Windows-1252, ISO-8859-1/-15, UTF-16) |
 | CSS | Kaskade mit Spezifität und `!important`, Selektoren bis Level 4 (`:is()`, `:where()`, `:not()`, `:nth-child()`, Attributselektoren …), `@media` (inkl. Bereichs-Syntax), `@supports`, `@import`, `@layer`, CSS-Verschachtelung, Custom Properties (`var()`), `calc()`/`min()`/`max()`/`clamp()`, `::before`/`::after` |
 | Layout | Block- und Inline-Formatierung mit Zeilenumbruch, Margin-Collapsing, Floats und `clear`, Tabellen (colspan/rowspan, automatische Spaltenbreiten), **Flexbox**, **Grid** (Spalten, `repeat()`, `fr`, `minmax()`, `auto-fill`), relative und absolute Positionierung (`fixed` vereinfacht), `overflow`-Clipping, Listen |
-| Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, `translate`-Transformationen, PNG/JPEG/GIF/BMP/**WebP** (auch `<picture>`), **SVG** (Inline und als Bild, mit Kantenglättung) |
+| Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, `translate`-Transformationen, PNG/JPEG/GIF/BMP/**WebP** (auch `<picture>`), **SVG** (Inline und als Bild, mit Kantenglättung, Verläufen, Masken und Clip-Pfaden) |
+| Animation | **CSS-Animationen** (`@keyframes`, alle `animation-*`-Eigenschaften, Timing-Funktionen inkl. `cubic-bezier()`/`steps()`) und **Transitions** für Deckkraft, Farben, Verschiebung, Schatten, Größen und Abstände; `animationend`/`transitionend`-Events |
+| Canvas | **`<canvas>` 2D** per Software-Rasterizer: Pfade, Bögen, Füllregeln, Linienstile und Strichelung, Transformationen, Clipping, lineare/radiale/konische Verläufe, Muster, Compositing-Modi, Schatten, Text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, `Path2D` |
 | Schriften | **Webfonts** (`@font-face`, TTF/OTF/WOFF/WOFF2) werden geladen und prozesslokal installiert |
 | JavaScript | **QuickJS** (ES2023) mit eigener DOM-Anbindung: `document`/`window`, Elemente, `querySelector`, `innerHTML`, `classList`, `style`, `dataset`, Events mit Bubbling und `preventDefault`, Timer, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `localStorage`, `URL`, `document.cookie`, `getBoundingClientRect`/`getComputedStyle`, `<noscript>` |
 | Netzwerk | HTTP/1.1, **TLS 1.2 (BearSSL)** mit Zertifikatsprüfung, gzip/deflate/Brotli, Weiterleitungen, Cookies, Proxy (CONNECT), `data:`- und `file:`-URLs |
@@ -45,13 +47,13 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 
 ## Was (noch) nicht geht
 
-- JavaScript: ES-Module (`type=module`), Web Components/Shadow DOM, Canvas,
+- JavaScript: ES-Module (`type=module`), Web Components/Shadow DOM, WebGL,
   WebSockets, Web Workers und Medienwiedergabe fehlen. `MutationObserver` ist
   nur ein Platzhalter, `localStorage` lebt nur bis zum Schließen des Tabs.
   Große Single-Page-Anwendungen (React, Angular …) laufen daher oft nur
   teilweise.
-- CSS-Animationen werden nicht abgespielt (es wird der Endzustand gezeigt),
-  Rotation/Skalierung werden ignoriert; AVIF-Bilder werden nicht dekodiert,
+- CSS-Transformationen: nur Verschiebungen werden dargestellt, Rotation und
+  Skalierung (auch in Animationen) werden ignoriert; AVIF-Bilder werden nicht dekodiert,
   animierte GIF/WebP zeigen nur das erste Bild.
 - TLS 1.3 und HTTP/2 werden nicht unterstützt (alle gängigen Server sprechen
   noch TLS 1.2 und HTTP/1.1).
@@ -117,12 +119,15 @@ src/engine/            plattformunabhängige Engine (C++11)
   css/                 CSS-Parser, Eigenschaften, Kaskade, UA-Stylesheet
   layout/              Box-Baum, Block/Inline, Floats, Tabellen, Flex, Grid
   paint/               Display-List und Painter
-  image/               PNG/JPEG/GIF (stb_image) und SVG-Rasterizer
+  image/               PNG/JPEG/GIF (stb_image), WebP, SVG und gemeinsamer
+                       Vektor-Rasterizer (raster.cpp)
+  canvas/              <canvas>-2D-Kontext
   net/                 URL, Sockets, TLS (BearSSL), HTTP, Cookies
   script/              JavaScript: QuickJS-Anbindung (script.cpp) und
                        Web-API in JavaScript (dom_js.cpp)
   text/                Webfont-Konvertierung (WOFF/WOFF2 → TrueType)
-  page/                Seite: verbindet DOM, Styles, Layout, Skripte und Painting
+  page/                Seite: verbindet DOM, Styles, Layout, Skripte und Painting;
+                       CSS-Animationen und Transitions (animation.cpp)
 src/win32/             Windows-Oberfläche (Win32-API, GDI, Common Controls)
 src/tools/kite_dump.cpp  Headless-Werkzeug zum Testen der Engine
 tests/                 Unit-Tests

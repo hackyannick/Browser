@@ -14,6 +14,7 @@ Page::~Page() {}
 
 void Page::LoadHtml(const std::string& utf8, const std::string& url) {
   script_.reset();  // references the old document
+  anim_.Clear();
   scripts_.clear();
   formQueue_.clear();
   contentLoadedFired_ = loadFired_ = false;
@@ -408,7 +409,22 @@ void Page::Restyle(float viewportW, float viewportH) {
     resolver_.AddAuthorSheet(e.sheet, e.isLink ? e.url : baseUrl_.Spec());
   }
   ElementState st;
+  anim_.BeforeRestyle(doc_.get());
   resolver_.ResolveDocument(*doc_, mc, baseUrl_.Spec(), st);
+  AnimationController::Context ac;
+  ac.rootFontSize = resolver_.rootFontSize();
+  ac.viewportW = viewportW;
+  ac.viewportH = viewportH;
+  ac.baseUrl = baseUrl_.Spec();
+  anim_.AfterRestyle(doc_.get(), resolver_, ac, AnimationClockMs());
+}
+
+int Page::TickAnimations() {
+  int r = anim_.Tick(AnimationClockMs());
+  std::vector<std::pair<Node*, std::string> > events = anim_.TakeEvents();
+  if (script_)
+    for (size_t i = 0; i < events.size(); ++i) script_->DispatchEvent(events[i].first, events[i].second.c_str());
+  return r;
 }
 
 void Page::Relayout(float viewportW, float viewportH) {

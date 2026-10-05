@@ -766,4 +766,17 @@ void StyleResolver::ResolveDocument(Document& doc, const MediaContext& media,
   }
 }
 
+bool SubstituteCssVars(const std::string& value, const ComputedStyle& style, std::string& out) {
+  return SubstituteVars(value, style.customProperties.get(), out, 0);
+}
+
+const KeyframesRule* StyleResolver::FindKeyframes(const std::string& name) const {
+  for (size_t i = sheets_.size(); i-- > 0;) {
+    const std::vector<KeyframesRule>& kf = sheets_[i].sheet->keyframes;
+    for (size_t k = kf.size(); k-- > 0;)
+      if (kf[k].name == name) return &kf[k];
+  }
+  return 0;
+}
+
 }  // namespace kite

@@ -904,6 +904,40 @@ void ParseRules(const std::string& css, const std::vector<std::string>& media,
           }
         }
         if (!face.family.empty() && !face.sources.empty()) st.sheet->fontFaces.push_back(face);
+      } else if (name == "keyframes" || name == "-webkit-keyframes" || name == "-moz-keyframes" ||
+                 name == "-o-keyframes") {
+        KeyframesRule kr;
+        kr.name = prelude;
+        if (kr.name.size() >= 2 && (kr.name[0] == '"' || kr.name[0] == '\''))
+          kr.name = kr.name.substr(1, kr.name.size() - 2);
+        size_t k = 0;
+        while (k < body.size()) {
+          size_t open = FindTopLevel(body, k, "{");
+          if (open == std::string::npos) break;
+          size_t close = MatchBrace(body, open);
+          std::string selectors = AsciiLower(body.substr(k, open - k));
+          std::vector<Declaration> decls =
+              ParseDeclarations(body.substr(open + 1, close > open ? close - open - 1 : 0));
+          k = close + 1;
+          std::vector<std::string> sels = SplitTopLevel(selectors, ',');
+          for (size_t q = 0; q < sels.size(); ++q) {
+            std::string sel = Trim(sels[q]);
+            float off = -1;
+            if (sel == "from") off = 0;
+            else if (sel == "to") off = 1;
+            else if (!sel.empty() && sel[sel.size() - 1] == '%') {
+              size_t used = 0;
+              double v = ParseDoublePrefix(sel, used);
+              if (used == sel.size() - 1 && v >= 0 && v <= 100) off = (float)(v / 100);
+            }
+            if (off < 0) continue;
+            Keyframe f;
+            f.offset = off;
+            f.declarations = decls;
+            kr.frames.push_back(f);
+          }
+        }
+        if (!kr.name.empty() && !kr.frames.empty()) st.sheet->keyframes.push_back(kr);
       } else if (name == "layer" || name == "scope" || name == "document" ||
                  name == "-moz-document" || name == "starting-style") {
         if (name != "starting-style") ParseRules(body, media, st, false);

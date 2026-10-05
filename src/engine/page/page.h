@@ -14,6 +14,7 @@
 #include "layout/box.h"
 #include "layout/layout.h"
 #include "net/url.h"
+#include "page/animation.h"
 #include "paint/display_list.h"
 #include "script/script.h"
 
@@ -121,6 +122,13 @@ class Page {
   // After scripts changed the DOM: re-collect stylesheets, restyle, relayout.
   void ScriptMutated();
 
+  // CSS animations and transitions. Tick returns what needs updating:
+  // 0 nothing, 1 repaint (call Repaint), 2 relayout (call Relayout).
+  bool AnimationsActive() const { return anim_.Active(); }
+  int TickAnimations();
+  // Headless use: show the end state of animations immediately.
+  void SetAnimationsInstant(bool on) { anim_.SetInstant(on); }
+
   // Plain text of the whole document (for "find in page").
   std::vector<std::pair<Rect, std::string> > TextRuns() const;
 
@@ -167,6 +175,7 @@ class Page {
   std::vector<FormSubmission> formQueue_;
   bool contentLoadedFired_ = false, loadFired_ = false;
   bool inScripts_ = false;
+  AnimationController anim_;
   // Destroyed first: holds pointers into doc_.
   std::unique_ptr<ScriptEngine> script_;
 };

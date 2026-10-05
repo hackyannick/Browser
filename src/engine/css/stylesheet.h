@@ -73,9 +73,20 @@ struct FontFace {
   FontFace() : weight(400), italic(false), coversLatin(true) {}
 };
 
+struct Keyframe {
+  float offset;  // 0..1
+  std::vector<Declaration> declarations;
+};
+
+struct KeyframesRule {
+  std::string name;
+  std::vector<Keyframe> frames;  // in source order
+};
+
 class Stylesheet {
  public:
   std::vector<StyleRule> rules;
+  std::vector<KeyframesRule> keyframes;
   std::vector<FontFace> fontFaces;
   std::vector<std::string> imports;  // @import URLs (unresolved)
 };
