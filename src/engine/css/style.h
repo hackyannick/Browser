@@ -107,14 +107,19 @@ struct BoxShadow {
   BoxShadow() : x(0), y(0), blur(0), spread(0), inset(false) {}
 };
 
-// One function of a CSS transform list (2D).
+// One function of a CSS transform list.
 struct TransformOp {
-  // kRotateX/kRotateY: 3D rotations, projected orthographically (v[0] = angle).
-  enum Kind { kTranslate, kScale, kRotate, kSkew, kMatrix, kRotateX, kRotateY };
+  enum Kind { kTranslate, kScale, kRotate, kSkew, kMatrix, kRotateX, kRotateY, kRotate3d, kMatrix3d,
+              kPerspective };
   Kind kind;
-  Length tx, ty;    // kTranslate (percentages refer to the border box)
-  float v[6];       // kScale: sx, sy; kRotate: radians; kSkew: ax, ay (radians); kMatrix: a..f
-  TransformOp() : kind(kTranslate) { v[0] = v[1] = v[2] = v[3] = v[4] = v[5] = 0; }
+  Length tx, ty;  // kTranslate (percentages refer to the border box); v[2] = z (px)
+  // kScale: sx, sy, sz; kRotate/kRotateX/kRotateY: radians; kRotate3d: x, y,
+  // z, radians; kSkew: ax, ay (radians); kMatrix: a..f; kMatrix3d: 16 values
+  // in CSS (column-major) order; kPerspective: distance (0 = none).
+  float v[16];
+  TransformOp() : kind(kTranslate) {
+    for (int i = 0; i < 16; ++i) v[i] = 0;
+  }
 };
 
 struct ComputedStyle {
@@ -187,7 +192,12 @@ struct ComputedStyle {
   float rotateRad;
   float scaleX, scaleY;
   Length originX, originY;
+  float originZ;
+  float rotateAxis[3];  // rotate property: axis of rotateRad (default z)
+  float perspective;    // perspective property (px, 0 = none)
+  Length perspOriginX, perspOriginY;
   bool backfaceHidden;  // backface-visibility: hidden
+  bool preserve3d;      // transform-style: preserve-3d
   bool HasLinearTransform() const { return !transformOps.empty() || rotateRad != 0 || scaleX != 1 || scaleY != 1; }
   bool hasAnimation;  // animation-name is set
   // Animations and transitions (raw, comma separated lists).
@@ -251,6 +261,11 @@ struct LengthContext {
 // 2D affine matrix [a b c d e f] relative to the transform origin. |w|/|h|
 // is the border box size (for percentages).
 void TransformMatrix(const ComputedStyle& s, float w, float h, float out[6]);
+// The same as a 4x4 matrix (column-major, like CSS matrix3d()), including
+// 3D rotations, z translations and perspective() functions.
+void TransformMatrix4(const ComputedStyle& s, float w, float h, float out[16]);
+// m = m * n for 4x4 column-major matrices.
+void MulMatrix4(float m[16], const float n[16]);
 
 // Parses a CSS length/percentage/calc() value. Returns false if invalid.
 bool ParseLength(const std::string& value, const LengthContext& ctx, Length& out,

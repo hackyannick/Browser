@@ -68,7 +68,12 @@ ComputedStyle::ComputedStyle()
       scaleY(1),
       originX(Length::Pct(50)),
       originY(Length::Pct(50)),
+      originZ(0),
+      perspective(0),
+      perspOriginX(Length::Pct(50)),
+      perspOriginY(Length::Pct(50)),
       backfaceHidden(false),
+      preserve3d(false),
       hasAnimation(false),
       aspectRatio(0),
       objectFit(kFitFill),
@@ -88,6 +93,8 @@ ComputedStyle::ComputedStyle()
       gridColumnStart(0),
       gridColumnEnd(0),
       hasContent(false) {
+  rotateAxis[0] = rotateAxis[1] = 0;
+  rotateAxis[2] = 1;
   for (int i = 0; i < 4; ++i) {
     margin[i] = Length::Px(0);
     padding[i] = Length::Px(0);
@@ -203,6 +210,12 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   scaleY = o.scaleY;
   originX = o.originX;
   originY = o.originY;
+  originZ = o.originZ;
+  for (int i = 0; i < 3; ++i) rotateAxis[i] = o.rotateAxis[i];
+  perspective = o.perspective;
+  preserve3d = o.preserve3d;
+  perspOriginX = o.perspOriginX;
+  perspOriginY = o.perspOriginY;
   translateY = o.translateY;
   transformHidden = o.transformHidden;
   hasAnimation = o.hasAnimation;
@@ -700,57 +713,122 @@ std::string ExtractUrl(const std::string& value) {
   return u;
 }
 
-static void MulMatrix(float m[6], const float n[6]) {  // m = m * n
-  float r[6] = {m[0] * n[0] + m[2] * n[1], m[1] * n[0] + m[3] * n[1], m[0] * n[2] + m[2] * n[3],
-                m[1] * n[2] + m[3] * n[3], m[0] * n[4] + m[2] * n[5] + m[4], m[1] * n[4] + m[3] * n[5] + m[5]};
-  for (int i = 0; i < 6; ++i) m[i] = r[i];
+void MulMatrix4(float m[16], const float n[16]) {
+  float r[16];
+  for (int c = 0; c < 4; ++c)
+    for (int row = 0; row < 4; ++row) {
+      float v = 0;
+      for (int k = 0; k < 4; ++k) v += m[k * 4 + row] * n[c * 4 + k];
+      r[c * 4 + row] = v;
+    }
+  for (int i = 0; i < 16; ++i) m[i] = r[i];
 }
 
-void TransformMatrix(const ComputedStyle& s, float w, float h, float out[6]) {
-  float m[6] = {1, 0, 0, 1, 0, 0};
+namespace {
+
+void Identity4(float m[16]) {
+  for (int i = 0; i < 16; ++i) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+}
+
+// Rotation by |a| radians about the unit axis (x, y, z) (CSS rotate3d()).
+void Rotation4(float x, float y, float z, float a, float r[16]) {
+  Identity4(r);
+  float len = std::sqrt(x * x + y * y + z * z);
+  if (len <= 0) return;
+  x /= len;
+  y /= len;
+  z /= len;
+  float c = std::cos(a), s = std::sin(a), t = 1 - c;
+  r[0] = t * x * x + c;
+  r[1] = t * x * y + s * z;
+  r[2] = t * x * z - s * y;
+  r[4] = t * x * y - s * z;
+  r[5] = t * y * y + c;
+  r[6] = t * y * z + s * x;
+  r[8] = t * x * z + s * y;
+  r[9] = t * y * z - s * x;
+  r[10] = t * z * z + c;
+}
+
+}  // namespace
+
+void TransformMatrix4(const ComputedStyle& s, float w, float h, float out[16]) {
+  float m[16];
+  Identity4(m);
+  // Individual properties first: translate (handled by the painter),
+  // rotate, scale, then the transform list.
   if (s.rotateRad != 0) {
-    float c = std::cos(s.rotateRad), sn = std::sin(s.rotateRad);
-    float r[6] = {c, sn, -sn, c, 0, 0};
-    MulMatrix(m, r);
+    float r[16];
+    Rotation4(s.rotateAxis[0], s.rotateAxis[1], s.rotateAxis[2], s.rotateRad, r);
+    MulMatrix4(m, r);
   }
   if (s.scaleX != 1 || s.scaleY != 1) {
-    float r[6] = {s.scaleX, 0, 0, s.scaleY, 0, 0};
-    MulMatrix(m, r);
+    float r[16];
+    Identity4(r);
+    r[0] = s.scaleX;
+    r[5] = s.scaleY;
+    MulMatrix4(m, r);
   }
   for (size_t i = 0; i < s.transformOps.size(); ++i) {
     const TransformOp& op = s.transformOps[i];
-    float r[6] = {1, 0, 0, 1, 0, 0};
+    float r[16];
+    Identity4(r);
     switch (op.kind) {
       case TransformOp::kTranslate:
-        r[4] = op.tx.Resolve(w);
-        r[5] = op.ty.Resolve(h);
+        r[12] = op.tx.Resolve(w);
+        r[13] = op.ty.Resolve(h);
+        r[14] = op.v[2];
         break;
       case TransformOp::kScale:
         r[0] = op.v[0];
-        r[3] = op.v[1];
+        r[5] = op.v[1];
+        r[10] = op.v[2] != 0 ? op.v[2] : 1;
         break;
       case TransformOp::kRotate:
-        r[0] = r[3] = std::cos(op.v[0]);
-        r[1] = std::sin(op.v[0]);
-        r[2] = -r[1];
+        Rotation4(0, 0, 1, op.v[0], r);
         break;
       case TransformOp::kRotateX:
-        r[3] = std::cos(op.v[0]);
+        Rotation4(1, 0, 0, op.v[0], r);
         break;
       case TransformOp::kRotateY:
-        r[0] = std::cos(op.v[0]);
+        Rotation4(0, 1, 0, op.v[0], r);
+        break;
+      case TransformOp::kRotate3d:
+        Rotation4(op.v[0], op.v[1], op.v[2], op.v[3], r);
         break;
       case TransformOp::kSkew:
-        r[2] = std::tan(op.v[0]);
+        r[4] = std::tan(op.v[0]);
         r[1] = std::tan(op.v[1]);
         break;
       case TransformOp::kMatrix:
-        for (int k = 0; k < 6; ++k) r[k] = op.v[k];
+        r[0] = op.v[0];
+        r[1] = op.v[1];
+        r[4] = op.v[2];
+        r[5] = op.v[3];
+        r[12] = op.v[4];
+        r[13] = op.v[5];
+        break;
+      case TransformOp::kMatrix3d:
+        for (int k = 0; k < 16; ++k) r[k] = op.v[k];
+        break;
+      case TransformOp::kPerspective:
+        if (op.v[0] > 0) r[11] = -1 / std::max(1.0f, op.v[0]);
         break;
     }
-    MulMatrix(m, r);
+    MulMatrix4(m, r);
   }
-  for (int i = 0; i < 6; ++i) out[i] = m[i];
+  for (int i = 0; i < 16; ++i) out[i] = m[i];
+}
+
+void TransformMatrix(const ComputedStyle& s, float w, float h, float out[6]) {
+  float m[16];
+  TransformMatrix4(s, w, h, m);
+  out[0] = m[0];
+  out[1] = m[1];
+  out[2] = m[4];
+  out[3] = m[5];
+  out[4] = m[12];
+  out[5] = m[13];
 }
 
 }  // namespace kite

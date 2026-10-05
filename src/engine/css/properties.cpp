@@ -360,9 +360,15 @@ void CopyPropertyImpl(int id, ComputedStyle& d, const ComputedStyle& s) {
       d.translateX = s.translateX; d.translateY = s.translateY; d.transformHidden = s.transformHidden;
       if (id == kPropTransform) d.transformOps = s.transformOps;
       break;
-    case kPropRotate: d.rotateRad = s.rotateRad; break;
+    case kPropRotate:
+      d.rotateRad = s.rotateRad;
+      for (int i = 0; i < 3; ++i) d.rotateAxis[i] = s.rotateAxis[i];
+      break;
+    case kPropPerspective: d.perspective = s.perspective; break;
+    case kPropTransformStyle: d.preserve3d = s.preserve3d; break;
+    case kPropPerspectiveOrigin: d.perspOriginX = s.perspOriginX; d.perspOriginY = s.perspOriginY; break;
     case kPropScale: d.scaleX = s.scaleX; d.scaleY = s.scaleY; d.transformHidden = s.transformHidden; break;
-    case kPropTransformOrigin: d.originX = s.originX; d.originY = s.originY; break;
+    case kPropTransformOrigin: d.originX = s.originX; d.originY = s.originY; d.originZ = s.originZ; break;
     case kPropBackfaceVisibility: d.backfaceHidden = s.backfaceHidden; break;
     case kPropAnimationName: d.hasAnimation = s.hasAnimation; d.animName = s.animName; break;
     case kPropAnimationDuration: d.animDuration = s.animDuration; break;
@@ -961,14 +967,26 @@ bool ParseTransformList(const std::string& v, const LengthContext& lc, std::vect
           if (!ParseLength(a[1], lc, l) || !l.IsFixed()) return false;
           op.ty = l;
         }
+        if (fn == "translate3d" && a.size() > 2) {
+          if (!ParseLength(a[2], lc, l) || !l.IsFixed()) return false;
+          op.v[2] = l.px;
+        }
       }
-    } else if (fn == "scale" || fn == "scale3d" || fn == "scalex" || fn == "scaley") {
+    } else if (fn == "translatez") {
+      op.kind = TransformOp::kTranslate;
+      op.tx = op.ty = Length::Px(0);
+      if (a.empty() || !ParseLength(a[0], lc, l) || !l.IsFixed()) return false;
+      op.v[2] = l.px;
+    } else if (fn == "scale" || fn == "scale3d" || fn == "scalex" || fn == "scaley" || fn == "scalez") {
       op.kind = TransformOp::kScale;
       if (a.empty() || !ParseScaleFactor(a[0], f)) return false;
       g = f;
       if ((fn == "scale" || fn == "scale3d") && a.size() > 1 && !ParseScaleFactor(a[1], g)) return false;
-      op.v[0] = fn == "scaley" ? 1 : f;
-      op.v[1] = fn == "scalex" ? 1 : g;
+      op.v[0] = fn == "scaley" || fn == "scalez" ? 1 : f;
+      op.v[1] = fn == "scalex" || fn == "scalez" ? 1 : g;
+      op.v[2] = 1;
+      if (fn == "scalez") op.v[2] = f;
+      if (fn == "scale3d" && a.size() > 2 && !ParseScaleFactor(a[2], op.v[2])) return false;
     } else if (fn == "rotate" || fn == "rotatez") {
       op.kind = TransformOp::kRotate;
       if (a.empty() || !ParseAngle(a[0], f)) return false;
@@ -985,37 +1003,25 @@ bool ParseTransformList(const std::string& v, const LengthContext& lc, std::vect
       for (int k = 0; k < 6; ++k)
         if (!ParseNumber(a[k], op.v[k])) return false;
     } else if (fn == "matrix3d" && a.size() == 16) {
-      op.kind = TransformOp::kMatrix;
-      const int idx[6] = {0, 1, 4, 5, 12, 13};
-      for (int k = 0; k < 6; ++k)
-        if (!ParseNumber(a[idx[k]], op.v[k])) return false;
+      op.kind = TransformOp::kMatrix3d;
+      for (int k = 0; k < 16; ++k)
+        if (!ParseNumber(a[k], op.v[k])) return false;
     } else if (fn == "rotatex" || fn == "rotatey") {
       op.kind = fn == "rotatex" ? TransformOp::kRotateX : TransformOp::kRotateY;
       if (a.empty() || !ParseAngle(a[0], f)) return false;
       op.v[0] = f;
     } else if (fn == "rotate3d" && a.size() == 4) {
-      // Rotation about an arbitrary axis, projected onto the screen plane.
-      float x, y, z, ang;
-      if (!ParseNumber(a[0], x) || !ParseNumber(a[1], y) || !ParseNumber(a[2], z) || !ParseAngle(a[3], ang))
-        return false;
-      float len = std::sqrt(x * x + y * y + z * z);
-      if (len <= 0) {
-        p = close + 1;
-        continue;
+      op.kind = TransformOp::kRotate3d;
+      for (int k = 0; k < 3; ++k)
+        if (!ParseNumber(a[k], op.v[k])) return false;
+      if (!ParseAngle(a[3], op.v[3])) return false;
+    } else if (fn == "perspective") {
+      op.kind = TransformOp::kPerspective;
+      if (a.empty()) return false;
+      if (a[0] != "none") {
+        if (!ParseLength(a[0], lc, l) || !l.IsFixed()) return false;
+        op.v[0] = l.px;
       }
-      x /= len;
-      y /= len;
-      z /= len;
-      float c = std::cos(ang), sn = std::sin(ang), t = 1 - c;
-      op.kind = TransformOp::kMatrix;
-      op.v[0] = t * x * x + c;      // m11
-      op.v[1] = t * x * y + sn * z;  // m12
-      op.v[2] = t * x * y - sn * z;  // m21
-      op.v[3] = t * y * y + c;      // m22
-    } else if (fn == "translatez" || fn == "perspective" || fn == "scalez") {
-      // 3D: ignored (flat projection).
-      p = close + 1;
-      continue;
     } else {
       return false;
     }
@@ -1586,8 +1592,20 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       std::vector<std::string> a = SplitValueTokens(v);
       if (a.empty() || v == "none") return;
       float ang;
-      // "rotate: z 45deg" / "rotate: 0 0 1 45deg": only rotation about z counts.
-      if (ParseAngle(a.back(), ang)) s.rotateRad = ang;
+      // "rotate: 45deg", "rotate: x 45deg" or "rotate: 1 1 0 45deg".
+      if (!ParseAngle(a.back(), ang)) return;
+      s.rotateRad = ang;
+      s.rotateAxis[0] = s.rotateAxis[1] = 0;
+      s.rotateAxis[2] = 1;
+      if (a.size() == 2 && a[0] == "x") {
+        s.rotateAxis[0] = 1;
+        s.rotateAxis[2] = 0;
+      } else if (a.size() == 2 && a[0] == "y") {
+        s.rotateAxis[1] = 1;
+        s.rotateAxis[2] = 0;
+      } else if (a.size() == 4) {
+        for (int k = 0; k < 3; ++k) ParseNumber(a[k], s.rotateAxis[k]);
+      }
       return;
     }
     case kPropScale: {
@@ -1603,9 +1621,43 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
     case kPropBackfaceVisibility:
       s.backfaceHidden = v == "hidden";
       return;
+    case kPropTransformStyle:
+      s.preserve3d = v == "preserve-3d";
+      return;
+    case kPropPerspective: {
+      s.perspective = 0;
+      Length l;
+      if (v != "none" && ParseLength(v, lc, l) && l.IsFixed()) s.perspective = std::max(0.0f, l.px);
+      return;
+    }
+    case kPropPerspectiveOrigin: {
+      std::vector<std::string> a = SplitValueTokens(v);
+      Length x = Length::Pct(50), y = Length::Pct(50);
+      for (size_t i = 0; i < a.size() && i < 2; ++i) {
+        const std::string& t = a[i];
+        Length l;
+        if (t == "left") x = Length::Pct(0);
+        else if (t == "right") x = Length::Pct(100);
+        else if (t == "top") y = Length::Pct(0);
+        else if (t == "bottom") y = Length::Pct(100);
+        else if (t == "center") continue;
+        else if (ParseLength(t, lc, l) && l.IsFixed()) {
+          if (i == 0) x = l;
+          else y = l;
+        }
+      }
+      s.perspOriginX = x;
+      s.perspOriginY = y;
+      return;
+    }
     case kPropTransformOrigin: {
       std::vector<std::string> a = SplitValueTokens(v);
       Length x = Length::Pct(50), y = Length::Pct(50);
+      s.originZ = 0;
+      if (a.size() > 2) {
+        Length z;
+        if (ParseLength(a[2], lc, z) && z.IsFixed()) s.originZ = z.px;
+      }
       for (size_t i = 0; i < a.size() && i < 2; ++i) {
         const std::string& t = a[i];
         Length l;
@@ -1633,7 +1685,7 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       if (!ParseTransformList(v, lc, ops)) return;
       bool onlyTranslate = true;
       for (size_t i = 0; i < ops.size(); ++i) {
-        if (ops[i].kind != TransformOp::kTranslate) onlyTranslate = false;
+        if (ops[i].kind != TransformOp::kTranslate || ops[i].v[2] != 0) onlyTranslate = false;
         if (ops[i].kind == TransformOp::kScale && (ops[i].v[0] == 0 || ops[i].v[1] == 0)) s.transformHidden = true;
       }
       if (onlyTranslate) {

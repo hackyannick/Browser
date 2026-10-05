@@ -34,7 +34,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 | HTML | HTML5-Tokenizer und Tree-Builder mit Fehlerkorrektur, Zeichenreferenzen, Zeichensatz-Erkennung (UTF-8, Windows-1252, ISO-8859-1/-15, UTF-16) |
 | CSS | Kaskade mit Spezifität und `!important`, Selektoren bis Level 4 (`:is()`, `:where()`, `:not()`, `:nth-child()`, Attributselektoren …), `@media` (inkl. Bereichs-Syntax), `@supports`, `@import`, `@layer`, CSS-Verschachtelung, Custom Properties (`var()`), `calc()`/`min()`/`max()`/`clamp()`, `::before`/`::after` |
 | Layout | Block- und Inline-Formatierung mit Zeilenumbruch, Margin-Collapsing, Floats und `clear`, Tabellen (colspan/rowspan, automatische Spaltenbreiten), **Flexbox**, **Grid** (Spalten, `repeat()`, `fr`, `minmax()`, `auto-fill`), relative und absolute Positionierung (`fixed` vereinfacht), `overflow`-Clipping, Listen |
-| Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, **2D-Transformationen** (`translate`, `rotate`, `scale`, `skew`, `matrix`, `transform-origin`, Einzeleigenschaften `rotate:`/`scale:`), PNG/JPEG/GIF/BMP/**WebP**/**AVIF** (auch `<picture>`; **animierte GIF, WebP und AVIF** werden abgespielt), **SVG** (Inline und als Bild, mit Kantenglättung, Verläufen, Masken und Clip-Pfaden) |
+| Grafik | Hintergründe und Hintergrundbilder, Rahmen (inkl. klassischem 3D-Look), abgerundete Ecken, `box-shadow`, Transparenz, **2D- und 3D-Transformationen** (`translate`, `rotate`, `scale`, `skew`, `matrix`, `rotateX/Y`, `rotate3d`, `translateZ`, `matrix3d`, **`perspective`** und `perspective-origin`, `transform-style: preserve-3d` mit Tiefensortierung, `backface-visibility`, `transform-origin`, Einzeleigenschaften `rotate:`/`scale:`), PNG/JPEG/GIF/BMP/**WebP**/**AVIF** (auch `<picture>`; **animierte GIF, WebP und AVIF** werden abgespielt), **SVG** (Inline und als Bild, mit Kantenglättung, Verläufen, Masken und Clip-Pfaden) |
 | Animation | **CSS-Animationen** (`@keyframes`, alle `animation-*`-Eigenschaften, Timing-Funktionen inkl. `cubic-bezier()`/`steps()`) und **Transitions** für Deckkraft, Farben, Transformationen (auch Drehung und Skalierung), Schatten, Größen und Abstände; `animationend`/`transitionend`-Events |
 | Canvas | **`<canvas>` 2D** per Software-Rasterizer: Pfade, Bögen, Füllregeln, Linienstile und Strichelung, Transformationen, Clipping, lineare/radiale/konische Verläufe, Muster, Compositing-Modi, Schatten, Text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, `Path2D` |
 | Schriften | **Webfonts** (`@font-face`, TTF/OTF/WOFF/WOFF2) werden geladen und prozesslokal installiert |
@@ -52,8 +52,8 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
   nur ein Platzhalter, `localStorage` lebt nur bis zum Schließen des Tabs.
   Große Single-Page-Anwendungen (React, Angular …) laufen daher oft nur
   teilweise.
-- 3D-Transformationen werden orthografisch projiziert (`rotateX/Y`, `rotate3d`, `backface-visibility` funktionieren, `perspective` fehlt);
-  HDR-Tonemapping fehlt.
+- 3D-Szenen werden ebenenweise nach Tiefe sortiert, sich durchdringende Flächen
+  werden nicht geschnitten; HDR-Tonemapping für AVIF fehlt.
 - TLS 1.3 wird nicht unterstützt (BearSSL kann nur bis TLS 1.2; alle gängigen
   Server bieten TLS 1.2 weiterhin an). HTTP/2 lässt sich mit `Http2=0` in der
   `kite.ini` abschalten.

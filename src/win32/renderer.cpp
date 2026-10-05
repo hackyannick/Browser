@@ -456,6 +456,33 @@ void Renderer::PaintRange(PaintCtx& pc, size_t begin, size_t end) {
   if (gdiDirty) GdiFlush();
 }
 
+namespace {
+
+void Mul3(const float a[9], const float b[9], float out[9]) {
+  for (int r = 0; r < 3; ++r)
+    for (int c = 0; c < 3; ++c) out[r * 3 + c] = a[r * 3] * b[c] + a[r * 3 + 1] * b[3 + c] + a[r * 3 + 2] * b[6 + c];
+}
+
+bool Invert3(const float m[9], float out[9]) {
+  double a = m[0], b = m[1], c = m[2], d = m[3], e = m[4], f = m[5], g = m[6], h = m[7], i = m[8];
+  double A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g;
+  double det = a * A + b * B + c * C;
+  if (std::fabs(det) < 1e-12) return false;
+  double n = 1 / det;
+  out[0] = (float)(A * n);
+  out[1] = (float)(-(b * i - c * h) * n);
+  out[2] = (float)((b * f - c * e) * n);
+  out[3] = (float)(B * n);
+  out[4] = (float)((a * i - c * g) * n);
+  out[5] = (float)(-(a * f - c * d) * n);
+  out[6] = (float)(C * n);
+  out[7] = (float)(-(a * h - b * g) * n);
+  out[8] = (float)((a * e - b * d) * n);
+  return true;
+}
+
+}  // namespace
+
 void Renderer::DrawTransformed(PaintCtx& pc, size_t begin, size_t end, float ox, float oy) {
   const DisplayItem& ti = pc.dl->items[begin];
   float zoom = pc.zoom;
@@ -471,21 +498,37 @@ void Renderer::DrawTransformed(PaintCtx& pc, size_t begin, size_t end, float ox,
   ly1 = std::min(ly1, 3.0f * bh_);
   int lw = (int)(lx1 - lx0), lh = (int)(ly1 - ly0);
   if (lw <= 0 || lh <= 0 || (long long)lw * lh > 4096LL * 4096) return;
-  gfx::Matrix z(zoom, 0, 0, zoom, -ox, -oy);  // doc -> parent device
-  gfx::Matrix zl(1 / zoom, 0, 0, 1 / zoom, (ox + lx0) / zoom, (oy + ly0) / zoom);  // layer -> doc
-  gfx::Matrix A = z * gfx::Matrix(m[0], m[1], m[2], m[3], m[4], m[5]) * zl;
-  gfx::Matrix inv;
-  if (!A.Invert(inv)) return;
-  // Destination bounds in the parent.
+  // Homographies as 3x3 row-major matrices: doc -> parent device (Z),
+  // layer -> doc (L) and the element's transform (M).
+  const float Z[9] = {zoom, 0, -ox, 0, zoom, -oy, 0, 0, 1};
+  const float L[9] = {1 / zoom, 0, (ox + lx0) / zoom, 0, 1 / zoom, (oy + ly0) / zoom, 0, 0, 1};
+  const float M[9] = {m[0], m[2], m[4], m[1], m[3], m[5], ti.persp[0], ti.persp[1], ti.persp[2]};
+  float ZM[9], A[9], inv[9];
+  Mul3(Z, M, ZM);
+  Mul3(ZM, L, A);
+  if (!Invert3(A, inv)) return;
+  // Destination bounds in the parent (the whole clip if part of the layer
+  // lies behind the viewer).
   float xs[4] = {0, (float)lw, (float)lw, 0}, ys[4] = {0, 0, (float)lh, (float)lh};
   float dx0 = 1e30f, dy0 = 1e30f, dx1 = -1e30f, dy1 = -1e30f;
+  bool behind = false;
   for (int k = 0; k < 4; ++k) {
-    float px, py;
-    A.Apply(xs[k], ys[k], px, py);
+    float w = A[6] * xs[k] + A[7] * ys[k] + A[8];
+    if (w <= 1e-6f) {
+      behind = true;
+      break;
+    }
+    float px = (A[0] * xs[k] + A[1] * ys[k] + A[2]) / w, py = (A[3] * xs[k] + A[4] * ys[k] + A[5]) / w;
     dx0 = std::min(dx0, px);
     dy0 = std::min(dy0, py);
     dx1 = std::max(dx1, px);
     dy1 = std::max(dy1, py);
+  }
+  if (behind) {
+    dx0 = (float)clip_.left;
+    dy0 = (float)clip_.top;
+    dx1 = (float)clip_.right;
+    dy1 = (float)clip_.bottom;
   }
   int ix0 = std::max((int)clip_.left, (int)std::floor(dx0)), iy0 = std::max((int)clip_.top, (int)std::floor(dy0));
   int ix1 = std::min((int)clip_.right, (int)std::ceil(dx1)), iy1 = std::min((int)clip_.bottom, (int)std::ceil(dy1));
@@ -565,8 +608,11 @@ void Renderer::DrawTransformed(PaintCtx& pc, size_t begin, size_t end, float ox,
   for (int y = iy0; y < iy1; ++y) {
     uint32_t* dst = bits_ + (size_t)y * bw_;
     for (int x = ix0; x < ix1; ++x) {
-      float u, v;
-      inv.Apply(x + 0.5f, y + 0.5f, u, v);
+      float X = x + 0.5f, Y = y + 0.5f;
+      float q = inv[6] * X + inv[7] * Y + inv[8];
+      if (std::fabs(q) < 1e-9f) continue;
+      float u = (inv[0] * X + inv[1] * Y + inv[2]) / q, v = (inv[3] * X + inv[4] * Y + inv[5]) / q;
+      if (A[6] * u + A[7] * v + A[8] <= 0) continue;  // point behind the viewer
       u -= 0.5f;
       v -= 0.5f;
       if (u < -1 || v < -1 || u > lw || v > lh) continue;

@@ -671,6 +671,92 @@ void Painter::PaintPositioned(LayoutBox* b, float ax, float ay, float alpha, boo
   }
 }
 
+namespace {
+
+void Translation4(float x, float y, float z, float m[16]) {
+  for (int i = 0; i < 16; ++i) m[i] = (i % 5 == 0) ? 1.0f : 0.0f;
+  m[12] = x;
+  m[13] = y;
+  m[14] = z;
+}
+
+}  // namespace
+
+// Ends the layer opened at |transformItem|: records the bounds of its
+// untransformed content and maps the hit regions added since |hitStart|.
+void Painter::CloseTransform(int transformItem, size_t hitStart, float ax, float ay, float w, float h) {
+  float tm[6], tp[3];
+  for (int k = 0; k < 6; ++k) tm[k] = out_->items[transformItem].matrix[k];
+  for (int k = 0; k < 3; ++k) tp[k] = out_->items[transformItem].persp[k];
+  if ((size_t)transformItem + 1 == out_->items.size()) {
+    out_->items.pop_back();  // nothing drawn: drop the layer, keep mapping the hits
+  } else {
+    Rect bounds(ax, ay, w, h);
+    for (size_t i = transformItem + 1; i < out_->items.size(); ++i) {
+      const DisplayItem& it = out_->items[i];
+      if (it.type == DisplayItem::kPushClip || it.type == DisplayItem::kPopClip ||
+          it.type == DisplayItem::kBeginFixed || it.type == DisplayItem::kEndFixed ||
+          it.type == DisplayItem::kEndTransform)
+        continue;
+      Rect r = it.rect;
+      if (it.type == DisplayItem::kText)
+        r = Rect(it.rect.x, it.baseline - it.font.size * 1.2f, it.rect.w, it.font.size * 1.7f);
+      if (it.type == DisplayItem::kShadow) r = Rect(r.x - it.blur, r.y - it.blur, r.w + 2 * it.blur, r.h + 2 * it.blur);
+      if (r.w <= 0 || r.h <= 0) continue;
+      float x0 = std::min(bounds.x, r.x), y0 = std::min(bounds.y, r.y);
+      float x1 = std::max(bounds.right(), r.right()), y1 = std::max(bounds.bottom(), r.bottom());
+      bounds = Rect(x0, y0, x1 - x0, y1 - y0);
+    }
+    DisplayItem te;
+    te.type = DisplayItem::kEndTransform;
+    out_->items[transformItem].rect = bounds;
+    out_->items[transformItem].matchIndex = (int)out_->items.size();
+    out_->items.push_back(te);
+  }
+  // Hit regions follow the transformed content (bounding boxes).
+  for (size_t i = hitStart; i < out_->hits.size(); ++i) {
+    Rect& r = out_->hits[i].rect;
+    float xs[4] = {r.x, r.right(), r.right(), r.x}, ys[4] = {r.y, r.y, r.bottom(), r.bottom()};
+    float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
+    for (int k = 0; k < 4; ++k) {
+      float wv = tp[0] * xs[k] + tp[1] * ys[k] + tp[2];
+      if (wv <= 1e-4f) wv = 1e-4f;  // behind the viewer
+      float px = (tm[0] * xs[k] + tm[2] * ys[k] + tm[4]) / wv, py = (tm[1] * xs[k] + tm[3] * ys[k] + tm[5]) / wv;
+      x0 = std::min(x0, px);
+      y0 = std::min(y0, py);
+      x1 = std::max(x1, px);
+      y1 = std::max(y1, py);
+    }
+    r = Rect(x0, y0, x1 - x0, y1 - y0);
+  }
+}
+
+// Children of a 'transform-style: preserve-3d' element share its 3D space:
+// they were painted as separate layers; draw the farthest first.
+void Painter::SortContext3d(Context3d& ctx) {
+  std::vector<Context3d::Range>& rs = ctx.ranges;
+  if (rs.size() < 2) return;
+  for (size_t i = 0; i + 1 < rs.size(); ++i)
+    if (rs[i].itemEnd != rs[i + 1].itemStart || rs[i].hitEnd != rs[i + 1].hitStart) return;  // not contiguous
+  std::vector<Context3d::Range> sorted = rs;
+  std::stable_sort(sorted.begin(), sorted.end(),
+                   [](const Context3d::Range& a, const Context3d::Range& c) { return a.z < c.z; });
+  size_t itemBase = rs.front().itemStart, hitBase = rs.front().hitStart;
+  std::vector<DisplayItem> items;
+  std::vector<HitRegion> hits;
+  for (size_t i = 0; i < sorted.size(); ++i) {
+    const Context3d::Range& r = sorted[i];
+    int delta = (int)(itemBase + items.size()) - (int)r.itemStart;
+    for (size_t k = r.itemStart; k < r.itemEnd; ++k) {
+      items.push_back(out_->items[k]);
+      if (items.back().type == DisplayItem::kBeginTransform) items.back().matchIndex += delta;
+    }
+    hits.insert(hits.end(), out_->hits.begin() + r.hitStart, out_->hits.begin() + r.hitEnd);
+  }
+  std::copy(items.begin(), items.end(), out_->items.begin() + itemBase);
+  std::copy(hits.begin(), hits.end(), out_->hits.begin() + hitBase);
+}
+
 void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   const ComputedStyle* s = b->style;
   if (s->transformHidden) return;
@@ -682,6 +768,11 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   float ax = px + b->x + b->relX, ay = py + b->y + b->relY;
   ax += s->translateX.px + s->translateX.pct * b->w / 100;
   ay += s->translateY.px + s->translateY.pct * b->h / 100;
+  const LayoutBox* parent = b->parent;
+  while (parent && !parent->node && parent->parent) parent = parent->parent;
+  // Inside a preserve-3d parent: this box is one plane of its 3D scene.
+  Context3d* ctx = !context3d_.empty() && context3d_.back().owner == parent ? &context3d_.back() : 0;
+  size_t rangeItem = out_->items.size(), rangeHit = out_->hits.size();
   bool fixed = s->position == kPosFixed && b->isPositionedChild;
   if (fixed) {
     DisplayItem fi;
@@ -689,18 +780,91 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     out_->items.push_back(fi);
     ++fixedDepth_;
   }
-  // rotate / scale / skew: the subtree is drawn into a layer that the
-  // platform maps with this matrix.
+  // Transformed boxes are drawn into a layer that the platform maps with
+  // a 2D homography (the z = 0 plane of the box under its 3D matrix).
   int transformItem = -1;
   size_t hitStart = out_->hits.size();
-  float tm[6];
   float savedFacing = facing_;
-  if (s->HasLinearTransform()) {
-    float lin0[6];
-    TransformMatrix(*s, b->w, b->h, lin0);
-    facing_ *= lin0[0] * lin0[3] - lin0[1] * lin0[2] < 0 ? -1.0f : 1.0f;
+  if (s->perspective > 0) perspectiveBoxes_[b] = std::make_pair(ax, ay);
+  bool preserve3d = s->preserve3d && b->kind != LayoutBox::kReplaced;
+  bool transformed = s->HasLinearTransform() || ctx != 0;
+  float full[16];
+  Translation4(0, 0, 0, full);
+  float depth = 0;
+  if (transformed || preserve3d) {
+    // 4x4 matrix around the transform origin ...
+    float m4[16];
+    TransformMatrix4(*s, b->w, b->h, m4);
+    float ox = ax + s->originX.Resolve(b->w), oy = ay + s->originY.Resolve(b->h), oz = s->originZ;
+    float local[16], back[16];
+    Translation4(ox, oy, oz, local);
+    Translation4(-ox, -oy, -oz, back);
+    MulMatrix4(local, m4);
+    MulMatrix4(local, back);
+    // ... preceded by the 3D context and the parent's perspective.
+    if (ctx) {
+      for (int k = 0; k < 16; ++k) full[k] = ctx->m[k];
+    }
+    if (parent && parent->style && parent->style->perspective > 0) {
+      std::map<const LayoutBox*, std::pair<float, float> >::const_iterator pp = perspectiveBoxes_.find(parent);
+      if (pp != perspectiveBoxes_.end()) {
+        float px0 = pp->second.first + parent->style->perspOriginX.Resolve(parent->w);
+        float py0 = pp->second.second + parent->style->perspOriginY.Resolve(parent->h);
+        float persp[16], pb[16], pm[16];
+        Translation4(0, 0, 0, persp);
+        persp[11] = -1 / parent->style->perspective;
+        Translation4(px0, py0, 0, pm);
+        Translation4(-px0, -py0, 0, pb);
+        MulMatrix4(pm, persp);
+        MulMatrix4(pm, pb);
+        MulMatrix4(full, pm);
+      }
+    }
+    MulMatrix4(full, local);
+    float cx = ax + b->w / 2, cy = ay + b->h / 2;
+    depth = full[2] * cx + full[6] * cy + full[14];
   }
-  if (s->backfaceHidden && facing_ < 0) {
+  if (transformed) {
+    // The z = 0 plane of the element maps to the screen as a homography.
+    float tm[6] = {full[0], full[1], full[4], full[5], full[12], full[13]};
+    float tp[3] = {full[3], full[7], full[15]};
+    if (std::fabs(tp[2]) > 1e-6f) {
+      float n = 1 / tp[2];
+      for (int k = 0; k < 6; ++k) tm[k] *= n;
+      tp[0] *= n;
+      tp[1] *= n;
+      tp[2] = 1;
+    }
+    float det = tm[0] * (tm[3] * tp[2] - tm[5] * tp[1]) - tm[2] * (tm[1] * tp[2] - tm[5] * tp[0]) +
+                tm[4] * (tm[1] * tp[1] - tm[3] * tp[0]);
+    if (std::fabs(det) < 1e-9f) {
+      if (fixed) {
+        DisplayItem fe;
+        fe.type = DisplayItem::kEndFixed;
+        out_->items.push_back(fe);
+        --fixedDepth_;
+      }
+      return;  // degenerate (e.g. scale(0) or seen edge-on): nothing visible
+    }
+    // In a 3D context the matrix already contains the ancestors' transforms.
+    facing_ = (ctx ? ctx->facing : facing_) * (det < 0 ? -1.0f : 1.0f);
+    if (s->backfaceHidden && facing_ < 0) {
+      facing_ = savedFacing;
+      if (fixed) {
+        DisplayItem fe;
+        fe.type = DisplayItem::kEndFixed;
+        out_->items.push_back(fe);
+        --fixedDepth_;
+      }
+      return;  // turned away from the viewer
+    }
+    DisplayItem ti;
+    ti.type = DisplayItem::kBeginTransform;
+    for (int k = 0; k < 6; ++k) ti.matrix[k] = tm[k];
+    for (int k = 0; k < 3; ++k) ti.persp[k] = tp[k];
+    transformItem = (int)out_->items.size();
+    out_->items.push_back(ti);
+  } else if (s->backfaceHidden && facing_ < 0) {
     facing_ = savedFacing;
     if (fixed) {
       DisplayItem fe;
@@ -708,35 +872,7 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
       out_->items.push_back(fe);
       --fixedDepth_;
     }
-    return;  // turned away from the viewer
-  }
-  if (s->HasLinearTransform()) {
-    float lin[6];
-    TransformMatrix(*s, b->w, b->h, lin);
-    float ox = ax + s->originX.Resolve(b->w), oy = ay + s->originY.Resolve(b->h);
-    // T(origin) * lin * T(-origin)
-    tm[0] = lin[0];
-    tm[1] = lin[1];
-    tm[2] = lin[2];
-    tm[3] = lin[3];
-    tm[4] = lin[4] + ox - (lin[0] * ox + lin[2] * oy);
-    tm[5] = lin[5] + oy - (lin[1] * ox + lin[3] * oy);
-    float det = tm[0] * tm[3] - tm[1] * tm[2];
-    if (std::fabs(det) < 1e-6f) {
-      if (fixed) {
-        DisplayItem fe;
-        fe.type = DisplayItem::kEndFixed;
-        out_->items.push_back(fe);
-        --fixedDepth_;
-      }
-      facing_ = savedFacing;
-      return;  // degenerate (e.g. scale(0)): nothing visible
-    }
-    DisplayItem ti;
-    ti.type = DisplayItem::kBeginTransform;
-    for (int k = 0; k < 6; ++k) ti.matrix[k] = tm[k];
-    transformItem = (int)out_->items.size();
-    out_->items.push_back(ti);
+    return;
   }
   Rect r(ax, ay, b->w, b->h);
   if (s->visible && b->kind != LayoutBox::kTableRowGroup && b->kind != LayoutBox::kTableRow) {
@@ -749,8 +885,27 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   }
   Extend(r);
   if (s->display == kDisplayListItem && b->kind != LayoutBox::kReplaced) PaintMarker(b, ax, ay, alpha);
+  bool linesDone = false;
+  if (preserve3d) {
+    // Own plane (with its inline content) done; the other children become
+    // planes of this 3D scene.
+    if (b->inlineContent) {
+      PaintLines(b, ax, ay, alpha);
+      PaintFloatsInInline(b, b, ax, ay, alpha);
+      linesDone = true;
+    }
+    if (transformItem >= 0) {
+      CloseTransform(transformItem, hitStart, ax, ay, b->w, b->h);
+      transformItem = -1;
+    }
+    Context3d c;
+    c.owner = b;
+    for (int k = 0; k < 16; ++k) c.m[k] = full[k];
+    c.facing = ctx ? ctx->facing : savedFacing;
+    context3d_.push_back(c);
+  }
 
-  bool clip = s->ClipsOverflow() && b->kind != LayoutBox::kReplaced && b != b->coordParent;
+  bool clip = s->ClipsOverflow() && b->kind != LayoutBox::kReplaced && b != b->coordParent && !preserve3d;
   if (clip && b->parent) {
     DisplayItem it;
     it.type = DisplayItem::kPushClip;
@@ -763,8 +918,10 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   if (b->kind == LayoutBox::kReplaced) {
     if (s->visible) PaintReplaced(b, ax, ay, alpha);
   } else if (b->inlineContent) {
-    PaintLines(b, ax, ay, alpha);
-    PaintFloatsInInline(b, b, ax, ay, alpha);
+    if (!linesDone) {
+      PaintLines(b, ax, ay, alpha);
+      PaintFloatsInInline(b, b, ax, ay, alpha);
+    }
   } else {
     for (size_t i = 0; i < b->children.size(); ++i) {
       LayoutBox* c = b->children[i].get();
@@ -782,49 +939,27 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     out_->items.push_back(it);
     clipStack_.pop_back();
   }
-  facing_ = savedFacing;
-  if (transformItem >= 0) {
-    // Bounds of the untransformed content.
-    Rect bounds(ax, ay, b->w, b->h);
-    for (size_t i = transformItem + 1; i < out_->items.size(); ++i) {
-      const DisplayItem& it = out_->items[i];
-      if (it.type == DisplayItem::kPushClip || it.type == DisplayItem::kPopClip ||
-          it.type == DisplayItem::kBeginFixed || it.type == DisplayItem::kEndFixed ||
-          it.type == DisplayItem::kEndTransform)
-        continue;
-      Rect r = it.rect;
-      if (it.type == DisplayItem::kText) r = Rect(it.rect.x, it.baseline - it.font.size * 1.2f, it.rect.w, it.font.size * 1.7f);
-      if (it.type == DisplayItem::kShadow) r = Rect(r.x - it.blur, r.y - it.blur, r.w + 2 * it.blur, r.h + 2 * it.blur);
-      if (r.w <= 0 || r.h <= 0) continue;
-      float x0 = std::min(bounds.x, r.x), y0 = std::min(bounds.y, r.y);
-      float x1 = std::max(bounds.right(), r.right()), y1 = std::max(bounds.bottom(), r.bottom());
-      bounds = Rect(x0, y0, x1 - x0, y1 - y0);
-    }
-    DisplayItem te;
-    te.type = DisplayItem::kEndTransform;
-    out_->items[transformItem].rect = bounds;
-    out_->items[transformItem].matchIndex = (int)out_->items.size();
-    out_->items.push_back(te);
-    // Hit regions follow the transformed content (bounding boxes).
-    for (size_t i = hitStart; i < out_->hits.size(); ++i) {
-      Rect& r = out_->hits[i].rect;
-      float xs[4] = {r.x, r.right(), r.right(), r.x}, ys[4] = {r.y, r.y, r.bottom(), r.bottom()};
-      float x0 = 1e30f, y0 = 1e30f, x1 = -1e30f, y1 = -1e30f;
-      for (int k = 0; k < 4; ++k) {
-        float px = tm[0] * xs[k] + tm[2] * ys[k] + tm[4], py = tm[1] * xs[k] + tm[3] * ys[k] + tm[5];
-        x0 = std::min(x0, px);
-        y0 = std::min(y0, py);
-        x1 = std::max(x1, px);
-        y1 = std::max(y1, py);
-      }
-      r = Rect(x0, y0, x1 - x0, y1 - y0);
-    }
+  if (preserve3d) {
+    SortContext3d(context3d_.back());
+    context3d_.pop_back();
+    ctx = !context3d_.empty() && context3d_.back().owner == parent ? &context3d_.back() : 0;
   }
+  facing_ = savedFacing;
+  if (transformItem >= 0) CloseTransform(transformItem, hitStart, ax, ay, b->w, b->h);
   if (fixed) {
     DisplayItem fi;
     fi.type = DisplayItem::kEndFixed;
     out_->items.push_back(fi);
     --fixedDepth_;
+  }
+  if (ctx) {
+    Context3d::Range range;
+    range.itemStart = rangeItem;
+    range.itemEnd = out_->items.size();
+    range.hitStart = rangeHit;
+    range.hitEnd = out_->hits.size();
+    range.z = depth;
+    ctx->ranges.push_back(range);
   }
 }
 

@@ -114,6 +114,9 @@ namespace kite {
   X(Scale, "scale", false)                                 \
   X(TransformOrigin, "transform-origin", false)            \
   X(BackfaceVisibility, "backface-visibility", false)      \
+  X(Perspective, "perspective", false)                     \
+  X(TransformStyle, "transform-style", false)              \
+  X(PerspectiveOrigin, "perspective-origin", false)        \
   X(AnimationName, "animation-name", false)               \
   X(AnimationDuration, "animation-duration", false)       \
   X(AnimationDelay, "animation-delay", false)             \

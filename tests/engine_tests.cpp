@@ -901,6 +901,56 @@ void TestAnimatedImages() {
   CHECK_EQ(wait, -1);
 }
 
+void TestPerspective() {
+  TestPage p(
+      "<style>div{width:100px;height:100px}#c{perspective:200px}"
+      "#z{transform:translateZ(100px)}#f{transform:perspective(100px) translateZ(50px)}"
+      "#y{transform:rotateY(180deg);backface-visibility:hidden}</style>"
+      "<div id=c><div id=z>z</div></div><div id=f>f</div><div id=y>y</div>");
+  float m[16];
+  TransformMatrix4(*p.ById("f")->style, 100, 100, m);
+  // A point at z = 0 ends up at w = 1 - 50/100: twice as large.
+  CHECK_NEAR(m[15], 0.5f, 1e-4f);
+  CHECK_NEAR(m[11], -0.01f, 1e-6f);
+  CHECK_EQ(p.ById("c")->style->perspective, 200.0f);
+  // The child of #c is drawn with a perspective row; #y is culled.
+  const DisplayList& dl = p.page.display();
+  int persp = 0;
+  float scale = 0;
+  for (size_t i = 0; i < dl.items.size(); ++i)
+    if (dl.items[i].type == DisplayItem::kBeginTransform && dl.items[i].persp[2] == 1) {
+      ++persp;
+      if (scale == 0) scale = dl.items[i].matrix[0];
+    }
+  CHECK_EQ(persp, 2);
+  CHECK_NEAR(scale, 2.0f, 1e-4f);  // translateZ(100px) under perspective 200px
+  bool sawY = false;
+  for (size_t i = 0; i < dl.items.size(); ++i)
+    if (dl.items[i].type == DisplayItem::kText && dl.items[i].text == "y") sawY = true;
+  CHECK(!sawY);
+
+  // preserve-3d: the faces are separate planes, drawn back to front.
+  TestPage c(
+      "<style>.c{width:100px;height:100px;position:relative;transform-style:preserve-3d}"
+      ".f{position:absolute;width:100px;height:100px}</style><div style='perspective:300px'>"
+      "<div class=c><div class=f style='transform:translateZ(50px)'>near</div>"
+      "<div class=f style='transform:rotateY(180deg) translateZ(50px)'>far</div></div></div>");
+  std::vector<std::string> order;
+  int nesting = 0, maxNesting = 0;
+  const DisplayList& cl = c.page.display();
+  for (size_t i = 0; i < cl.items.size(); ++i) {
+    if (cl.items[i].type == DisplayItem::kBeginTransform) maxNesting = std::max(maxNesting, ++nesting);
+    if (cl.items[i].type == DisplayItem::kEndTransform) --nesting;
+    if (cl.items[i].type == DisplayItem::kText) order.push_back(cl.items[i].text);
+  }
+  CHECK_EQ(maxNesting, 1);
+  CHECK_EQ(order.size(), 2u);
+  if (order.size() == 2) {
+    CHECK_EQ(order[0], "far");
+    CHECK_EQ(order[1], "near");
+  }
+}
+
 void TestHpack() {
   // RFC 7541 C.4: requests with Huffman coding and a shared dynamic table.
   HpackDecoder d;
@@ -981,6 +1031,7 @@ int main() {
   TestTransforms();
   TestHpack();
   TestAnimatedImages();
+  TestPerspective();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

@@ -157,7 +157,7 @@ bool IsLayoutProperty(int id) {
     case kPropOpacity: case kPropColor: case kPropBackgroundColor: case kPropBorderTopColor:
     case kPropBorderRightColor: case kPropBorderBottomColor: case kPropBorderLeftColor:
     case kPropTransform: case kPropTranslate: case kPropBoxShadow: case kPropFilter:
-    case kPropRotate: case kPropScale: case kPropTransformOrigin:
+    case kPropRotate: case kPropScale: case kPropTransformOrigin: case kPropPerspective:
     case kPropBorderTopLeftRadius: case kPropBorderTopRightRadius: case kPropBorderBottomRightRadius:
     case kPropBorderBottomLeftRadius: case kPropBackgroundPositionX: case kPropBackgroundPositionY:
     case kPropVisibility: case kPropTextDecorationColor: case kPropFill: case kPropStroke:
@@ -217,6 +217,7 @@ float* FloatField(int id, ComputedStyle& s) {
     case kPropFlexShrink: return &s.flexShrink;
     case kPropFilter: return &s.blur;
     case kPropRotate: return &s.rotateRad;
+    case kPropPerspective: return &s.perspective;
     case kPropBorderTopWidth: case kPropBorderRightWidth: case kPropBorderBottomWidth:
     case kPropBorderLeftWidth:
       return &s.border[id - kPropBorderTopWidth].width;
@@ -279,7 +280,7 @@ const int kTransitionable[] = {
     kPropLeft, kPropBorderTopLeftRadius, kPropBorderTopRightRadius, kPropBorderBottomRightRadius,
     kPropBorderBottomLeftRadius, kPropFontSize, kPropLetterSpacing, kPropVisibility,
     kPropBorderTopWidth, kPropBorderRightWidth, kPropBorderBottomWidth, kPropBorderLeftWidth,
-    kPropBackgroundPositionX, kPropBackgroundPositionY, kPropRotate, kPropScale, kPropTransformOrigin};
+    kPropBackgroundPositionX, kPropBackgroundPositionY, kPropRotate, kPropScale, kPropTransformOrigin, kPropPerspective};
 
 const float kPiF = 3.14159265358979f;
 
@@ -357,8 +358,12 @@ TransformOp IdentityLike(const TransformOp& o) {
   TransformOp id;
   id.kind = o.kind;
   id.tx = id.ty = Length::Px(0);
-  if (o.kind == TransformOp::kScale) id.v[0] = id.v[1] = 1;
+  if (o.kind == TransformOp::kScale) id.v[0] = id.v[1] = id.v[2] = 1;
   if (o.kind == TransformOp::kMatrix) id.v[0] = id.v[3] = 1;
+  if (o.kind == TransformOp::kMatrix3d) id.v[0] = id.v[5] = id.v[10] = id.v[15] = 1;
+  if (o.kind == TransformOp::kRotate3d)
+    for (int k = 0; k < 3; ++k) id.v[k] = o.v[k];  // same axis, no rotation
+  if (o.kind == TransformOp::kPerspective) id.v[0] = o.v[0];
   return id;
 }
 
@@ -396,7 +401,7 @@ void MixTransform(const ComputedStyle& a, const ComputedStyle& b, float t, Compu
         if (MixLength(oa[i].tx, ob[i].tx, t, l)) r.tx = l;
         if (MixLength(oa[i].ty, ob[i].ty, t, l)) r.ty = l;
       } else {
-        for (int k = 0; k < 6; ++k) r.v[k] = Mix(oa[i].v[k], ob[i].v[k], t);
+        for (int k = 0; k < 16; ++k) r.v[k] = Mix(oa[i].v[k], ob[i].v[k], t);
       }
       res.push_back(r);
     }
@@ -405,7 +410,7 @@ void MixTransform(const ComputedStyle& a, const ComputedStyle& b, float t, Compu
   out.translateX = out.translateY = Length::Px(0);
   bool onlyTranslate = true;
   for (size_t i = 0; i < res.size(); ++i)
-    if (res[i].kind != TransformOp::kTranslate) onlyTranslate = false;
+    if (res[i].kind != TransformOp::kTranslate || res[i].v[2] != 0) onlyTranslate = false;
   if (onlyTranslate) {
     for (size_t i = 0; i < res.size(); ++i) {
       out.translateX.px += res[i].tx.px;

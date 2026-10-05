@@ -3,6 +3,7 @@
 #ifndef KITE_PAINT_DISPLAY_LIST_H
 #define KITE_PAINT_DISPLAY_LIST_H
 
+#include <map>
 #include <string>
 #include <vector>
 
@@ -42,6 +43,9 @@ struct DisplayItem {
   // the items up to the matching kEndTransform (index in |matchIndex|);
   // |rect| bounds the untransformed items.
   float matrix[6];
+  // Perspective row: device position = (a x + c y + e, b x + d y + f) / (g x + h y + i)
+  // with persp = {g, h, i} ({0, 0, 1} for affine transforms).
+  float persp[3];
   int matchIndex;
   // kRoundRect ring: only the part belonging to this border side (0 top,
   // 1 right, 2 bottom, 3 left; split along the diagonals), -1 = whole ring.
@@ -55,6 +59,8 @@ struct DisplayItem {
     radii[0] = radii[1] = radii[2] = radii[3] = 0;
     matrix[0] = matrix[3] = 1;
     matrix[1] = matrix[2] = matrix[4] = matrix[5] = 0;
+    persp[0] = persp[1] = 0;
+    persp[2] = 1;
   }
 };
 
@@ -98,6 +104,19 @@ class Painter {
   void PaintReplaced(LayoutBox* b, float ax, float ay, float alpha);
   void PaintMarker(LayoutBox* b, float ax, float ay, float alpha);
   void PaintPositioned(LayoutBox* b, float ax, float ay, float alpha, bool negative);
+  struct Context3d {
+    const LayoutBox* owner;
+    float m[16];   // the owner's accumulated 3D matrix
+    float facing;  // facing sign outside the scene
+    struct Range {
+      size_t itemStart, itemEnd, hitStart, hitEnd;
+      float z;  // depth of the plane's center (larger = nearer)
+    };
+    std::vector<Range> ranges;
+  };
+  void CloseTransform(int transformItem, size_t hitStart, float ax, float ay, float w, float h);
+  void SortContext3d(Context3d& ctx);
+  std::vector<Context3d> context3d_;
   void FillRect(const Rect& r, Color c, float alpha);
   void Text(float x, float baseline, const std::string& text, const ComputedStyle* s,
             Color color, float alpha, bool decorations);
@@ -110,6 +129,8 @@ class Painter {
   std::vector<Rect> clipStack_;
   int fixedDepth_;
   float facing_ = 1;  // sign of the accumulated transform determinant (backface culling)
+  // Document position of painted boxes with a 'perspective' (for their children).
+  std::map<const LayoutBox*, std::pair<float, float> > perspectiveBoxes_;
   void AddHit(const Rect& r, Node* n) {
     HitRegion h;
     h.rect = r;

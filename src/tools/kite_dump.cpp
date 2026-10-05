@@ -373,6 +373,12 @@ int main(int argc, char** argv) {
       else if (it.type == DisplayItem::kImage)
         printf("image %.0f,%.0f %.0fx%.0f %s\n", it.tileX, it.tileY, it.tileW, it.tileH,
                it.imageUrl.c_str());
+      else if (it.type == DisplayItem::kBeginTransform)
+        printf("transform [%.3g %.3g %.3g %.3g %.3g %.3g | %.3g %.3g %.3g] -> %d\n", it.matrix[0], it.matrix[1],
+               it.matrix[2], it.matrix[3], it.matrix[4], it.matrix[5], it.persp[0], it.persp[1], it.persp[2],
+               it.matchIndex);
+      else if (it.type == DisplayItem::kEndTransform)
+        printf("end transform\n");
     }
   }
   if (!ppm.empty()) {
