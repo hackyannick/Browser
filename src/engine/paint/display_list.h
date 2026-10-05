@@ -13,7 +13,7 @@
 namespace kite {
 
 struct DisplayItem {
-  enum Type { kRect, kText, kImage, kPushClip, kPopClip, kEllipse };
+  enum Type { kRect, kText, kImage, kPushClip, kPopClip, kEllipse, kSvg };
   Type type;
   Rect rect;        // rect / ellipse bounds / image destination area / clip
   Color color;
@@ -30,11 +30,13 @@ struct DisplayItem {
   float alpha;
   // Ellipse.
   bool hollow;
+  // Inline <svg> element (rasterized by the platform at device size).
+  const Node* svgNode;
 
   DisplayItem()
       : type(kRect), baseline(0), underline(false), lineThrough(false), overline(false),
         tileX(0), tileY(0), tileW(0), tileH(0), repeatX(false), repeatY(false), alpha(1),
-        hollow(false) {}
+        hollow(false), svgNode(0) {}
 };
 
 struct HitRegion {

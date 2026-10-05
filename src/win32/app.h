@@ -143,6 +143,15 @@ class Renderer {
   void EnsureBuffer(HDC hdc, int w, int h);
   void FillRect(int x0, int y0, int x1, int y1, Color c);
   void DrawImage(const DisplayItem& it, float ox, float oy, float zoom);
+  void DrawSvg(const DisplayItem& it, float ox, float oy, float zoom);
+  void Blit(const DecodedImage& img, int dx, int dy, const RECT& area, unsigned alpha);
+  std::map<std::string, DecodedImage> svgCache_;
+
+ public:
+  // Rasterized inline SVGs reference DOM nodes; drop them when documents change.
+  void ClearSvgCache() { svgCache_.clear(); }
+
+ private:
   void ApplyClip();
 
   HDC memDc_;

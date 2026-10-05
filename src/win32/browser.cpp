@@ -11,6 +11,7 @@
 
 #include "base/strings.h"
 #include "html/parser.h"
+#include "image/svg.h"
 #include "page/page.h"
 #include "win32/app.h"
 #include "win32/resource.h"
@@ -214,11 +215,11 @@ bool IsHtmlMime(const std::string& m) {
 bool IsTextMime(const std::string& m) {
   return StartsWith(m, "text/") || m == "application/json" || m == "application/javascript" ||
          m == "application/xml" || m == "application/rss+xml" || m == "application/atom+xml" ||
-         m == "image/svg+xml" || EndsWith(m, "+json");
+         EndsWith(m, "+json");
 }
 
 bool IsImageMime(const std::string& m) {
-  return m == "image/png" || m == "image/jpeg" || m == "image/jpg" || m == "image/gif" ||
+  return m == "image/svg+xml" || m == "image/png" || m == "image/jpeg" || m == "image/jpg" || m == "image/gif" ||
          m == "image/bmp" || m == "image/x-ms-bmp" || m == "image/pjpeg" || m == "image/x-png";
 }
 
@@ -741,6 +742,7 @@ void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure)
   }
   t->url = finalUrl;
   t->displayUrl = e.url;
+  renderer_.ClearSvgCache();
   t->secure = secure;
   t->scrollX = t->scrollY = 0;
   t->highlights.clear();
@@ -901,6 +903,8 @@ void Browser::OnDocument(Tab* t, FetchJob* job) {
   } else if (IsImageMime(mime)) {
     DecodedImage img;
     if (DecodeImage(r.body, img)) Images().SetLoaded(finalUrl, img);
+    else if (LooksLikeSvg(r.body) && RenderSvgDocument(r.body, 0, 0, 1.0f, img))
+      Images().SetLoaded(finalUrl, img);
     else Images().SetFailed(finalUrl);
     t->page->LoadImageDocument(finalUrl);
     t->rawSource = r.body;
@@ -995,11 +999,7 @@ void Browser::RequestImages(Tab* t) {
   for (size_t i = 0; i < urls.size(); ++i) {
     const std::string& u = urls[i];
     if (Images().IsKnown(u)) continue;
-    std::string lower = AsciiLower(u.substr(0, u.find_first_of("?#")));
-    if (EndsWith(lower, ".svg") || StartsWith(lower, "data:image/svg")) {
-      Images().SetUnsupported(u);
-      continue;
-    }
+
     if (!StartsWith(u, "http") && !StartsWith(u, "data:") && !StartsWith(u, "file:")) {
       Images().SetFailed(u);
       continue;

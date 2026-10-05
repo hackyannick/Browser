@@ -83,6 +83,14 @@ bool HtmlTokenizer::Next(HtmlToken& tok) {
     }
     return true;
   }
+  if (in_.compare(pos_, 9, "<![CDATA[") == 0) {
+    size_t end = in_.find("]]>", pos_ + 9);
+    if (end == std::string::npos) end = in_.size();
+    tok.type = HtmlToken::kText;
+    tok.data = in_.substr(pos_ + 9, end - pos_ - 9);
+    pos_ = std::min(in_.size(), end + 3);
+    return true;
+  }
   if (pos_ + 1 < in_.size() && (in_[pos_ + 1] == '!' || in_[pos_ + 1] == '?')) {
     size_t end = in_.find('>', pos_);
     if (end == std::string::npos) end = in_.size();

@@ -6,6 +6,9 @@
 #include <algorithm>
 #include <cmath>
 
+#include "base/strings.h"
+#include "image/svg.h"
+
 namespace kite {
 
 Renderer::Renderer() : memDc_(0), bitmap_(0), oldBitmap_(0), bits_(0), bw_(0), bh_(0) {}
@@ -138,6 +141,47 @@ void Renderer::DrawImage(const DisplayItem& it, float ox, float oy, float zoom) 
   }
 }
 
+void Renderer::Blit(const DecodedImage& img, int dx, int dy, const RECT& area, unsigned alpha) {
+  int x0 = std::max((int)area.left, dx), x1 = std::min((int)area.right, dx + img.width);
+  int y0 = std::max((int)area.top, dy), y1 = std::min((int)area.bottom, dy + img.height);
+  for (int y = y0; y < y1; ++y) {
+    const uint32_t* src = &img.pixels[(size_t)(y - dy) * img.width + (x0 - dx)];
+    uint32_t* dst = bits_ + (size_t)y * bw_ + x0;
+    for (int x = x0; x < x1; ++x, ++src, ++dst) {
+      uint32_t s = *src;
+      unsigned sa = (s >> 24) * alpha / 255;
+      if (sa == 0) continue;
+      unsigned sr = ((s >> 16) & 255) * alpha / 255, sg = ((s >> 8) & 255) * alpha / 255,
+               sb = (s & 255) * alpha / 255;
+      uint32_t d = *dst;
+      unsigned ia = 255 - sa;
+      unsigned r = sr + ((d >> 16) & 255) * ia / 255;
+      unsigned g = sg + ((d >> 8) & 255) * ia / 255;
+      unsigned b = sb + (d & 255) * ia / 255;
+      *dst = (std::min(r, 255u) << 16) | (std::min(g, 255u) << 8) | std::min(b, 255u);
+    }
+  }
+}
+
+void Renderer::DrawSvg(const DisplayItem& it, float ox, float oy, float zoom) {
+  int x = (int)std::floor(it.rect.x * zoom - ox + 0.5f), y = (int)std::floor(it.rect.y * zoom - oy + 0.5f);
+  int w = (int)std::floor(it.rect.w * zoom + 0.5f), h = (int)std::floor(it.rect.h * zoom + 0.5f);
+  if (w <= 0 || h <= 0 || (long long)w * h > 3000LL * 3000) return;
+  char key[128];
+  snprintf(key, sizeof key, "%p|%d|%d|%02x%02x%02x", (const void*)it.svgNode, w, h, it.color.r,
+           it.color.g, it.color.b);
+  std::map<std::string, DecodedImage>::iterator found = svgCache_.find(key);
+  if (found == svgCache_.end()) {
+    if (svgCache_.size() > 400) svgCache_.clear();
+    DecodedImage& img = svgCache_[key];
+    if (!RenderSvg(it.svgNode, w, h, it.color, img)) img.width = img.height = 0;
+    found = svgCache_.find(key);
+  }
+  if (found->second.width <= 0) return;
+  unsigned alpha = (unsigned)(std::max(0.0f, std::min(1.0f, it.alpha)) * 255 + 0.5f);
+  Blit(found->second, x, y, clip_, alpha);
+}
+
 static COLORREF Blend(Color c, Color bg) {
   if (c.a == 255) return RGB(c.r, c.g, c.b);
   unsigned a = c.a, ia = 255 - a;
@@ -213,6 +257,13 @@ void Renderer::Paint(HDC hdc, const DisplayList& dl, int width, int height, floa
           gdiDirty = false;
         }
         DrawImage(it, ox, oy, zoom);
+        break;
+      case DisplayItem::kSvg:
+        if (gdiDirty) {
+          GdiFlush();
+          gdiDirty = false;
+        }
+        DrawSvg(it, ox, oy, zoom);
         break;
       case DisplayItem::kEllipse: {
         HBRUSH brush = CreateSolidBrush(Blend(it.color, dl.background));

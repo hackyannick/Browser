@@ -122,6 +122,8 @@ struct ComputedStyle {
   float wordSpacing;
   bool overflowWrap;  // overflow-wrap: break-word | anywhere
   bool breakAll;      // word-break: break-all | break-word
+  std::string fill, stroke;          // SVG paint (raw CSS values)
+  bool fillDeclared, strokeDeclared;  // set on this element (not inherited)
   bool visible;
   ListStyle listStyleType;
   bool listStyleInside;

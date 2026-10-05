@@ -528,6 +528,17 @@ void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
              tag == "meter" ? Color(0, 160, 0) : Color(10, 36, 106), alpha);
     return;
   }
+  if (tag == "svg") {
+    if (content.w < 1 || content.h < 1) return;
+    DisplayItem it;
+    it.type = DisplayItem::kSvg;
+    it.rect = content;
+    it.svgNode = el;
+    it.color = s->color;
+    it.alpha = alpha;
+    out_->items.push_back(it);
+    return;
+  }
   if (tag == "iframe") {
     FillRect(content, Color(240, 240, 240), alpha);
     std::string src = el->Attr("src");

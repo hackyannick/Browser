@@ -281,6 +281,8 @@ void CopyProperty(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropBorderCollapse: d.borderCollapse = s.borderCollapse; break;
     case kPropOverflowWrap: d.overflowWrap = s.overflowWrap; break;
     case kPropWordBreak: d.breakAll = s.breakAll; break;
+    case kPropFill: d.fill = s.fill; d.fillDeclared = true; break;
+    case kPropStroke: d.stroke = s.stroke; d.strokeDeclared = true; break;
     case kPropBorderSpacing: d.borderSpacingH = s.borderSpacingH; d.borderSpacingV = s.borderSpacingV; break;
     case kPropTextDecorationLine:
       d.underline = s.underline; d.lineThrough = s.lineThrough; d.overline = s.overline; break;
@@ -892,6 +894,14 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       return;
     case kPropBorderCollapse:
       s.borderCollapse = v == "collapse";
+      return;
+    case kPropFill:
+      s.fill = value;
+      s.fillDeclared = true;
+      return;
+    case kPropStroke:
+      s.stroke = value;
+      s.strokeDeclared = true;
       return;
     case kPropOverflowWrap:
       s.overflowWrap = v == "break-word" || v == "anywhere";

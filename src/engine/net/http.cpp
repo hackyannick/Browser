@@ -167,6 +167,9 @@ std::string SniffMimeType(const std::string& body, const std::string& url) {
   if (EndsWith(lower, ".gif")) return "image/gif";
   if (EndsWith(lower, ".bmp")) return "image/bmp";
   std::string head = AsciiLower(Trim(body.substr(0, 512)));
+  if (EndsWith(lower, ".svg") || (head.find("<svg") != std::string::npos &&
+                                  head.find("<html") == std::string::npos))
+    return "image/svg+xml";
   if (StartsWith(head, "<!doctype html") || StartsWith(head, "<html") ||
       head.find("<head") != std::string::npos || head.find("<body") != std::string::npos)
     return "text/html";

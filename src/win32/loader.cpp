@@ -6,6 +6,7 @@
 #include <deque>
 
 #include "base/strings.h"
+#include "image/svg.h"
 #include "win32/app.h"
 
 namespace kite {
@@ -22,6 +23,10 @@ unsigned __stdcall Worker(void* arg) {
   if (job->kind == FetchJob::kImage && job->response.ok && job->response.status < 400 &&
       !(job->request.cancel && job->request.cancel->cancelled())) {
     job->imageOk = DecodeImage(job->response.body, job->image);
+    if (!job->imageOk && LooksLikeSvg(job->response.body)) {
+      job->imageOk = RenderSvgDocument(job->response.body, 0, 0, 2.0f, job->image);
+      job->image.density = 2.0f;
+    }
     std::string().swap(job->response.body);  // free the compressed data early
   }
   if (!PostMessageW(job->notify, WM_KITE_FETCHED, 0, (LPARAM)job)) delete job;

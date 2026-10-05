@@ -31,6 +31,8 @@ namespace kite {
   X(BorderSpacing, "border-spacing", true)                 \
   X(OverflowWrap, "overflow-wrap", true)                   \
   X(WordBreak, "word-break", true)                         \
+  X(Fill, "fill", true)                                    \
+  X(Stroke, "stroke", true)                                \
   X(TextDecorationLine, "text-decoration-line", false)     \
   X(TextDecorationColor, "text-decoration-color", false)   \
   X(Display, "display", false)                             \

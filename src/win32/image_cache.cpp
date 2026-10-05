@@ -15,8 +15,9 @@ ImageProvider::State ImageCache::GetImage(const std::string& url, int& width, in
   std::map<std::string, Entry>::iterator it = entries_.find(url);
   if (it == entries_.end()) return App::Get().settings.loadImages ? kLoading : kFailed;
   it->second.lastUse = ++clock_;
-  width = it->second.image.width;
-  height = it->second.image.height;
+  float d = it->second.image.density > 0 ? it->second.image.density : 1;
+  width = (int)(it->second.image.width / d + 0.5f);
+  height = (int)(it->second.image.height / d + 0.5f);
   return it->second.state;
 }
 
@@ -39,6 +40,7 @@ void ImageCache::SetLoaded(const std::string& url, DecodedImage& img) {
   e.image.width = img.width;
   e.image.height = img.height;
   e.image.hasAlpha = img.hasAlpha;
+  e.image.density = img.density;
   e.image.pixels.swap(img.pixels);
   e.lastUse = ++clock_;
   Trim();

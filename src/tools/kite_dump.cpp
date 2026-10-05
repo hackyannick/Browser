@@ -11,6 +11,7 @@
 #include "base/strings.h"
 #include "html/parser.h"
 #include "image/image.h"
+#include "image/svg.h"
 #include "net/http.h"
 #include "page/page.h"
 
@@ -51,7 +52,9 @@ class HeadlessImages : public ImageProvider {
     req.accept = "image/png,image/jpeg,image/gif,*/*;q=0.5";
     FetchResponse r = Network::Get().Fetch(req);
     DecodedImage img;
-    if (r.ok && r.status == 200 && DecodeImage(r.body, img)) images[url] = img;
+    if (r.ok && r.status == 200 && (DecodeImage(r.body, img) ||
+                                    (LooksLikeSvg(r.body) && RenderSvgDocument(r.body, 0, 0, 1, img))))
+      images[url] = img;
     else failed[url] = true;
   }
 };

@@ -14,7 +14,8 @@ struct DecodedImage {
   // Premultiplied BGRA (matches 32-bit Windows DIBs), row-major, top-down.
   std::vector<uint32_t> pixels;
   bool hasAlpha;
-  DecodedImage() : width(0), height(0), hasAlpha(false) {}
+  float density;  // pixels per CSS px (2 for vector images rasterized at 2x)
+  DecodedImage() : width(0), height(0), hasAlpha(false), density(1) {}
 };
 
 // Decodes |data|. Very large images are downsampled so that they fit into

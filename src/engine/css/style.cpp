@@ -27,6 +27,8 @@ ComputedStyle::ComputedStyle()
       wordSpacing(0),
       overflowWrap(false),
       breakAll(false),
+      fillDeclared(false),
+      strokeDeclared(false),
       visible(true),
       listStyleType(kListDisc),
       listStyleInside(false),
@@ -129,6 +131,9 @@ void ComputedStyle::InheritFrom(const ComputedStyle& p) {
   wordSpacing = p.wordSpacing;
   overflowWrap = p.overflowWrap;
   breakAll = p.breakAll;
+  fill = p.fill;
+  stroke = p.stroke;
+  fillDeclared = strokeDeclared = false;
   visible = p.visible;
   listStyleType = p.listStyleType;
   listStyleInside = p.listStyleInside;
