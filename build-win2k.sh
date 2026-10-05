@@ -12,4 +12,5 @@ rm -rf dist && mkdir -p dist/Kite
 cp build-win/kite.exe resources/cacert.pem dist/Kite/
 cp README.md dist/Kite/LIESMICH.md
 cp third_party/bearssl/LICENSE.txt dist/Kite/LICENSE-BearSSL.txt
+cp third_party/quickjs/LICENSE dist/Kite/LICENSE-QuickJS.txt
 echo "Fertig: dist/Kite/kite.exe"

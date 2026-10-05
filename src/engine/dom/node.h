@@ -36,6 +36,8 @@ class Node {
   ComputedStyle* style;
   size_t index;  // position in parent's children
   LayoutBox* layoutBox = nullptr;  // principal box (set by the box builder)
+  int scriptHandle = 0;            // JavaScript wrapper id (0 = none)
+  bool scriptDone = false;         // <script> already executed
 
   // Cached values for selector matching.
   std::string id;

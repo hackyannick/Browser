@@ -148,12 +148,72 @@ void WritePpm(const DisplayList& dl, int width, int height, const char* path) {
   fclose(f);
 }
 
+class HeadlessHost : public ScriptHost {
+ public:
+  std::string cookies;
+  std::string GetCookies(const std::string&) { return cookies; }
+  void SetCookie(const std::string&, const std::string& c) {
+    std::string kv = c.substr(0, c.find(';'));
+    cookies = cookies.empty() ? kv : cookies + "; " + kv;
+  }
+  void Alert(const std::string& m) { fprintf(stderr, "alert: %s\n", m.c_str()); }
+  bool Confirm(const std::string&) { return true; }
+  std::string Prompt(const std::string&, const std::string& d) { return d; }
+  void Navigate(const std::string& url, bool) { fprintf(stderr, "navigate: %s\n", url.c_str()); }
+  void SetTitle(const std::string&) {}
+  void ScrollTo(float, float) {}
+  void GetScroll(float& x, float& y) { x = y = 0; }
+};
+
+// Runs scripts, timers and fetch() requests synchronously for a while.
+void RunScriptsHeadless(Page& page) {
+  ScriptEngine* js = page.script();
+  if (!js) return;
+  for (int round = 0; round < 50; ++round) {
+    std::vector<std::string> pending = page.PendingScripts();
+    for (size_t i = 0; i < pending.size(); ++i) {
+      FetchRequest sr;
+      sr.url = pending[i];
+      sr.accept = "*/*";
+      FetchResponse s = Network::Get().Fetch(sr);
+      bool ok = s.ok && s.status == 200;
+      fprintf(stderr, "script %s: %s (%zu bytes)\n", pending[i].c_str(), ok ? "ok" : "failed", s.body.size());
+      page.ProvideScript(pending[i], ConvertToUtf8(s.body, s.Charset().empty() ? "utf-8" : s.Charset()), ok);
+    }
+    bool ran = page.RunScripts();
+    std::vector<ScriptRequest> reqs = js->TakeRequests();
+    for (size_t i = 0; i < reqs.size(); ++i) {
+      FetchRequest fr;
+      fr.url = reqs[i].url;
+      fr.method = reqs[i].method;
+      fr.body = reqs[i].body;
+      for (size_t k = 0; k < reqs[i].headers.size(); ++k)
+        if (AsciiLower(reqs[i].headers[k].first) == "content-type") fr.contentType = reqs[i].headers[k].second;
+      FetchResponse s = Network::Get().Fetch(fr);
+      fprintf(stderr, "fetch() %s %s: %d\n", reqs[i].method.c_str(), reqs[i].url.c_str(), s.status);
+      std::vector<std::pair<std::string, std::string> > hdrs;
+      for (size_t k = 0; k < s.headers.size(); ++k)
+        hdrs.push_back(std::make_pair(AsciiLower(s.headers[k].first), s.headers[k].second));
+      js->DeliverResponse(reqs[i].id, s.status, "", ConvertToUtf8(s.body, s.Charset().empty() ? "utf-8" : s.Charset()),
+                          hdrs, s.finalUrl, !s.ok);
+    }
+    int delay = js->NextTimerDelay();
+    if (delay >= 0 && delay <= 200 && round < 49) {
+      if (delay > 0) usleep(delay * 1000);
+      js->RunDueTimers();
+      ran = true;
+    }
+    if (!ran && reqs.empty() && pending.empty() && page.scriptsFinished()) break;
+  }
+  for (size_t i = 0; i < js->console().size(); ++i) fprintf(stderr, "console: %s\n", js->console()[i].c_str());
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   std::string target, ppm, caFile = "resources/cacert.pem";
   float width = 1024, height = 768;
-  bool tree = true, dl = false, images = false;
+  bool tree = true, dl = false, images = false, js = false;
   std::string inspect;
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -164,11 +224,12 @@ int main(int argc, char** argv) {
     else if (a == "--no-tree") tree = false;
     else if (a == "--dl") dl = true;
     else if (a == "--images") images = true;
+    else if (a == "--js") js = true;
     else if (a == "--inspect" && i + 1 < argc) inspect = argv[++i];
     else target = a;
   }
   if (target.empty()) {
-    fprintf(stderr, "usage: kite-dump [--width N] [--ppm out.ppm] [--dl] [--images] [--ca file] <file|url>\n");
+    fprintf(stderr, "usage: kite-dump [--width N] [--ppm out.ppm] [--dl] [--images] [--js] [--ca file] <file|url>\n");
     return 2;
   }
   NetInit();
@@ -208,6 +269,8 @@ int main(int argc, char** argv) {
   HeadlessImages imgs;
   imgs.fetch = images;
   Page page(&fonts, &imgs);
+  HeadlessHost host;
+  page.SetScripting(&host, js);
   page.LoadHtml(html, r.finalUrl);
   for (int round = 0; round < 4; ++round) {
     std::vector<std::string> pending = page.PendingStylesheets();
@@ -225,6 +288,10 @@ int main(int argc, char** argv) {
   }
   page.Restyle(width, height);
   page.Relayout(width, height);
+  if (js) {
+    RunScriptsHeadless(page);
+    page.ScriptMutated();
+  }
   if (images) {
     std::vector<std::string> urls = page.ReferencedImages();
     for (size_t i = 0; i < urls.size(); ++i) imgs.Load(urls[i]);

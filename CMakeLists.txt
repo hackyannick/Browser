@@ -22,13 +22,27 @@ if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
 endif()
 
 # ---------------------------------------------------------------------------
+# QuickJS (JavaScript engine, MIT licensed, vendored in third_party/quickjs)
+add_library(quickjs STATIC
+  ${CMAKE_SOURCE_DIR}/third_party/quickjs/quickjs.c
+  ${CMAKE_SOURCE_DIR}/third_party/quickjs/libregexp.c
+  ${CMAKE_SOURCE_DIR}/third_party/quickjs/libunicode.c
+  ${CMAKE_SOURCE_DIR}/third_party/quickjs/cutils.c
+  ${CMAKE_SOURCE_DIR}/third_party/quickjs/dtoa.c)
+target_include_directories(quickjs PUBLIC ${CMAKE_SOURCE_DIR}/third_party/quickjs)
+target_compile_definitions(quickjs PRIVATE _GNU_SOURCE CONFIG_VERSION="2026-06-04")
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+  target_compile_options(quickjs PRIVATE -w)
+endif()
+
+# ---------------------------------------------------------------------------
 # Kite engine (portable C++11: HTML, CSS, layout, paint, network)
 file(GLOB_RECURSE KITE_ENGINE_SOURCES ${CMAKE_SOURCE_DIR}/src/engine/*.cpp)
 add_library(kite_engine STATIC ${KITE_ENGINE_SOURCES})
 target_include_directories(kite_engine PUBLIC
   ${CMAKE_SOURCE_DIR}/src/engine
   ${CMAKE_SOURCE_DIR}/third_party/stb)
-target_link_libraries(kite_engine PUBLIC bearssl)
+target_link_libraries(kite_engine PUBLIC bearssl quickjs)
 if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   target_compile_options(kite_engine PRIVATE -Wall -Wextra -Wno-unused-parameter)
 endif()
@@ -36,6 +50,7 @@ endif()
 if(WIN32)
   # Target Windows 2000 (NT 5.0) APIs only.
   target_compile_definitions(bearssl PRIVATE _WIN32_WINNT=0x0500 WINVER=0x0500)
+  target_compile_definitions(quickjs PRIVATE _WIN32_WINNT=0x0500 WINVER=0x0500)
   target_compile_definitions(kite_engine PUBLIC
     _WIN32_WINNT=0x0500 WINVER=0x0500 _WIN32_IE=0x0501 UNICODE _UNICODE)
   target_link_libraries(kite_engine PUBLIC ws2_32 advapi32)
@@ -58,7 +73,7 @@ if(WIN32)
       ${CMAKE_SOURCE_DIR}/resources/cacert.pem $<TARGET_FILE_DIR:kite>/cacert.pem)
 else()
   find_package(Threads REQUIRED)
-  target_link_libraries(kite_engine PUBLIC Threads::Threads)
+  target_link_libraries(kite_engine PUBLIC Threads::Threads m)
   add_executable(kite-dump ${CMAKE_SOURCE_DIR}/src/tools/kite_dump.cpp)
   target_link_libraries(kite-dump PRIVATE kite_engine)
 

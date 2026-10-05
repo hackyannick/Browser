@@ -82,6 +82,7 @@ void App::Init(HINSTANCE inst) {
   long long v;
   if (ParseInt(IniGet(L"ProxyPort", "0"), v)) settings.proxyPort = (int)v;
   settings.loadImages = IniGet(L"LoadImages", "1") != "0";
+  settings.javaScript = IniGet(L"JavaScript", "1") != "0";
   if (ParseInt(IniGet(L"DefaultZoom", "100"), v)) settings.defaultZoom = (int)v;
 
   NetInit();
@@ -113,6 +114,7 @@ void App::SaveSettings() {
   IniSet(L"ProxyHost", settings.proxyHost);
   IniSet(L"ProxyPort", IntToString(settings.proxyPort));
   IniSet(L"LoadImages", settings.loadImages ? "1" : "0");
+  IniSet(L"JavaScript", settings.javaScript ? "1" : "0");
   IniSet(L"DefaultZoom", IntToString(settings.defaultZoom));
 }
 

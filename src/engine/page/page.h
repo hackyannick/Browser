@@ -15,6 +15,7 @@
 #include "layout/layout.h"
 #include "net/url.h"
 #include "paint/display_list.h"
+#include "script/script.h"
 
 namespace kite {
 
@@ -92,6 +93,32 @@ class Page {
   bool BuildFormSubmission(Node* form, Node* submitter, FormSubmission& out) const;
   static Node* DefaultSubmitButton(Node* form);
 
+  // JavaScript. Call SetScripting before LoadHtml; |host| must outlive the page.
+  void SetScripting(ScriptHost* host, bool enabled) {
+    scriptHost_ = host;
+    scriptingEnabled_ = enabled;
+  }
+  bool scriptingEnabled() const { return scriptingEnabled_ && scriptHost_; }
+  ScriptEngine* script() { return script_.get(); }
+  // External scripts that still need fetching (each URL returned once).
+  std::vector<std::string> PendingScripts();
+  void ProvideScript(const std::string& url, const std::string& source, bool ok);
+  // Runs every script that is ready, in document order; fires
+  // DOMContentLoaded/load once all parser-inserted scripts ran. Returns true
+  // if anything executed.
+  bool RunScripts();
+  bool scriptsFinished() const { return loadFired_; }
+  // Called by the bindings.
+  void OnScriptInserted(Node* script);
+  void RequestRepaint();
+  void EnsureLayout();
+  float viewportWidth() const { return lastViewportW_; }
+  float viewportHeight() const { return lastViewportH_; }
+  void QueueFormSubmission(const FormSubmission& s) { formQueue_.push_back(s); }
+  bool TakeFormSubmission(FormSubmission& out);
+  // After scripts changed the DOM: re-collect stylesheets, restyle, relayout.
+  void ScriptMutated();
+
   // Plain text of the whole document (for "find in page").
   std::vector<std::pair<Rect, std::string> > TextRuns() const;
 
@@ -104,9 +131,19 @@ class Page {
     bool loaded;
     bool failed;
     std::shared_ptr<Stylesheet> sheet;
+    bool imported = false;  // via @import from a fetched sheet
   };
   void CollectDocumentInfo();
   void AddSheetsFromNode(Node* n);
+  void CollectScripts(Node* n);
+  void RecollectSheets();
+  struct ScriptEntry {
+    Node* node;
+    std::string url;  // empty for inline scripts
+    std::string source;
+    bool parserInserted;
+    bool loaded, failed, requested, done;
+  };
 
   FontProvider* fonts_;
   ImageProvider* images_;
@@ -122,6 +159,14 @@ class Page {
   std::set<std::string> requestedFonts_;
   int refreshDelay_;
   std::string refreshUrl_;
+  ScriptHost* scriptHost_ = 0;
+  bool scriptingEnabled_ = false;
+  std::vector<ScriptEntry> scripts_;
+  std::vector<FormSubmission> formQueue_;
+  bool contentLoadedFired_ = false, loadFired_ = false;
+  bool inScripts_ = false;
+  // Destroyed first: holds pointers into doc_.
+  std::unique_ptr<ScriptEngine> script_;
 };
 
 }  // namespace kite

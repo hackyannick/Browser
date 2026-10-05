@@ -32,8 +32,9 @@ struct Settings {
   std::string proxyHost;
   int proxyPort;
   bool loadImages;
+  bool javaScript;
   int defaultZoom;            // percent
-  Settings() : proxyPort(0), loadImages(true), defaultZoom(100) {}
+  Settings() : proxyPort(0), loadImages(true), javaScript(true), defaultZoom(100) {}
 };
 
 class App {
@@ -124,7 +125,7 @@ ImageCache& Images();
 const UINT WM_KITE_FETCHED = WM_APP + 1;
 
 struct FetchJob {
-  enum Kind { kDocument, kStylesheet, kImage, kDownload, kFont };
+  enum Kind { kDocument, kStylesheet, kImage, kDownload, kFont, kScript, kScriptRequest };
   Kind kind;
   int tabId;
   int generation;
@@ -136,6 +137,7 @@ struct FetchJob {
   std::string fontData, fontName, fontFamily;
   int fontWeight = 400;
   bool fontItalic = false;
+  int scriptRequestId = 0;  // kScriptRequest: fetch()/XMLHttpRequest id
   HWND notify;
   FetchJob() : kind(kDocument), tabId(0), generation(0), imageOk(false), notify(0) {}
 };

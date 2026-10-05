@@ -13,6 +13,10 @@ Page::Page(FontProvider* fonts, ImageProvider* images)
 Page::~Page() {}
 
 void Page::LoadHtml(const std::string& utf8, const std::string& url) {
+  script_.reset();  // references the old document
+  scripts_.clear();
+  formQueue_.clear();
+  contentLoadedFired_ = loadFired_ = false;
   url_ = url;
   baseUrl_ = Url::Parse(url);
   doc_ = ParseHtml(utf8);
@@ -22,6 +26,13 @@ void Page::LoadHtml(const std::string& utf8, const std::string& url) {
   refreshDelay_ = -1;
   refreshUrl_.clear();
   CollectDocumentInfo();
+  if (scriptingEnabled() && doc_) {
+    std::vector<Node*> ns;
+    doc_->root->FindAll("noscript", ns);
+    for (size_t i = 0; i < ns.size(); ++i) ns[i]->SetAttr("hidden", "");
+    CollectScripts(doc_->root.get());
+    script_.reset(new ScriptEngine(this, scriptHost_));
+  }
 }
 
 void Page::LoadPlainText(const std::string& utf8, const std::string& url) {
@@ -120,6 +131,7 @@ void Page::AddSheetsFromNode(Node* n) {
       }
     }
     if (n->tag == "template" || n->tag == "svg") return;
+    if (n->tag == "noscript" && scriptingEnabled()) return;
   }
   for (size_t i = 0; i < n->children.size(); ++i) AddSheetsFromNode(n->children[i].get());
 }
@@ -127,6 +139,215 @@ void Page::AddSheetsFromNode(Node* n) {
 void Page::CollectDocumentInfo() {
   if (!doc_) return;
   AddSheetsFromNode(doc_->root.get());
+}
+
+static bool IsClassicScript(Node* n) {
+  std::string type = AsciiLower(Trim(n->Attr("type")));
+  if (type.empty() || type == "text/javascript" || type == "application/javascript" ||
+      type == "application/x-javascript" || type == "text/ecmascript" ||
+      type == "application/ecmascript" || type == "text/jscript")
+    return true;
+  return false;
+}
+
+void Page::CollectScripts(Node* n) {
+  if (n->IsElement()) {
+    if (n->tag == "template" || n->tag == "svg") return;
+    if (n->tag == "script") {
+      if (!n->scriptDone && IsClassicScript(n)) {
+        n->scriptDone = true;
+        ScriptEntry e;
+        e.node = n;
+        e.parserInserted = true;
+        e.loaded = e.failed = e.requested = e.done = false;
+        if (n->HasAttr("src")) {
+          Url u = baseUrl_.Resolve(n->Attr("src"));
+          if (u.valid() && (u.scheme() == "http" || u.scheme() == "https" || u.scheme() == "file"))
+            e.url = u.SpecNoFragment();
+          else
+            e.failed = true;
+        } else {
+          e.source = n->TextContent();
+          e.loaded = true;
+        }
+        scripts_.push_back(e);
+      }
+      return;
+    }
+  }
+  for (size_t i = 0; i < n->children.size(); ++i) CollectScripts(n->children[i].get());
+}
+
+void Page::OnScriptInserted(Node* n) {
+  if (!scriptingEnabled() || n->scriptDone || !IsClassicScript(n)) return;
+  // Only scripts that are actually connected to the document run.
+  Node* top = n;
+  while (top->parent) top = top->parent;
+  if (!doc_ || top != doc_->root.get()) return;
+  n->scriptDone = true;
+  ScriptEntry e;
+  e.node = n;
+  e.parserInserted = false;
+  e.loaded = e.failed = e.requested = e.done = false;
+  if (n->HasAttr("src")) {
+    Url u = baseUrl_.Resolve(n->Attr("src"));
+    if (u.valid() && (u.scheme() == "http" || u.scheme() == "https" || u.scheme() == "file"))
+      e.url = u.SpecNoFragment();
+    else
+      e.failed = true;
+  } else {
+    e.source = n->TextContent();
+    e.loaded = true;
+  }
+  scripts_.push_back(e);
+}
+
+std::vector<std::string> Page::PendingScripts() {
+  std::vector<std::string> out;
+  for (size_t i = 0; i < scripts_.size(); ++i) {
+    ScriptEntry& e = scripts_[i];
+    if (e.url.empty() || e.loaded || e.failed || e.requested) continue;
+    e.requested = true;
+    bool dup = false;
+    for (size_t k = 0; k < out.size(); ++k) dup = dup || out[k] == e.url;
+    if (!dup) out.push_back(e.url);
+  }
+  return out;
+}
+
+void Page::ProvideScript(const std::string& url, const std::string& source, bool ok) {
+  for (size_t i = 0; i < scripts_.size(); ++i) {
+    ScriptEntry& e = scripts_[i];
+    if (e.url != url || e.loaded || e.failed) continue;
+    if (ok) {
+      e.loaded = true;
+      e.source = source;
+    } else {
+      e.failed = true;
+    }
+  }
+}
+
+bool Page::RunScripts() {
+  if (!script_ || inScripts_) return false;
+  inScripts_ = true;
+  bool ran = false;
+  bool progress = true;
+  while (progress && script_) {
+    progress = false;
+    bool blocked = false;  // a parser-inserted script is still loading
+    for (size_t i = 0; i < scripts_.size(); ++i) {
+      ScriptEntry& e = scripts_[i];
+      if (e.done) continue;
+      if (!e.loaded && !e.failed) {
+        if (e.parserInserted) blocked = true;
+        continue;
+      }
+      if (e.parserInserted && blocked) continue;
+      e.done = true;
+      Node* node = e.node;
+      std::string src = e.source, name = e.url.empty() ? url_ : e.url;
+      bool failed = e.failed;
+      if (failed) {
+        script_->DispatchEvent(node, "error");
+      } else {
+        script_->Execute(src, name, node);
+        if (!e.url.empty()) script_->DispatchEvent(node, "load");
+      }
+      ran = true;
+      progress = true;
+      break;  // scripts_ may have grown; restart the scan
+    }
+    if (!progress && !blocked && !contentLoadedFired_) {
+      bool parserPending = false;
+      for (size_t i = 0; i < scripts_.size(); ++i)
+        if (scripts_[i].parserInserted && !scripts_[i].done) parserPending = true;
+      if (!parserPending) {
+        contentLoadedFired_ = true;
+        script_->DispatchDocumentEvent("DOMContentLoaded");
+        ran = true;
+        progress = true;
+      }
+    }
+  }
+  if (script_ && contentLoadedFired_ && !loadFired_) {
+    loadFired_ = true;
+    script_->DispatchDocumentEvent("load");
+    ran = true;
+  }
+  inScripts_ = false;
+  return ran;
+}
+
+void Page::RequestRepaint() {
+  if (script_) script_->MarkDirty();
+}
+
+void Page::EnsureLayout() {
+  if (!script_ || !script_->TakeLayoutStale()) {
+    if (root_) return;
+  }
+  RecollectSheets();
+  Restyle(lastViewportW_, lastViewportH_);
+  Relayout(lastViewportW_, lastViewportH_);
+}
+
+void Page::ScriptMutated() {
+  if (script_) script_->TakeLayoutStale();
+  RecollectSheets();
+  Restyle(lastViewportW_, lastViewportH_);
+  Relayout(lastViewportW_, lastViewportH_);
+}
+
+void Page::RecollectSheets() {
+  if (!doc_) return;
+  // Keep already fetched external sheets; inline <style> is re-parsed.
+  std::vector<SheetEntry> old;
+  old.swap(sheets_);
+  std::string keepTitleRefreshUrl = refreshUrl_;
+  int keepDelay = refreshDelay_;
+  AddSheetsFromNode(doc_->root.get());
+  refreshUrl_ = keepTitleRefreshUrl;
+  refreshDelay_ = keepDelay;
+  for (size_t i = 0; i < sheets_.size(); ++i) {
+    SheetEntry& e = sheets_[i];
+    if (!e.isLink) continue;
+    for (size_t k = 0; k < old.size(); ++k) {
+      if (old[k].isLink && old[k].url == e.url) {
+        std::string media = e.media;
+        e = old[k];
+        e.media = media;
+        break;
+      }
+    }
+  }
+  // Sheets @imported by fetched link sheets appear only in the old list:
+  // put each back in front of the sheet that followed it.
+  for (size_t k = 0; k < old.size(); ++k) {
+    if (!old[k].imported) continue;
+    bool found = false;
+    for (size_t i = 0; i < sheets_.size() && !found; ++i)
+      found = sheets_[i].isLink && sheets_[i].url == old[k].url;
+    if (found) continue;
+    size_t pos = sheets_.size();
+    for (size_t j = k + 1; j < old.size() && pos == sheets_.size(); ++j) {
+      if (old[j].imported || !old[j].isLink) continue;
+      for (size_t i = 0; i < sheets_.size(); ++i)
+        if (sheets_[i].isLink && sheets_[i].url == old[j].url) {
+          pos = i;
+          break;
+        }
+      if (pos == sheets_.size()) break;  // parent link was removed
+    }
+    if (pos < sheets_.size()) sheets_.insert(sheets_.begin() + pos, old[k]);
+  }
+}
+
+bool Page::TakeFormSubmission(FormSubmission& out) {
+  if (formQueue_.empty()) return false;
+  out = formQueue_.front();
+  formQueue_.erase(formQueue_.begin());
+  return true;
 }
 
 std::vector<std::string> Page::PendingStylesheets() const {
@@ -163,6 +384,7 @@ void Page::ProvideStylesheet(const std::string& url, const std::string& css, boo
       imp.url = spec;
       imp.media = e.media;
       imp.loaded = imp.failed = false;
+      imp.imported = true;
       imports.push_back(imp);
     }
     if (!imports.empty()) {

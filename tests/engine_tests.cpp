@@ -426,6 +426,150 @@ void TestSvg() {
   CHECK_EQ(h, 24.0f);
 }
 
+class TestHost : public ScriptHost {
+ public:
+  std::string cookies, title, navigated, alerted;
+  float sx = 0, sy = 0;
+  std::string GetCookies(const std::string&) { return cookies; }
+  void SetCookie(const std::string&, const std::string& c) {
+    std::string kv = c.substr(0, c.find(';'));
+    cookies = cookies.empty() ? kv : cookies + "; " + kv;
+  }
+  void Alert(const std::string& m) { alerted += m; }
+  bool Confirm(const std::string&) { return true; }
+  std::string Prompt(const std::string&, const std::string& d) { return d; }
+  void Navigate(const std::string& url, bool) { navigated = url; }
+  void SetTitle(const std::string& t) { title = t; }
+  void ScrollTo(float x, float y) { sx = x; sy = y; }
+  void GetScroll(float& x, float& y) { x = sx; y = sy; }
+};
+
+struct ScriptPage {
+  SimpleFontProvider fonts;
+  NoImages images;
+  TestHost host;
+  Page page;
+  explicit ScriptPage(const std::string& html) : page(&fonts, &images) {
+    page.SetScripting(&host, true);
+    page.LoadHtml(html, "http://test.local/dir/page.html");
+    page.Restyle(800, 600);
+    page.Relayout(800, 600);
+    page.RunScripts();
+    if (page.script()->TakeDirty()) page.ScriptMutated();
+  }
+  Node* ById(const char* id) { return page.document()->root->FindById(id); }
+  std::string Eval(const std::string& expr) {
+    page.script()->Execute("document.getElementById('out').textContent = String(" + expr + ")",
+                           "test", 0);
+    return ById("out")->TextContent();
+  }
+  std::string Console() {
+    std::string s;
+    for (size_t i = 0; i < page.script()->console().size(); ++i) s += page.script()->console()[i] + "\n";
+    return s;
+  }
+};
+
+void TestScript() {
+  ScriptPage p(
+      "<html><head><title>T</title><style>.big{width:300px}</style></head><body>"
+      "<div id=out></div><ul id=list><li class=a>1</li><li class='a b'>2</li></ul>"
+      "<script>document.getElementById('list').insertAdjacentHTML('beforeend', '<li>3</li>');"
+      "var order = ['inline'];"
+      "document.addEventListener('DOMContentLoaded', function(){ order.push('dcl'); });"
+      "window.onload = function(){ order.push('load'); };</script>"
+      "<noscript><p id=ns>no js</p></noscript>"
+      "<form id=f action=/search><input name=q value=x><button id=b>go</button></form>"
+      "</body></html>");
+  CHECK_EQ(p.Eval("document.querySelectorAll('#list li').length"), "3");
+  CHECK_EQ(p.Eval("order.join()"), "inline,dcl,load");
+  CHECK_EQ(p.Eval("document.title"), "T");
+  CHECK_EQ(p.Eval("document.querySelector('.b').textContent"), "2");
+  CHECK_EQ(p.Eval("document.getElementsByClassName('a').length"), "2");
+  CHECK(p.ById("ns")->parent->HasAttr("hidden"));
+  CHECK_EQ(p.Eval("location.pathname + location.search"), "/dir/page.html");
+  CHECK_EQ(p.Eval("new URL('../x?y=1#z', location.href).href"), "http://test.local/x?y=1#z");
+  CHECK_EQ(p.Eval("new URLSearchParams('a=1&b=x+y').get('b')"), "x y");
+  CHECK_EQ(p.Eval("JSON.stringify([1,{a:2}])"), "[1,{\"a\":2}]");
+  CHECK_EQ(p.Eval("btoa('Hello') + atob('SGk=')"), "SGVsbG8=Hi");
+
+  // DOM manipulation and serialization.
+  p.Eval("(function(){ var d = document.createElement('div'); d.id = 'made'; d.className = 'x y';"
+         "d.dataset.fooBar = '7'; d.style.width = '120px'; d.appendChild(document.createTextNode('a<b'));"
+         "document.body.appendChild(d); return 1; })()");
+  Node* made = p.ById("made");
+  CHECK(made != 0);
+  CHECK_EQ(made->Attr("data-foo-bar"), "7");
+  CHECK_EQ(made->Attr("style"), "width: 120px");
+  CHECK_EQ(p.Eval("document.getElementById('made').outerHTML"),
+           "<div id=\"made\" class=\"x y\" data-foo-bar=\"7\" style=\"width: 120px\">a&lt;b</div>");
+  CHECK_EQ(p.Eval("document.getElementById('made').classList.contains('y')"), "true");
+  CHECK_EQ(p.Eval("(function(){var m=document.getElementById('made'); m.classList.toggle('x'); return m.className;})()"), "y");
+
+  // Layout queries see script changes.
+  CHECK_EQ(p.Eval("document.getElementById('made').getBoundingClientRect().width"), "120");
+  CHECK_EQ(p.Eval("(function(){var m=document.getElementById('made'); m.className='big'; m.removeAttribute('style'); return m.offsetWidth;})()"), "300");
+  CHECK_EQ(p.Eval("getComputedStyle(document.getElementById('made')).display"), "block");
+
+  // Events: bubbling, preventDefault, inline handlers.
+  p.Eval("(function(){ window.log = []; var b = document.getElementById('b');"
+         "document.body.addEventListener('click', function(e){ log.push('body:' + e.target.id); });"
+         "b.addEventListener('click', function(e){ log.push('btn'); e.preventDefault(); });"
+         "document.getElementById('f').onsubmit = function(){ log.push('submit'); return false; };"
+         "return 1; })()");
+  CHECK(!p.page.script()->DispatchEvent(p.ById("b"), "click"));
+  CHECK_EQ(p.Eval("log.join()"), "btn,body:b");
+  CHECK(!p.page.script()->DispatchEvent(p.ById("f"), "submit"));
+  CHECK_EQ(p.Eval("log.join()"), "btn,body:b,submit");
+
+  // Form values.
+  p.Eval("document.querySelector('input[name=q]').value = 'kite'");
+  FormSubmission sub;
+  CHECK(p.page.BuildFormSubmission(p.ById("f"), 0, sub));
+  CHECK_EQ(sub.url, "http://test.local/search?q=kite");
+
+  // Timers and promises.
+  p.Eval("(function(){ window.t = []; setTimeout(function(){ t.push('timeout'); }, 0);"
+         "Promise.resolve().then(function(){ t.push('micro'); }); return 1; })()");
+  CHECK_EQ(p.Eval("t.join()"), "micro");
+  CHECK(p.page.script()->NextTimerDelay() >= 0);
+  p.page.script()->RunDueTimers();
+  CHECK_EQ(p.Eval("t.join()"), "micro,timeout");
+
+  // fetch() goes through the host's request queue.
+  p.Eval("(function(){ window.got = ''; fetch('/api?x=1').then(function(r){ return r.json(); })"
+         ".then(function(j){ got = j.v; }); return 1; })()");
+  std::vector<ScriptRequest> reqs = p.page.script()->TakeRequests();
+  CHECK_EQ(reqs.size(), 1u);
+  if (!reqs.empty()) {
+    CHECK_EQ(reqs[0].url, "http://test.local/api?x=1");
+    std::vector<std::pair<std::string, std::string> > hdrs;
+    hdrs.push_back(std::make_pair(std::string("content-type"), std::string("application/json")));
+    p.page.script()->DeliverResponse(reqs[0].id, 200, "OK", "{\"v\":42}", hdrs, reqs[0].url, false);
+  }
+  CHECK_EQ(p.Eval("got"), "42");
+
+  // Cookies, title, navigation and dynamically inserted scripts.
+  p.Eval("document.cookie = 'a=1; path=/'");
+  CHECK_EQ(p.host.cookies, "a=1");
+  p.Eval("document.title = 'Neu'");
+  CHECK_EQ(p.host.title, "Neu");
+  p.Eval("(function(){ var s = document.createElement('script'); s.textContent = 'window.dyn = 5';"
+         "document.head.appendChild(s); return 1; })()");
+  p.page.RunScripts();
+  CHECK_EQ(p.Eval("window.dyn"), "5");
+  p.Eval("location.href = 'other.html'");
+  CHECK_EQ(p.host.navigated, "http://test.local/dir/other.html");
+
+  // Errors land in the console instead of aborting.
+  p.page.script()->Execute("undefinedFunction()", "err.js", 0);
+  CHECK(p.Console().find("undefinedFunction") != std::string::npos);
+  // Runaway scripts are interrupted.
+  p.page.script()->SetTimeLimit(300);
+  p.page.script()->Execute("for(;;){}", "loop.js", 0);
+  CHECK_EQ(p.Eval("1+1"), "2");
+}
+
 }  // namespace
 
 int main() {
@@ -450,6 +594,7 @@ int main() {
   TestAnchors();
   TestHttpHelpers();
   TestSvg();
+  TestScript();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

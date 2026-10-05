@@ -33,6 +33,9 @@ const UINT_PTR kTimerRelayout = 1;
 const UINT_PTR kTimerResize = 2;
 const UINT_PTR kTimerStyleFallbackBase = 0x1000;
 const UINT_PTR kTimerRefreshBase = 0x2000;
+const UINT_PTR kTimerScriptBase = 0x3000;
+// Deferred navigation requested by a script (location.href = ..., form.submit()).
+const UINT WM_KITE_JSNAV = WM_APP + 3;
 const int kZoomLevels[] = {30, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300};
 
 struct HistoryEntry {
@@ -57,12 +60,29 @@ struct PendingNav {
                  isPost(false), viewSource(false) {}
 };
 
+// Platform services for the scripts of one tab.
+class TabScriptHost : public ScriptHost {
+ public:
+  int tabId;
+  explicit TabScriptHost(int id) : tabId(id) {}
+  std::string GetCookies(const std::string& url);
+  void SetCookie(const std::string& url, const std::string& cookie);
+  void Alert(const std::string& message);
+  bool Confirm(const std::string& message);
+  std::string Prompt(const std::string& message, const std::string& def);
+  void Navigate(const std::string& url, bool replace);
+  void SetTitle(const std::string& title);
+  void ScrollTo(float x, float y);
+  void GetScroll(float& x, float& y);
+};
+
 class Tab {
  public:
   Tab(int id_) : id(id_), historyIndex(-1), loading(false), generation(0), secure(false),
                  scrollX(0), scrollY(0), pendingSheets(0), pendingImages(0), rendered(false),
-                 needsRelayout(false), restoreScroll(-1), findIndex(-1) {
+                 needsRelayout(false), restoreScroll(-1), findIndex(-1), jsHost(id_) {
     page.reset(new Page(&Fonts(), &Images()));
+    page->SetScripting(&jsHost, App::Get().settings.javaScript);
   }
   int id;
   std::unique_ptr<Page> page;
@@ -91,6 +111,14 @@ class Tab {
   std::string status;
   std::set<std::string> requestedSheets;
   float renderedW = 0, renderedH = 0;
+  TabScriptHost jsHost;
+  int pendingScripts = 0;
+  // Navigation requested by a script; performed outside of script execution.
+  bool jsNavPending = false;
+  bool jsNavReplace = false;
+  bool jsNavIsForm = false;
+  std::string jsNavUrl;
+  FormSubmission jsNavForm;
 };
 
 class Browser {
@@ -110,6 +138,8 @@ class Browser {
   static LRESULT CALLBACK EditCtlProc(HWND h, UINT m, WPARAM w, LPARAM l);
   static LRESULT CALLBACK FindEditProc(HWND h, UINT m, WPARAM w, LPARAM l);
   static INT_PTR CALLBACK SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l);
+  static INT_PTR CALLBACK PromptProc(HWND h, UINT m, WPARAM w, LPARAM l);
+  friend class TabScriptHost;
 
  private:
   LRESULT HandleMain(UINT m, WPARAM w, LPARAM l);
@@ -171,6 +201,17 @@ class Browser {
   void ShowFindBar(bool show);
   void SetZoom(int z);
   void AddBookmark();
+  // JavaScript.
+  void BeginScript() { ++scriptDepth_; }
+  void EndScript(Tab* t);
+  void AfterScript(Tab* t);
+  void PumpScripts(Tab* t);
+  void ScheduleScriptTimer(Tab* t);
+  bool DispatchJs(Tab* t, Node* target, const char* type);
+  void RunJavaScriptUrl(Tab* t, const std::string& url);
+  void ShowConsole();
+  int scriptDepth_ = 0;
+  std::vector<FetchJob*> deferredJobs_;
 
   HWND hwnd_, tabs_, toolbar_, toolbar2_, address_, view_, status_;
   HWND findBar_, findEdit_;
@@ -284,6 +325,7 @@ bool Browser::Create(HINSTANCE inst, const std::wstring& startUrl) {
       {FVIRTKEY, VK_F3, ID_EDIT_FINDNEXT},
       {FSHIFT | FVIRTKEY, VK_F3, ID_EDIT_FINDPREV},
       {FCONTROL | FVIRTKEY, 'U', ID_VIEW_SOURCE},
+      {FCONTROL | FSHIFT | FVIRTKEY, 'J', ID_VIEW_CONSOLE},
       {FCONTROL | FVIRTKEY, 'D', ID_BM_ADD},
       {FCONTROL | FVIRTKEY, 'B', ID_BM_MANAGE},
       {FCONTROL | FVIRTKEY, VK_ADD, ID_VIEW_ZOOMIN},
@@ -334,6 +376,7 @@ HMENU Browser::BuildMenu() {
   AppendMenuW(view, MF_STRING, ID_VIEW_ZOOMRESET, L"Originalgr\x00f6\x00df&e\tStrg+0");
   AppendMenuW(view, MF_SEPARATOR, 0, 0);
   AppendMenuW(view, MF_STRING, ID_VIEW_SOURCE, L"Seiten&quelltext\tStrg+U");
+  AppendMenuW(view, MF_STRING, ID_VIEW_CONSOLE, L"JavaScript-&Konsole\tStrg+Umschalt+J");
   AppendMenuW(bar, MF_POPUP, (UINT_PTR)view, L"&Ansicht");
 
   HMENU go = CreatePopupMenu();
@@ -556,6 +599,7 @@ void Browser::CloseTab(Tab* t) {
   if (t->cancel) t->cancel->Cancel();
   KillTimer(hwnd_, kTimerStyleFallbackBase + t->id);
   KillTimer(hwnd_, kTimerRefreshBase + t->id);
+  KillTimer(hwnd_, kTimerScriptBase + t->id);
   tabList_.erase(tabList_.begin() + idx);
   TabCtrl_DeleteItem(tabs_, idx);
   if (tabList_.empty()) {
@@ -631,8 +675,12 @@ void Browser::Navigate(Tab* t, const std::string& input, const std::string& refe
     LoadInternal(t, "<html><head><title></title></head><body></body></html>", url, nav);
     return;
   }
+  if (StartsWithIgnoreCase(Trim(input), "javascript:")) {
+    RunJavaScriptUrl(t, Trim(input));
+    return;
+  }
   if (StartsWithIgnoreCase(url, "javascript:")) {
-    SetStatus("JavaScript wird von Kite nicht unterst\xC3\xBCtzt.");
+    RunJavaScriptUrl(t, url);
     return;
   }
   if (StartsWithIgnoreCase(url, "mailto:") || StartsWithIgnoreCase(url, "tel:") ||
@@ -743,6 +791,9 @@ void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure)
   }
   t->url = finalUrl;
   t->displayUrl = e.url;
+  KillTimer(hwnd_, kTimerScriptBase + t->id);
+  t->pendingScripts = 0;
+  t->jsNavPending = false;
   renderer_.ClearSvgCache();
   t->secure = secure;
   t->scrollX = t->scrollY = 0;
@@ -848,6 +899,31 @@ void Browser::OnFetched(FetchJob* job) {
   }
   Tab* t = TabById(job->tabId);
   if (!t || job->generation != t->generation) return;
+  if (job->kind == FetchJob::kScript) {
+    const FetchResponse& r = job->response;
+    bool ok = r.ok && r.status < 400;
+    std::string cs = r.Charset();
+    t->page->ProvideScript(job->request.url, ok ? ConvertToUtf8(r.body, cs.empty() ? "utf-8" : cs) : std::string(), ok);
+    if (t->pendingScripts > 0) --t->pendingScripts;
+    PumpScripts(t);
+    FinishLoadingIfDone(t);
+    return;
+  }
+  if (job->kind == FetchJob::kScriptRequest) {
+    ScriptEngine* js = t->page->script();
+    if (!js) return;
+    const FetchResponse& r = job->response;
+    std::vector<std::pair<std::string, std::string> > hdrs;
+    for (size_t i = 0; i < r.headers.size(); ++i)
+      hdrs.push_back(std::make_pair(AsciiLower(r.headers[i].first), r.headers[i].second));
+    std::string cs = r.Charset();
+    BeginScript();
+    js->DeliverResponse(job->scriptRequestId, r.status, r.ok ? "OK" : "",
+                        ConvertToUtf8(r.body, cs.empty() ? "utf-8" : cs), hdrs,
+                        r.finalUrl.empty() ? job->request.url : r.finalUrl, !r.ok);
+    EndScript(t);
+    return;
+  }
   if (job->kind == FetchJob::kDocument) {
     OnDocument(t, job);
     return;
@@ -942,6 +1018,7 @@ void Browser::OnDocument(Tab* t, FetchJob* job) {
   t->status = "Lade Stylesheets ...";
   t->pendingSheets = 0;
   RequestStylesheets(t);
+  PumpScripts(t);  // starts fetching external scripts in parallel
   if (t->pendingSheets > 0) {
     // Render anyway if stylesheets take too long.
     SetTimer(hwnd_, kTimerStyleFallbackBase + t->id, 3000, 0);
@@ -1006,6 +1083,7 @@ void Browser::RenderTab(Tab* t, bool restyle) {
     InvalidateRect(view_, 0, FALSE);
     UpdateUi();
   }
+  if (first) PumpScripts(t);
 }
 
 void Browser::RequestImages(Tab* t) {
@@ -1054,7 +1132,8 @@ void Browser::RequestFonts(Tab* t) {
 }
 
 void Browser::FinishLoadingIfDone(Tab* t) {
-  if (t->pendingSheets <= 0 && t->pendingImages <= 0 && t->rendered && t->loading) {
+  if (t->pendingSheets <= 0 && t->pendingImages <= 0 && t->pendingScripts <= 0 && t->rendered &&
+      t->loading) {
     t->loading = false;
     t->status = "Fertig";
     UpdateTabLabel(t);
@@ -1071,6 +1150,8 @@ void Browser::ScheduleRelayout() {
 }
 
 void Browser::SubmitForm(Tab* t, Node* form, Node* submitter, bool newTab) {
+  if (!form) return;
+  if (!DispatchJs(t, form, "submit")) return;
   FormSubmission sub;
   if (!t->page->BuildFormSubmission(form, submitter, sub)) return;
   std::string target = AsciiLower(form->Attr("target"));
@@ -1249,12 +1330,17 @@ void Browser::ToggleControl(Node* n) {
   n->checkedSet = true;
   current_->page->Repaint();
   InvalidateRect(view_, 0, FALSE);
+  DispatchJs(current_, n, "input");
+  DispatchJs(current_, n, "change");
 }
 
 void Browser::OnClick(int x, int y, bool newTab) {
   Tab* t = current_;
   Node* n = NodeAt(x, y);
   if (!n) return;
+  // Scripts see the click first and may cancel the default action.
+  if (!DispatchJs(t, n, "click")) return;
+  bool scripted = t->page->script() != 0;
   // Form controls.
   for (Node* p = n; p; p = p->parent) {
     if (!p->IsElement()) continue;
@@ -1282,6 +1368,8 @@ void Browser::OnClick(int x, int y, bool newTab) {
           t->page->Repaint();
           InvalidateRect(view_, 0, FALSE);
         }
+      } else if (type == "button" && scripted) {
+        // Handled by the page's click listeners.
       } else if (type == "button" || type == "file" || type == "range" || type == "color") {
         SetStatus("Diese Funktion ben\xC3\xB6tigt JavaScript bzw. wird nicht unterst\xC3\xBCtzt.");
       } else {
@@ -1308,6 +1396,7 @@ void Browser::OnClick(int x, int y, bool newTab) {
       }
       // Buttons inside links behave like the link.
       if (!Page::LinkFor(p)) {
+        if (scripted) return;
         SetStatus("Diese Schaltfl\xC3\xA4" "che ben\xC3\xB6tigt JavaScript.");
         return;
       }
@@ -1443,9 +1532,12 @@ void Browser::CommitEdit(bool submit) {
   Node* n = editNode_;
   editCtl_ = 0;
   editNode_ = 0;
+  bool changed = false;
   if (n && current_) {
     std::string v = Narrow(WindowTextW(ctl));
     if (n->tag == "textarea") v = ReplaceAll(v, "\r\n", "\n");
+    std::string old = n->formValueSet ? n->formValue : (n->tag == "textarea" ? n->TextContent() : n->Attr("value"));
+    changed = v != old;
     n->formValue = v;
     n->formValueSet = true;
   }
@@ -1453,6 +1545,10 @@ void Browser::CommitEdit(bool submit) {
   if (!current_) return;
   current_->page->Repaint();
   InvalidateRect(view_, 0, FALSE);
+  if (changed) {
+    DispatchJs(current_, n, "input");
+    DispatchJs(current_, n, "change");
+  }
   if (submit && n) {
     Node* form = Page::FormFor(n);
     if (form) SubmitForm(current_, form, Page::DefaultSubmitButton(form), false);
@@ -1486,9 +1582,14 @@ void Browser::ShowSelectPopup(Node* sel) {
   int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, hwnd_, 0);
   DestroyMenu(menu);
   if (cmd >= ID_SELECT_BASE && cmd < ID_SELECT_BASE + (int)opts.size()) {
+    bool changed = sel->selectedIndex != cmd - ID_SELECT_BASE;
     sel->selectedIndex = cmd - ID_SELECT_BASE;
     current_->page->Repaint();
     InvalidateRect(view_, 0, FALSE);
+    if (changed) {
+      DispatchJs(current_, sel, "input");
+      DispatchJs(current_, sel, "change");
+    }
   }
 }
 
@@ -1820,12 +1921,18 @@ void Browser::OnCommand(int id) {
       if (DialogBoxParamW(App::Get().instance, MAKEINTRESOURCEW(IDD_SETTINGS), hwnd_, SettingsProc, 0) == IDOK) {
         App::Get().ApplyNetworkSettings();
         App::Get().SaveSettings();
+        // Takes effect for the next page loaded in each tab.
+        for (size_t i = 0; i < tabList_.size(); ++i)
+          tabList_[i]->page->SetScripting(&tabList_[i]->jsHost, App::Get().settings.javaScript);
       }
       break;
     case ID_TOOLS_CLEARCOOKIES:
       Network::Get().cookies().Clear();
       App::Get().SaveCookies();
       SetStatus("Alle Cookies wurden gel\xC3\xB6scht.");
+      break;
+    case ID_VIEW_CONSOLE:
+      ShowConsole();
       break;
     case ID_HELP_ABOUT:
       if (t) NewTab("about:kite", true);
@@ -1949,6 +2056,23 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       break;
     case WM_TIMER: {
       UINT_PTR id = w;
+      if (id >= kTimerScriptBase) {
+        KillTimer(hwnd_, id);
+        Tab* t = TabById((int)(id - kTimerScriptBase));
+        if (!t || !t->page->script()) return 0;
+        if (scriptDepth_ > 0) {
+          SetTimer(hwnd_, id, 50, 0);  // a dialog of a running script is open
+          return 0;
+        }
+        BeginScript();
+        t->page->script()->RunDueTimers();
+        EndScript(t);
+        return 0;
+      }
+      if (scriptDepth_ > 0 && (id == kTimerRelayout || id == kTimerResize)) {
+        SetTimer(hwnd_, id, 100, 0);
+        return 0;
+      }
       if (id == kTimerRelayout) {
         KillTimer(hwnd_, kTimerRelayout);
         relayoutPending_ = false;
@@ -1958,7 +2082,14 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         }
       } else if (id == kTimerResize) {
         KillTimer(hwnd_, kTimerResize);
-        if (current_ && current_->rendered) RenderTab(current_, true);
+        if (current_ && current_->rendered) {
+          RenderTab(current_, true);
+          if (current_->page->script()) {
+            BeginScript();
+            current_->page->script()->DispatchWindowEvent("resize");
+            EndScript(current_);
+          }
+        }
         for (size_t i = 0; i < tabList_.size(); ++i)
           if (tabList_[i] != current_) tabList_[i]->needsRelayout = true;
       } else if (id >= kTimerStyleFallbackBase && id < kTimerRefreshBase) {
@@ -1978,8 +2109,30 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       return 0;
     }
     case WM_KITE_FETCHED:
+      if (scriptDepth_ > 0) {
+        // A script dialog is open: handle the result once the script returned.
+        deferredJobs_.push_back((FetchJob*)l);
+        return 0;
+      }
       OnFetched((FetchJob*)l);
       return 0;
+    case WM_KITE_JSNAV: {
+      Tab* t = TabById((int)w);
+      if (!t || !t->jsNavPending || scriptDepth_ > 0) return 0;
+      t->jsNavPending = false;
+      if (t->jsNavIsForm) {
+        FormSubmission sub = t->jsNavForm;
+        Navigate(t, sub.url, t->url, &sub);
+      } else if (t->jsNavReplace && (StartsWith(t->jsNavUrl, "http:") || StartsWith(t->jsNavUrl, "https:"))) {
+        PendingNav nav;
+        nav.url = t->jsNavUrl;
+        nav.replace = true;
+        StartLoad(t, nav, t->url);
+      } else {
+        Navigate(t, t->jsNavUrl, t->url);
+      }
+      return 0;
+    }
     case WM_APP + 2:
       // Inline editor lost focus.
       if (editCtl_ && (HWND)l == editCtl_ && GetFocus() != editCtl_) CommitEdit(false);
@@ -2044,6 +2197,270 @@ LRESULT CALLBACK Browser::FindEditProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   return r;
 }
 
+// ---------------------------------------------------------------------------
+// JavaScript
+
+std::string TabScriptHost::GetCookies(const std::string& url) {
+  Url u = Url::Parse(url);
+  return u.valid() ? Network::Get().cookies().CookieHeader(u) : std::string();
+}
+
+void TabScriptHost::SetCookie(const std::string& url, const std::string& cookie) {
+  Url u = Url::Parse(url);
+  if (u.valid()) Network::Get().cookies().SetFromHeader(u, cookie);
+}
+
+void TabScriptHost::Alert(const std::string& message) {
+  MessageBoxW(g_browser->hwnd_, Widen(message).c_str(), L"Meldung der Webseite",
+              MB_OK | MB_ICONINFORMATION);
+}
+
+bool TabScriptHost::Confirm(const std::string& message) {
+  return MessageBoxW(g_browser->hwnd_, Widen(message).c_str(), L"Best\x00e4tigung",
+                     MB_OKCANCEL | MB_ICONQUESTION) == IDOK;
+}
+
+struct PromptData {
+  std::wstring message, value;
+};
+
+INT_PTR CALLBACK Browser::PromptProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  switch (m) {
+    case WM_INITDIALOG: {
+      SetWindowLongPtrW(h, DWLP_USER, l);
+      PromptData* d = (PromptData*)l;
+      SetDlgItemTextW(h, IDC_PROMPT_TEXT, d->message.c_str());
+      SetDlgItemTextW(h, IDC_PROMPT_EDIT, d->value.c_str());
+      SendDlgItemMessageW(h, IDC_PROMPT_EDIT, EM_SETSEL, 0, -1);
+      SetFocus(GetDlgItem(h, IDC_PROMPT_EDIT));
+      return FALSE;
+    }
+    case WM_COMMAND:
+      if (LOWORD(w) == IDOK) {
+        PromptData* d = (PromptData*)GetWindowLongPtrW(h, DWLP_USER);
+        d->value = WindowTextW(GetDlgItem(h, IDC_PROMPT_EDIT));
+        EndDialog(h, IDOK);
+        return TRUE;
+      }
+      if (LOWORD(w) == IDCANCEL) {
+        EndDialog(h, IDCANCEL);
+        return TRUE;
+      }
+      break;
+  }
+  return FALSE;
+}
+
+std::string TabScriptHost::Prompt(const std::string& message, const std::string& def) {
+  PromptData d;
+  d.message = Widen(message);
+  d.value = Widen(def);
+  if (DialogBoxParamW(App::Get().instance, MAKEINTRESOURCEW(IDD_PROMPT), g_browser->hwnd_,
+                      Browser::PromptProc, (LPARAM)&d) != IDOK)
+    return std::string("\x01");  // cancelled (the bindings map this to null)
+  return Narrow(d.value);
+}
+
+void TabScriptHost::Navigate(const std::string& url, bool replace) {
+  Tab* t = g_browser->TabById(tabId);
+  if (!t) return;
+  Url u = t->page->ResolveUrl(url);
+  if (!u.valid()) return;
+  t->jsNavPending = true;
+  t->jsNavIsForm = false;
+  t->jsNavReplace = replace;
+  t->jsNavUrl = u.Spec();
+  PostMessageW(g_browser->hwnd_, WM_KITE_JSNAV, tabId, 0);
+}
+
+void TabScriptHost::SetTitle(const std::string& title) {
+  Tab* t = g_browser->TabById(tabId);
+  if (!t) return;
+  t->title = title;
+  g_browser->UpdateTabLabel(t);
+  if (t == g_browser->current_) g_browser->UpdateUi();
+}
+
+void TabScriptHost::ScrollTo(float x, float y) {
+  Tab* t = g_browser->TabById(tabId);
+  if (!t) return;
+  float z = g_browser->ZoomF();
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (t == g_browser->current_) {
+    g_browser->ScrollTo(x * z, y * z);
+  } else {
+    t->scrollX = x * z;
+    t->scrollY = y * z;
+  }
+}
+
+void TabScriptHost::GetScroll(float& x, float& y) {
+  Tab* t = g_browser->TabById(tabId);
+  float z = g_browser->ZoomF();
+  x = t ? t->scrollX / z : 0;
+  y = t ? t->scrollY / z : 0;
+}
+
+void Browser::EndScript(Tab* t) {
+  if (--scriptDepth_ > 0) return;
+  if (t && TabIndex(t) >= 0) AfterScript(t);
+  // Network results that arrived while a script dialog was open.
+  std::vector<FetchJob*> jobs;
+  jobs.swap(deferredJobs_);
+  for (size_t i = 0; i < jobs.size(); ++i) PostMessageW(hwnd_, WM_KITE_FETCHED, 0, (LPARAM)jobs[i]);
+}
+
+void Browser::AfterScript(Tab* t) {
+  Page* page = t->page.get();
+  ScriptEngine* js = page->script();
+  if (!js) return;
+  // Scripts inserted by scripts.
+  for (int round = 0; round < 8; ++round) {
+    std::vector<std::string> urls = page->PendingScripts();
+    for (size_t i = 0; i < urls.size(); ++i) {
+      FetchJob* job = new FetchJob;
+      job->kind = FetchJob::kScript;
+      job->tabId = t->id;
+      job->generation = t->generation;
+      job->notify = hwnd_;
+      job->request.url = urls[i];
+      job->request.cancel = t->cancel;
+      job->request.referrer = t->url;
+      job->request.accept = "*/*";
+      ++t->pendingScripts;
+      StartFetch(job);
+    }
+    if (!t->rendered) break;
+    ++scriptDepth_;
+    bool ran = page->RunScripts();
+    --scriptDepth_;
+    if (!ran) break;
+  }
+  // fetch() / XMLHttpRequest.
+  std::vector<ScriptRequest> reqs = js->TakeRequests();
+  for (size_t i = 0; i < reqs.size(); ++i) {
+    const ScriptRequest& r = reqs[i];
+    FetchJob* job = new FetchJob;
+    job->kind = FetchJob::kScriptRequest;
+    job->tabId = t->id;
+    job->generation = t->generation;
+    job->notify = hwnd_;
+    job->scriptRequestId = r.id;
+    job->request.url = r.url;
+    job->request.method = r.method.empty() ? "GET" : r.method;
+    job->request.body = r.body;
+    job->request.cancel = t->cancel;
+    job->request.referrer = t->url;
+    job->request.accept = "*/*";
+    for (size_t k = 0; k < r.headers.size(); ++k) {
+      std::string name = AsciiLower(r.headers[k].first);
+      if (name == "content-type") job->request.contentType = r.headers[k].second;
+      else if (name == "accept") job->request.accept = r.headers[k].second;
+    }
+    StartFetch(job);
+  }
+  // form.submit() from a script.
+  FormSubmission sub;
+  if (page->TakeFormSubmission(sub)) {
+    t->jsNavPending = true;
+    t->jsNavIsForm = true;
+    t->jsNavForm = sub;
+    PostMessageW(hwnd_, WM_KITE_JSNAV, t->id, 0);
+  }
+  // DOM changes: restyle and relayout.
+  if (js->TakeDirty() && t->rendered) {
+    page->ScriptMutated();
+    std::string title = page->Title();
+    if (!title.empty()) t->title = title;
+    RequestImages(t);
+    RequestFonts(t);
+    UpdateTabLabel(t);
+    if (t == current_) {
+      if (editCtl_ && editNode_ && !editNode_->layoutBox) CommitEdit(false);
+      UpdateScrollBars();
+      InvalidateRect(view_, 0, FALSE);
+    }
+  }
+  ScheduleScriptTimer(t);
+}
+
+void Browser::ScheduleScriptTimer(Tab* t) {
+  ScriptEngine* js = t->page->script();
+  int delay = js ? js->NextTimerDelay() : -1;
+  if (delay < 0) {
+    KillTimer(hwnd_, kTimerScriptBase + t->id);
+    return;
+  }
+  // Background tabs are throttled like in other browsers.
+  int minDelay = t == current_ ? 10 : 1000;
+  SetTimer(hwnd_, kTimerScriptBase + t->id, std::max(delay, minDelay), 0);
+}
+
+void Browser::PumpScripts(Tab* t) {
+  if (!t->page->script()) return;
+  if (scriptDepth_ > 0) return;
+  BeginScript();
+  EndScript(t);  // fetches pending scripts and runs the ready ones
+}
+
+bool Browser::DispatchJs(Tab* t, Node* target, const char* type) {
+  if (!t || !target) return true;
+  ScriptEngine* js = t->page->script();
+  if (!js) return true;
+  while (target && !target->IsElement()) target = target->parent;
+  if (!target) return true;
+  BeginScript();
+  bool ok = js->DispatchEvent(target, type);
+  EndScript(t);
+  return ok;
+}
+
+void Browser::RunJavaScriptUrl(Tab* t, const std::string& url) {
+  ScriptEngine* js = t->page->script();
+  if (!js) {
+    SetStatus("JavaScript ist in den Einstellungen deaktiviert.");
+    return;
+  }
+  std::string code = PercentDecode(url.substr(11), false);
+  BeginScript();
+  js->Execute(code, "javascript:", 0);
+  EndScript(t);
+}
+
+void Browser::ShowConsole() {
+  Tab* src = current_;
+  if (!src) return;
+  ScriptEngine* js = src->page->script();
+  std::string html =
+      "<!DOCTYPE html><html><head><title>JavaScript-Konsole</title><style>"
+      "body{font-family:Tahoma,sans-serif;font-size:13px;margin:12px}"
+      "h1{font-size:18px;margin:0 0 4px}p.u{color:#666;margin:0 0 12px}"
+      "pre{font-family:'Lucida Console',monospace;font-size:12px;margin:0;padding:4px 6px;"
+      "border-bottom:1px solid #e4e4e4;white-space:pre-wrap}pre.e{color:#b00020;background:#fff0f0}"
+      "</style></head><body><h1>JavaScript-Konsole</h1><p class=u>" +
+      HtmlEscape(src->url) + "</p>";
+  if (!App::Get().settings.javaScript) {
+    html += "<p>JavaScript ist in den Einstellungen deaktiviert.</p>";
+  } else if (!js) {
+    html += "<p>Auf dieser Seite l\xC3\xA4uft kein JavaScript.</p>";
+  } else if (js->console().empty()) {
+    html += "<p>Keine Meldungen.</p>";
+  } else {
+    for (size_t i = 0; i < js->console().size(); ++i) {
+      const std::string& line = js->console()[i];
+      bool err = StartsWith(line, "Fehler") || StartsWith(line, "[error]");
+      html += std::string("<pre") + (err ? " class=e" : "") + ">" + HtmlEscape(line) + "</pre>";
+    }
+  }
+  html += "</body></html>";
+  Tab* t = NewTab("about:blank", true);
+  PendingNav nav;
+  nav.url = "about:console";
+  nav.replace = true;
+  LoadInternal(t, html, "about:console", nav);
+}
+
 INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   Settings& s = App::Get().settings;
   switch (m) {
@@ -2054,6 +2471,7 @@ INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       SetDlgItemInt(h, IDC_SET_PROXYPORT, s.proxyPort, FALSE);
       SetDlgItemInt(h, IDC_SET_ZOOM, s.defaultZoom, FALSE);
       CheckDlgButton(h, IDC_SET_IMAGES, s.loadImages ? BST_CHECKED : BST_UNCHECKED);
+      CheckDlgButton(h, IDC_SET_JS, s.javaScript ? BST_CHECKED : BST_UNCHECKED);
       SetDlgItemTextW(h, IDC_SET_COOKIEINFO,
                       Widen("Gespeicherte Cookies: " + IntToString((long long)Network::Get().cookies().Count())).c_str());
       return TRUE;
@@ -2076,6 +2494,7 @@ INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           int z = (int)GetDlgItemInt(h, IDC_SET_ZOOM, 0, FALSE);
           if (z >= 30 && z <= 300) s.defaultZoom = z;
           s.loadImages = IsDlgButtonChecked(h, IDC_SET_IMAGES) == BST_CHECKED;
+          s.javaScript = IsDlgButtonChecked(h, IDC_SET_JS) == BST_CHECKED;
           if (s.homePage.empty()) s.homePage = "about:home";
           EndDialog(h, IDOK);
           return TRUE;

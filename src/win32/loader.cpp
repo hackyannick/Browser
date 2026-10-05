@@ -58,7 +58,7 @@ void StartFetch(FetchJob* job) {
     Launch(job);
     return;
   }
-  if (job->kind == FetchJob::kStylesheet) g_queue.push_front(job);
+  if (job->kind == FetchJob::kStylesheet || job->kind == FetchJob::kScript) g_queue.push_front(job);
   else g_queue.push_back(job);
 }
 
