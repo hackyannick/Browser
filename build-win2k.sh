@@ -1,0 +1,15 @@
+#!/bin/sh
+# Cross-compiles Kite for Windows 2000 (32-bit) with MinGW-w64 and packages
+# kite.exe together with the root certificates into dist/.
+# Requires: cmake, i686-w64-mingw32-g++ (Debian/Ubuntu: g++-mingw-w64-i686).
+set -e
+cd "$(dirname "$0")"
+cmake -S . -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-i686.cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build build-win -j"$(nproc 2>/dev/null || echo 2)"
+i686-w64-mingw32-strip build-win/kite.exe
+sh tools/check-win2k-imports.sh build-win/kite.exe
+rm -rf dist && mkdir -p dist/Kite
+cp build-win/kite.exe resources/cacert.pem dist/Kite/
+cp README.md dist/Kite/LIESMICH.md
+cp third_party/bearssl/LICENSE.txt dist/Kite/LICENSE-BearSSL.txt
+echo "Fertig: dist/Kite/kite.exe"

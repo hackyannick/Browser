@@ -336,7 +336,11 @@ std::string FixupUserInput(const std::string& rawText, const std::string& search
                          StartsWithIgnoreCase(hostPart, "localhost");
     if (looksLikeHost && hostPart.size() > 0 && hostPart[0] != '.' &&
         hostPart[hostPart.size() - 1] != '.') {
-      return "http://" + text;
+      // Like current browsers, prefer HTTPS for typed addresses (localhost
+      // and plain IP addresses keep HTTP).
+      bool local = StartsWithIgnoreCase(hostPart, "localhost") ||
+                   hostPart.find_first_not_of("0123456789.:") == std::string::npos;
+      return (local ? "http://" : "https://") + text;
     }
   }
   return searchPrefix + PercentEncodeForm(text);

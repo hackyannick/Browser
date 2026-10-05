@@ -100,7 +100,8 @@ void TestUrl() {
   CHECK_EQ(Url::Parse("http://h:8080/").HostPort(), "h:8080");
   CHECK(!Url::Parse("not a url").valid());
   CHECK_EQ(Url::Parse("data:text/plain,hi").scheme(), "data");
-  CHECK_EQ(FixupUserInput("example.com", "S?q="), "http://example.com");
+  CHECK_EQ(FixupUserInput("example.com", "S?q="), "https://example.com");
+  CHECK_EQ(FixupUserInput("localhost:8080/x", "S?q="), "http://localhost:8080/x");
   CHECK_EQ(FixupUserInput("windows 2000", "S?q="), "S?q=windows+2000");
   CHECK_EQ(FixupUserInput("https://x.y/z", "S?q="), "https://x.y/z");
 }
