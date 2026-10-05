@@ -100,6 +100,7 @@ void Painter::Paint(LayoutBox* root, float viewportW, float viewportH, DisplayLi
 
 void Painter::PaintBackground(const ComputedStyle* s, const Rect& border, const Rect& padding,
                               float alpha) {
+  if (s->backgroundClipText) return;  // gradient text: draw the text only
   FillRect(border, s->backgroundColor, alpha);
   if (s->backgroundImage.empty() || !images_) return;
   int iw = 0, ih = 0;
@@ -344,6 +345,8 @@ void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
       it.tileH = th;
       it.alpha = alpha;
       out_->items.push_back(it);
+    } else if (st == ImageProvider::kUnsupported || st == ImageProvider::kLoading) {
+      // Nothing to draw (yet).
     } else if (tag == "video") {
       FillRect(content, Color(32, 32, 32), alpha);
       Text(content.x + content.w / 2 - 8, content.y + content.h / 2 + 6, "\xE2\x96\xB6", s,
@@ -561,6 +564,9 @@ void Painter::PaintPositioned(LayoutBox* b, float ax, float ay, float alpha, boo
 void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
   const ComputedStyle* s = b->style;
   alpha *= s->opacity;
+  if (s->clippedAway) return;
+  // Heavy blur (glow effects) cannot be rendered: show only a faint tint.
+  if (s->blur >= 8) alpha *= std::max(0.08f, 1.0f - s->blur / 40.0f) * 0.4f;
   if (alpha < 0.02f) return;
   float ax = px + b->x + b->relX, ay = py + b->y + b->relY;
   Rect r(ax, ay, b->w, b->h);

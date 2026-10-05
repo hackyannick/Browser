@@ -253,6 +253,24 @@ int main(int argc, char** argv) {
              s->flexBasis.pct, s->fontFamily.c_str(), s->fontSize);
     }
   }
+  {
+    // Report items that stick out to the right of the viewport.
+    const DisplayList& d = page.display();
+    int reported = 0;
+    std::vector<Rect> clips;
+    for (size_t i = 0; i < d.items.size() && reported < 15; ++i) {
+      const DisplayItem& it = d.items[i];
+      if (it.type == DisplayItem::kPushClip) { clips.push_back(it.rect); continue; }
+      if (it.type == DisplayItem::kPopClip) { if (!clips.empty()) clips.pop_back(); continue; }
+      Rect r = it.rect;
+      for (size_t c = 0; c < clips.size(); ++c) r = r.intersect(clips[c]);
+      if (r.w > 0 && r.right() > width + 1) {
+        fprintf(stderr, "overflow: type=%d x=%.0f w=%.0f right=%.0f text=%s\n", it.type, r.x, r.w, r.right(),
+                it.text.substr(0, 40).c_str());
+        ++reported;
+      }
+    }
+  }
   if (dl) {
     const DisplayList& d = page.display();
     for (size_t i = 0; i < d.items.size(); ++i) {

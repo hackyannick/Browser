@@ -347,6 +347,9 @@ void CopyProperty(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropGridColumnStart: d.gridColumnStart = s.gridColumnStart; d.gridColumnSpan = s.gridColumnSpan; break;
     case kPropGridColumnEnd: d.gridColumnEnd = s.gridColumnEnd; break;
     case kPropContent: d.content = s.content; d.hasContent = s.hasContent; break;
+    case kPropFilter: d.blur = s.blur; break;
+    case kPropClip: case kPropClipPath: d.clippedAway = s.clippedAway; break;
+    case kPropBackgroundClip: d.backgroundClipText = s.backgroundClipText; break;
     default: break;
   }
 }
@@ -433,7 +436,7 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
     if (un == "flex" || un == "flex-direction" || un == "flex-wrap" || un == "flex-flow" ||
         un == "flex-grow" || un == "flex-shrink" || un == "flex-basis" ||
         un == "justify-content" || un == "align-items" || un == "align-self" ||
-        un == "box-sizing" || un == "order")
+        un == "box-sizing" || un == "order" || un == "background-clip")
       name = un;
     else
       return false;
@@ -830,11 +833,10 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       return;
     case kPropLineHeight: {
       if (v == "normal") { s.lineHeight = -1; s.lineHeightFactor = 0; return; }
-      size_t used;
-      double n = ParseDoublePrefix(v, used);
-      if (used == v.size() && used > 0) {
-        s.lineHeightFactor = (float)n;
-        s.lineHeight = (float)n * s.fontSize;
+      float n;
+      if (ParseNumber(v, n)) {
+        s.lineHeightFactor = n;
+        s.lineHeight = n * s.fontSize;
         return;
       }
       if (ParseLength(v, lc, len) && len.IsFixed()) {
@@ -1237,6 +1239,42 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       ParseGridLine(v, line, span);
       s.gridColumnEnd = line;
       s.gridColumnSpan = span;
+      return;
+    }
+    case kPropClip: {
+      s.clippedAway = false;
+      if (StartsWith(v, "rect(")) {
+        std::string inner = v.substr(5, v.find(')') - 5);
+        for (size_t i = 0; i < inner.size(); ++i)
+          if (inner[i] == ',') inner[i] = ' ';
+        std::vector<std::string> t = SplitWhitespace(inner);
+        if (t.size() == 4) {
+          Length a, b, c, d;
+          bool ok = ParseLength(t[0], lc, a) && ParseLength(t[1], lc, b) &&
+                    ParseLength(t[2], lc, c) && ParseLength(t[3], lc, d);
+          if (ok && a.IsFixed() && b.IsFixed() && c.IsFixed() && d.IsFixed() &&
+              (c.Resolve(0) <= a.Resolve(0) || b.Resolve(0) <= d.Resolve(0)))
+            s.clippedAway = true;
+        }
+      }
+      return;
+    }
+    case kPropBackgroundClip:
+      s.backgroundClipText = v == "text";
+      return;
+    case kPropClipPath:
+      s.clippedAway = v == "inset(50%)" || v == "inset(100%)" || StartsWith(v, "circle(0") ||
+                      v == "polygon(0 0,0 0,0 0)" || v == "polygon(0 0, 0 0, 0 0)";
+      return;
+    case kPropFilter: {
+      s.blur = 0;
+      size_t p = v.find("blur(");
+      if (p != std::string::npos) {
+        Length l;
+        size_t e = v.find(')', p);
+        if (e != std::string::npos && ParseLength(v.substr(p + 5, e - p - 5), lc, l) && l.IsFixed())
+          s.blur = l.Resolve(0);
+      }
       return;
     }
     case kPropContent: {

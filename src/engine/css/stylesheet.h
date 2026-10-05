@@ -37,7 +37,7 @@ struct CompoundSelector {
   std::vector<SimpleSelector> parts;
 };
 
-enum PseudoElement { kPseudoNone, kPseudoBefore, kPseudoAfter };
+enum PseudoElement { kPseudoNone, kPseudoBefore, kPseudoAfter, kPseudoUnsupported };
 
 struct ComplexSelector {
   // compounds[0] is the leftmost; combinators[i] joins compounds[i] and

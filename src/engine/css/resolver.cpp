@@ -199,7 +199,7 @@ bool MatchFrom(const ComplexSelector& sel, int idx, const Node* el, const Elemen
 }  // namespace
 
 bool MatchesSelector(const ComplexSelector& sel, const Node* el, const ElementState& st) {
-  if (sel.compounds.empty()) return false;
+  if (sel.compounds.empty() || sel.pseudo == kPseudoUnsupported) return false;
   return MatchFrom(sel, (int)sel.compounds.size() - 1, el, st);
 }
 
@@ -671,6 +671,7 @@ void StyleResolver::ResolveElement(Node* el, const ComputedStyle& parent,
   for (size_t i = 0; i < matched.size(); ++i) {
     const IndexedRule& ir = matched[i];
     std::vector<MatchedDecl>* target = &decls;
+    if (ir.selector->pseudo == kPseudoUnsupported) continue;
     if (ir.selector->pseudo == kPseudoBefore) target = &before;
     else if (ir.selector->pseudo == kPseudoAfter) target = &after;
     for (size_t k = 0; k < ir.rule->declarations.size(); ++k) {

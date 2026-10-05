@@ -31,7 +31,7 @@ void Page::LoadPlainText(const std::string& utf8, const std::string& url) {
   LoadHtml(html, url);
 }
 
-void Page::LoadImage(const std::string& url) {
+void Page::LoadImageDocument(const std::string& url) {
   std::string name = url.substr(url.rfind('/') + 1);
   std::string html = "<!DOCTYPE html><html><head><title>" + HtmlEscape(name) +
                      "</title></head><body style=\"margin:0;background:#808080;text-align:center\">"

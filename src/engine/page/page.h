@@ -32,7 +32,7 @@ class Page {
   // Loads a document. |url| is the final URL (after redirects).
   void LoadHtml(const std::string& utf8, const std::string& url);
   void LoadPlainText(const std::string& utf8, const std::string& url);
-  void LoadImage(const std::string& url);
+  void LoadImageDocument(const std::string& url);
 
   const std::string& url() const { return url_; }
   std::string Title() const;

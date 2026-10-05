@@ -44,7 +44,9 @@ class FontProvider {
 // Information about images (loaded asynchronously by the platform layer).
 class ImageProvider {
  public:
-  enum State { kUnknown, kLoading, kLoaded, kFailed };
+  // kUnsupported: a format Kite cannot decode (SVG); shown as empty space
+  // instead of alt text.
+  enum State { kUnknown, kLoading, kLoaded, kFailed, kUnsupported };
   virtual ~ImageProvider() {}
   virtual State GetImage(const std::string& url, int& width, int& height) = 0;
 };

@@ -55,6 +55,9 @@ ComputedStyle::ComputedStyle()
       backgroundPosY(Length::Px(0)),
       backgroundSizeMode(0),
       opacity(1),
+      blur(0),
+      clippedAway(false),
+      backgroundClipText(false),
       aspectRatio(0),
       objectFit(kFitFill),
       flexDirection(kFlexRow),
@@ -171,6 +174,9 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   backgroundSizeW = o.backgroundSizeW;
   backgroundSizeH = o.backgroundSizeH;
   opacity = o.opacity;
+  blur = o.blur;
+  clippedAway = o.clippedAway;
+  backgroundClipText = o.backgroundClipText;
   aspectRatio = o.aspectRatio;
   objectFit = o.objectFit;
   flexDirection = o.flexDirection;
@@ -519,6 +525,16 @@ bool ParseLength(const std::string& raw, const LengthContext& ctx, Length& out,
   out.px = cv.px;
   out.pct = cv.pct;
   if (!allowNegative && (out.px < 0 || out.pct < 0) && !(out.px > 0 || out.pct > 0)) return false;
+  return true;
+}
+
+bool ParseNumber(const std::string& raw, float& out) {
+  std::string v = AsciiLower(Trim(raw));
+  LengthContext ctx = {16, 16, 1000, 1000};
+  CalcParser p(v, ctx);
+  CalcValue cv;
+  if (!p.Parse(cv) || !cv.isNumber) return false;
+  out = cv.num;
   return true;
 }
 

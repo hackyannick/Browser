@@ -42,7 +42,8 @@ if(WIN32)
 
   file(GLOB KITE_WIN32_SOURCES ${CMAKE_SOURCE_DIR}/src/win32/*.cpp ${CMAKE_SOURCE_DIR}/src/win32/*.c)
   add_executable(kite WIN32 ${KITE_WIN32_SOURCES} ${CMAKE_SOURCE_DIR}/src/win32/kite.rc)
-  target_link_libraries(kite PRIVATE kite_engine comctl32 comdlg32 gdi32 user32 shell32 msimg32)
+  target_include_directories(kite PRIVATE ${CMAKE_SOURCE_DIR}/src)
+  target_link_libraries(kite PRIVATE kite_engine comctl32 comdlg32 gdi32 user32 shell32)
   if(MINGW)
     # Fully static runtime (no libstdc++/libgcc DLLs) and a PE header that
     # Windows 2000 accepts (OS/subsystem version 5.0).

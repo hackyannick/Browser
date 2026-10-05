@@ -12,7 +12,7 @@ summary, fieldset, dl, dd, dt, ol, ul, menu, dir, optgroup, frameset, frame { di
 head, link, meta, script, style, title, base, template, noembed, noframes,
 area, datalist, param, rp, [hidden], dialog:not([open]), input[type=hidden],
 embed[hidden], audio:not([controls]), track, source { display: none; }
-html { color: #000; background: #fff; font-family: serif; font-size: 16px; line-height: normal; }
+html { color: #000; font-family: serif; font-size: 16px; line-height: normal; }
 body { margin: 8px; }
 p, blockquote, figure, listing, plaintext, pre, xmp, dl { margin-top: 1em; margin-bottom: 1em; }
 blockquote, figure { margin-left: 40px; margin-right: 40px; }

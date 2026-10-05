@@ -96,7 +96,11 @@ namespace kite {
   X(GridTemplateColumns, "grid-template-columns", false)   \
   X(GridColumnStart, "grid-column-start", false)           \
   X(GridColumnEnd, "grid-column-end", false)               \
-  X(Content, "content", false)
+  X(Content, "content", false)                             \
+  X(Filter, "filter", false)                               \
+  X(Clip, "clip", false)                                   \
+  X(ClipPath, "clip-path", false)                          \
+  X(BackgroundClip, "background-clip", false)
 
 enum PropertyId {
 #define KITE_PROP_ENUM(id, name, inh) kProp##id,

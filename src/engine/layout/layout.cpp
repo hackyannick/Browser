@@ -989,8 +989,9 @@ float LayoutEngine::LayoutInlineContent(LayoutBox* b, FloatContext* fc, float bf
           }
           std::string word = box->text.substr(tk.start, tk.len);
           float ww = Measure(s, word);
+          bool splitAnywhere = wrap && s->breakAll && Utf8Length(word) > 1;
           // Wrap before the word if it does not fit.
-          if (wrap && hasContent && pen + ww > avail() + 0.01f) {
+          if (wrap && !splitAnywhere && hasContent && pen + ww > avail() + 0.01f) {
             // Do not break between a word and immediately preceding
             // non-space content (e.g. "foo<b>bar</b>"): find the last
             // break opportunity, which is a space item.
@@ -1051,7 +1052,7 @@ float LayoutEngine::LayoutInlineContent(LayoutBox* b, FloatContext* fc, float bf
           }
           // Break overly long words.
           if (wrap && (s->overflowWrap || s->breakAll) && pen + ww > avail() &&
-              Utf8Length(word) > 1 && !hasContent) {
+              Utf8Length(word) > 1 && (!hasContent || splitAnywhere)) {
             size_t pos = 0;
             while (pos < word.size()) {
               std::string chunk;
@@ -1062,10 +1063,14 @@ float LayoutEngine::LayoutInlineContent(LayoutBox* b, FloatContext* fc, float bf
                 Utf8Next(word, q);
                 std::string next = chunk + word.substr(p, q - p);
                 float nw = Measure(s, next);
-                if (pen + nw > avail() && !chunk.empty()) break;
+                if (pen + nw > avail() && (!chunk.empty() || hasContent)) break;
                 chunk = next;
                 cwid = nw;
                 p = q;
+              }
+              if (chunk.empty()) {  // nothing fits next to existing content
+                finishLine(false);
+                continue;
               }
               LineItem li;
               li.type = LineItem::kWord;
@@ -1207,6 +1212,13 @@ void LayoutEngine::InlineIntrinsic(LayoutBox* b, float& minW, float& maxW) {
             curLine += sw;
           } else {
             float w = Measure(s, box->text.substr(tk.start, tk.len));
+            if (s->breakAll && wrap) {
+              // Words may break anywhere: the minimum is about one glyph.
+              minW = std::max(minW, std::min(w, s->fontSize));
+              curWord = 0;
+              curLine += w;
+              continue;
+            }
             curWord += w;
             curLine += w;
             if (wrap && t + 1 < tokens.size() && tokens[t + 1].type == TextToken::kWord) {
@@ -1326,6 +1338,9 @@ void LayoutEngine::ComputeIntrinsic(LayoutBox* b, float& minW, float& maxW) {
       }
     }
     if (b->kind != LayoutBox::kReplaced) {
+      // Scroll containers can shrink below their content (it is clipped),
+      // so they do not force a minimum width on their ancestors.
+      if (s->overflowX != kOverflowVisible) mn = pb;
       mx = ClampWidth(b, mx, -1);
       mn = std::min(ClampWidth(b, mn, -1), mx);
     }
@@ -1357,7 +1372,7 @@ void LayoutEngine::ReplacedSize(LayoutBox* b, float cbW, float cbH, float& outW,
       iw = (float)w;
       ih = (float)h;
       ratio = true;
-    } else if (st == ImageProvider::kFailed || st == ImageProvider::kUnknown) {
+    } else if (st == ImageProvider::kFailed) {
       std::string alt = el->Attr("alt");
       if (!alt.empty()) {
         iw = Measure(s, alt) + 4;
@@ -1525,7 +1540,8 @@ void LayoutEngine::LayoutPositioned(LayoutBox* cb, LayoutBox* child) {
     }
   }
   float forcedH = -1;
-  if (s->height.IsAuto() && tSet && bSet && child->kind != LayoutBox::kReplaced) {
+  if (s->height.IsAuto() && tSet && bSet && child->kind != LayoutBox::kReplaced &&
+      s->aspectRatio <= 0) {
     forcedH = std::max(pbV, cbH - t - bt - child->margin.top - child->margin.bottom);
   }
   child->x = 0;

@@ -99,9 +99,56 @@ int TrustAnchorCount() {
   return (int)Store().anchors.size();
 }
 
+// X.509 validator wrapper that drops byte-identical duplicate certificates
+// from the server's chain before handing it to the strict BearSSL validator
+// (some servers send their leaf certificate twice).
+struct DedupX509 {
+  const br_x509_class* vtable;
+  const br_x509_class** inner;
+  std::vector<std::string> seen;
+  std::string current;
+};
+
+static void DedupStartChain(const br_x509_class** ctx, const char* serverName) {
+  DedupX509* d = (DedupX509*)ctx;
+  d->seen.clear();
+  (*d->inner)->start_chain(d->inner, serverName);
+}
+static void DedupStartCert(const br_x509_class** ctx, uint32_t length) {
+  DedupX509* d = (DedupX509*)ctx;
+  d->current.clear();
+  d->current.reserve(length);
+}
+static void DedupAppend(const br_x509_class** ctx, const unsigned char* buf, size_t len) {
+  DedupX509* d = (DedupX509*)ctx;
+  d->current.append((const char*)buf, len);
+}
+static void DedupEndCert(const br_x509_class** ctx) {
+  DedupX509* d = (DedupX509*)ctx;
+  for (size_t i = 0; i < d->seen.size(); ++i)
+    if (d->seen[i] == d->current) return;
+  d->seen.push_back(d->current);
+  (*d->inner)->start_cert(d->inner, (uint32_t)d->current.size());
+  (*d->inner)->append(d->inner, (const unsigned char*)d->current.data(), d->current.size());
+  (*d->inner)->end_cert(d->inner);
+}
+static unsigned DedupEndChain(const br_x509_class** ctx) {
+  DedupX509* d = (DedupX509*)ctx;
+  std::vector<std::string>().swap(d->seen);
+  return (*d->inner)->end_chain(d->inner);
+}
+static const br_x509_pkey* DedupGetPkey(const br_x509_class* const* ctx, unsigned* usages) {
+  const DedupX509* d = (const DedupX509*)ctx;
+  return (*d->inner)->get_pkey(d->inner, usages);
+}
+static const br_x509_class kDedupClass = {
+    sizeof(DedupX509), DedupStartChain, DedupStartCert, DedupAppend,
+    DedupEndCert,      DedupEndChain,   DedupGetPkey};
+
 struct TlsStream::Impl {
   br_ssl_client_context sc;
   br_x509_minimal_context xc;
+  DedupX509 dedup;
   br_sslio_context ioc;
   std::vector<unsigned char> iobuf;
 };
@@ -154,6 +201,9 @@ bool TlsStream::Handshake(const std::string& host) {
     count = st.anchors.size();
   }
   br_ssl_client_init_full(&impl_->sc, &impl_->xc, tas, count);
+  impl_->dedup.vtable = &kDedupClass;
+  impl_->dedup.inner = &impl_->xc.vtable;
+  br_ssl_engine_set_x509(&impl_->sc.eng, &impl_->dedup.vtable);
   br_ssl_engine_set_buffer(&impl_->sc.eng, &impl_->iobuf[0], impl_->iobuf.size(), 1);
   if (!br_ssl_client_reset(&impl_->sc, host.c_str(), 0)) {
     error_ = "TLS-Initialisierung fehlgeschlagen";

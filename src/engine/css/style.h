@@ -154,6 +154,9 @@ struct ComputedStyle {
   int backgroundSizeMode;  // 0 auto, 1 cover, 2 contain, 3 explicit
   Length backgroundSizeW, backgroundSizeH;
   float opacity;
+  float blur;
+  bool clippedAway;
+  bool backgroundClipText;  // clip: rect(0 0 0 0) / clip-path: inset(50%)  // filter: blur() radius in px (approximated)
   float aspectRatio;  // 0 = none
   ObjectFit objectFit;
 
@@ -209,6 +212,9 @@ struct LengthContext {
 // Parses a CSS length/percentage/calc() value. Returns false if invalid.
 bool ParseLength(const std::string& value, const LengthContext& ctx, Length& out,
                  bool allowNegative = true);
+// Parses a unitless number, also inside calc()/min()/max(). False if the
+// value has units.
+bool ParseNumber(const std::string& value, float& out);
 bool ParseColor(const std::string& value, Color& out, const Color& currentColor);
 // Returns the value of a url(...) token, or "" if none.
 std::string ExtractUrl(const std::string& value);

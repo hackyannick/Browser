@@ -286,12 +286,31 @@ class SelectorParser {
         std::string name;
         if (!ParseIdent(name)) return false;
         name = AsciiLower(name);
+        if (owner.pseudo == kPseudoUnsupported) {
+          if (p_ < s_.size() && s_[p_] == '(') {
+            size_t close = FindClose(p_);
+            if (close == std::string::npos) return false;
+            p_ = close + 1;
+          }
+          continue;
+        }
         if (owner.pseudo != kPseudoNone) return false;
         if (name == "before" || name == "after") {
           owner.pseudo = name == "before" ? kPseudoBefore : kPseudoAfter;
           continue;
         }
-        if (doubleColon) return false;  // unsupported pseudo-element
+        if (doubleColon || name == "first-line" || name == "first-letter") {
+          // Valid but unrendered pseudo-elements (::placeholder, ::marker,
+          // ::backdrop, ::selection, ::-webkit-* ...): the selector stays
+          // valid so that selector lists are kept, but never matches.
+          owner.pseudo = kPseudoUnsupported;
+          if (p_ < s_.size() && s_[p_] == '(') {
+            size_t close = FindClose(p_);
+            if (close == std::string::npos) return false;
+            p_ = close + 1;
+          }
+          continue;
+        }
         sel.kind = SimpleSelector::kPseudoClass;
         sel.name = name;
         if (p_ < s_.size() && s_[p_] == '(') {
@@ -359,7 +378,9 @@ class SelectorParser {
         "placeholder-shown", "target", "default", "indeterminate", "defined",
         "valid", "invalid", "in-range", "out-of-range", "scope", "autofill",
         "user-invalid", "user-valid", "open", "closed", "modal", "popover-open",
-        "fullscreen", "playing", "paused", 0};
+        "fullscreen", "playing", "paused", "host", "picture-in-picture", "muted",
+        "volume-locked", "buffering", "stalled", "seeking", "blank", "local-link",
+        "target-within", "any-link", 0};
     for (int i = 0; known[i]; ++i)
       if (n == known[i]) return true;
     return false;
@@ -947,8 +968,15 @@ bool EvaluateMediaQueryList(const std::string& query, const MediaContext& ctx) {
   std::string q = Trim(query);
   if (q.empty()) return true;
   std::vector<std::string> parts = SplitTopLevel(q, ',');
-  for (size_t i = 0; i < parts.size(); ++i)
-    if (EvaluateCondition(parts[i], ctx)) return true;
+  for (size_t i = 0; i < parts.size(); ++i) {
+    std::string part = Trim(parts[i]);
+    // "not" at the start of a media query negates the whole query.
+    if (StartsWithIgnoreCase(part, "not ")) {
+      if (!EvaluateCondition(part.substr(4), ctx)) return true;
+    } else if (EvaluateCondition(part, ctx)) {
+      return true;
+    }
+  }
   return false;
 }
 
