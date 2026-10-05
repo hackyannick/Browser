@@ -14,6 +14,7 @@
 
 #include "image/image.h"
 #include "layout/resources.h"
+#include "script/storage.h"
 #include "net/http.h"
 #include "paint/display_list.h"
 
@@ -51,6 +52,8 @@ class App {
 
   HINSTANCE instance;
   std::wstring dataDir;  // where kite.ini, cookies.txt, bookmarks.txt live
+  WebStorage localStorage;  // saved as storage.txt
+  void SaveStorage();
   Settings settings;
   std::vector<std::pair<std::string, std::string> > bookmarks;  // title, url
   std::vector<std::string> typedHistory;  // recently typed addresses

@@ -38,7 +38,7 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 | Animation | **CSS-Animationen** (`@keyframes`, alle `animation-*`-Eigenschaften, Timing-Funktionen inkl. `cubic-bezier()`/`steps()`) und **Transitions** für Deckkraft, Farben, Transformationen (auch Drehung und Skalierung), Schatten, Größen und Abstände; `animationend`/`transitionend`-Events |
 | Canvas | **`<canvas>` 2D** per Software-Rasterizer: Pfade, Bögen, Füllregeln, Linienstile und Strichelung, Transformationen, Clipping, lineare/radiale/konische Verläufe, Muster, Compositing-Modi, Schatten, Text, `drawImage`, `getImageData`/`putImageData`, `toDataURL`, `Path2D` |
 | Schriften | **Webfonts** (`@font-face`, TTF/OTF/WOFF/WOFF2) werden geladen und prozesslokal installiert |
-| JavaScript | **QuickJS** (ES2023) mit eigener DOM-Anbindung: `document`/`window`, Elemente, `querySelector`, `innerHTML`, `classList`, `style`, `dataset`, Events mit Bubbling und `preventDefault`, Timer, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `localStorage`, `URL`, `document.cookie`, `getBoundingClientRect`/`getComputedStyle`, `<noscript>` |
+| JavaScript | **QuickJS** (ES2023) mit eigener DOM-Anbindung: `document`/`window`, Elemente, `querySelector`, `innerHTML`, `classList`, `style`, `dataset`, Events mit Bubbling und `preventDefault`, Timer, `requestAnimationFrame`, `fetch`, `XMLHttpRequest`, `localStorage`/`sessionStorage` (dauerhaft gespeichert), **ES-Module** (`type=module`, Import-Maps, dynamisches `import()`), `MutationObserver`, History-API (`pushState`, `popstate`), `URL`, `document.cookie`, `getBoundingClientRect`/`getComputedStyle`, `<noscript>` |
 | Netzwerk | HTTP/1.1, **HTTP/2** (ALPN, Multiplexing über eine Verbindung pro Server, HPACK, Flusskontrolle), **TLS 1.2 (BearSSL)** mit Zertifikatsprüfung, gzip/deflate/Brotli, Weiterleitungen, Cookies, Proxy (CONNECT), `data:`- und `file:`-URLs |
 
 ![PyPI in Kite](docs/screenshots/pypi.png)
@@ -47,11 +47,9 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 
 ## Was (noch) nicht geht
 
-- JavaScript: ES-Module (`type=module`), Web Components/Shadow DOM, WebGL,
-  WebSockets, Web Workers und Medienwiedergabe fehlen. `MutationObserver` ist
-  nur ein Platzhalter, `localStorage` lebt nur bis zum Schließen des Tabs.
-  Große Single-Page-Anwendungen (React, Angular …) laufen daher oft nur
-  teilweise.
+- JavaScript: Web Components/Shadow DOM, WebGL, WebSockets, Web Workers und
+  Medienwiedergabe fehlen. Große Single-Page-Anwendungen (React, Angular …)
+  laufen daher oft nur teilweise.
 - 3D-Szenen werden ebenenweise nach Tiefe sortiert, sich durchdringende Flächen
   werden nicht geschnitten; HDR-Tonemapping für AVIF fehlt.
 - TLS 1.3 wird nicht unterstützt (BearSSL kann nur bis TLS 1.2; alle gängigen

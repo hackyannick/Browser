@@ -345,6 +345,9 @@ static inline JSValue __JS_NewShortBigInt(JSContext *ctx, int64_t d)
 /* allow top-level await in normal script. JS_Eval() returns a
    promise. Only allowed with JS_EVAL_TYPE_GLOBAL */
 #define JS_EVAL_FLAG_ASYNC (1 << 7)
+/* Kite: compile a module without resolving its imports (see
+   JS_GetModuleRequest(); resolve later with JS_ResolveModule()) */
+#define JS_EVAL_FLAG_NO_RESOLVE (1 << 8)
 
 typedef JSValue JSCFunction(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv);
 typedef JSValue JSCFunctionMagic(JSContext *ctx, JSValueConst this_val, int argc, JSValueConst *argv, int magic);
@@ -972,6 +975,10 @@ void JS_SetModuleLoaderFunc2(JSRuntime *rt,
 JSValue JS_GetImportMeta(JSContext *ctx, JSModuleDef *m);
 JSAtom JS_GetModuleName(JSContext *ctx, JSModuleDef *m);
 JSValue JS_GetModuleNamespace(JSContext *ctx, JSModuleDef *m);
+/* Kite: the module specifiers a module imports (static imports and
+   re-exports), as written in the source. */
+int JS_GetModuleRequestCount(JSModuleDef *m);
+JSAtom JS_GetModuleRequest(JSContext *ctx, JSModuleDef *m, int index);
 
 /* JS Job support */
 

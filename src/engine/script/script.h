@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "dom/node.h"
+#include "script/storage.h"
 
 namespace kite {
 class Canvas2D;
@@ -31,6 +32,18 @@ class ScriptHost {
   virtual void SetTitle(const std::string& title) = 0;
   virtual void ScrollTo(float x, float y) = 0;
   virtual void GetScroll(float& x, float& y) = 0;
+  // Blocking fetch, used for modules that could not be loaded ahead of
+  // time (dynamic import()). Returns false if unavailable.
+  virtual bool FetchSync(const std::string& url, std::string& body) { return false; }
+  // localStorage (shared, persistent) and this tab's sessionStorage. Null
+  // means "keep the data inside the script engine".
+  virtual WebStorage* Storage(bool session) { return 0; }
+  // history.pushState/replaceState (same origin, already checked): adds or
+  // replaces a session history entry for this document. |stateId| comes
+  // back through ScriptEngine::PopState when the user returns to it.
+  virtual bool PushState(const std::string& url, bool replace, int stateId) { return true; }
+  virtual int HistoryLength() { return 1; }
+  virtual void HistoryGo(int delta) {}
 };
 
 // A network request started by fetch()/XMLHttpRequest.
@@ -47,6 +60,9 @@ class ScriptEngine {
 
   // Runs a classic script. Errors go to the console log.
   void Execute(const std::string& source, const std::string& fileName, Node* scriptElement);
+  // Same-document history traversal (or fragment navigation): makes the
+  // entry's state current and fires popstate (and hashchange).
+  void PopState(int stateId, bool hashChanged, const std::string& oldUrl);
   // Fires DOMContentLoaded / load.
   void DispatchDocumentEvent(const char* type);
   void DispatchWindowEvent(const char* type);
@@ -63,6 +79,22 @@ class ScriptEngine {
   void DeliverResponse(int id, int status, const std::string& statusText, const std::string& body,
                        const std::vector<std::pair<std::string, std::string> >& headers,
                        const std::string& finalUrl, bool networkError);
+
+  // ES modules. Module scripts are compiled as their sources arrive; the
+  // URLs of their imports are queued for fetching (TakeModuleRequests,
+  // answered with ProvideModule). A module runs once its whole graph is
+  // compiled (ModuleGraphState: 0 pending, 1 ready, -1 failed).
+  void SetImportMap(const std::string& json, const std::string& baseUrl);
+  void AddModule(const std::string& url, const std::string& source);
+  std::vector<std::string> TakeModuleRequests();
+  bool ProvideModule(const std::string& url, const std::string& source, bool ok);
+  int ModuleGraphState(const std::string& url);
+  void RunModule(const std::string& url, Node* scriptElement);
+  std::string ResolveModuleSpecifier(const std::string& spec, const std::string& base);
+  // Called by the QuickJS module loader.
+  void* LoadModuleNow(const std::string& url);
+  void NoteRejection(void* promise, const std::string& message);
+  void ForgetRejection(void* promise);
 
   // Set when scripts changed the document or its styles.
   bool TakeDirty();
@@ -108,6 +140,22 @@ class ScriptEngine {
   void RunJobs();
   void ReportException();
   long long NowMs();
+
+  struct ModuleRec {
+    int state = 0;  // 0 fetching, 1 compiled, -1 failed
+    void* value = 0;  // JSValue* of the compiled module
+    std::string source;
+    std::vector<std::string> deps;
+  };
+  bool CompileModule(const std::string& url, const std::string& source);
+  std::map<std::string, ModuleRec> modules_;
+  std::vector<std::string> moduleRequests_;
+  std::vector<std::pair<std::string, std::string> > importMap_;  // specifier (prefix) -> URL
+  std::vector<std::pair<void*, std::string> > rejections_;  // unhandled so far
+ public:
+  WebStorage* StorageFor(bool session);
+ private:
+  WebStorage ownLocal_, ownSession_;
 
   struct Timer {
     int id;

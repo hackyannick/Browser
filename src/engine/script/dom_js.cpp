@@ -1239,12 +1239,13 @@ class URL {
     let s = String(url);
     if (base !== undefined && !/^[a-zA-Z][a-zA-Z0-9+.-]*:/.test(s)) {
       const b = new URL(String(base));
+      const pre = b._prefix();
       if (s.startsWith('//')) s = b.protocol + s;
-      else if (s.startsWith('/')) s = b.origin + s;
-      else if (s.startsWith('?')) s = b.origin + b.pathname + s;
-      else if (s.startsWith('#')) s = b.origin + b.pathname + b.search + s;
-      else if (s === '') s = b.origin + b.pathname + b.search;
-      else s = b.origin + b.pathname.replace(/[^\/]*$/, '') + s;
+      else if (s.startsWith('/')) s = pre + s;
+      else if (s.startsWith('?')) s = pre + b.pathname + s;
+      else if (s.startsWith('#')) s = pre + b.pathname + b.search + s;
+      else if (s === '') s = pre + b.pathname + b.search;
+      else s = pre + b.pathname.replace(/[^\/]*$/, '') + s;
     }
     const m = URL_RE.exec(s.trim());
     if (!m) throw new TypeError('Invalid URL: ' + s);
@@ -1273,11 +1274,12 @@ class URL {
   get host() { return this.hostname + (this.port ? ':' + this.port : ''); }
   set host(v) { const i = v.indexOf(':'); this.hostname = i < 0 ? v : v.slice(0, i); this.port = i < 0 ? '' : v.slice(i + 1); }
   get origin() { return this.hostname ? this.protocol + '//' + this.host : 'null'; }
-  get href() {
+  _prefix() {
     const auth = this.username ? this.username + (this.password ? ':' + this.password : '') + '@' : '';
     const slashes = this.hostname || this.protocol === 'file:' ? '//' : '';
-    return this.protocol + slashes + auth + this.host + this.pathname + this._search + this.hash;
+    return this.protocol + slashes + auth + this.host;
   }
+  get href() { return this._prefix() + this.pathname + this._search + this.hash; }
   set href(v) { Object.assign(this, new URL(v)); }
   toString() { return this.href; }
   toJSON() { return this.href; }
@@ -1320,14 +1322,62 @@ const location = {
   get ancestorOrigins() { return []; },
 };
 
+// Session history: states live here, the platform keeps the entries.
+const histStates = new Map();
+let histSeq = 0, histCur = 0;
+function histNav(state, url, replace) {
+  const target = url === undefined || url === null ? K.url() : new URL(String(url), K.url()).href;
+  let copy = null;
+  try { copy = state === undefined ? null : structuredClone(state); } catch (e) { copy = state; }
+  const id = ++histSeq;
+  if (!K.pushState(target, !!replace, id))
+    throw new DOMException("Failed to execute '" + (replace ? 'replaceState' : 'pushState') + "' on 'History': a history state object with URL '" + target + "' cannot be created in a document with origin '" + location.origin + "'.", 'SecurityError');
+  histStates.set(id, copy);
+  histCur = id;
+}
+const history = {
+  get length() { return K.histLen(); },
+  get state() { return histStates.has(histCur) ? histStates.get(histCur) : null; },
+  scrollRestoration: 'auto',
+  pushState(state, title, url) { histNav(state, url, false); },
+  replaceState(state, title, url) { histNav(state, url, true); },
+  back() { K.histGo(-1); },
+  forward() { K.histGo(1); },
+  go(n) { K.histGo(n | 0); },
+};
+class PopStateEvent extends Event { constructor(t, i) { super(t, i); this.state = i && 'state' in i ? i.state : null; } }
+class HashChangeEvent extends Event { constructor(t, i) { super(t, i); i = i || {}; this.oldURL = i.oldURL || ''; this.newURL = i.newURL || ''; } }
+G.__kitePopState = function (id, hashChanged, oldURL) {
+  histCur = id;
+  G.dispatchEvent(new PopStateEvent('popstate', { state: history.state }));
+  if (hashChanged) G.dispatchEvent(new HashChangeEvent('hashchange', { oldURL, newURL: K.url() }));
+};
+
 class Storage {
-  constructor() { Object.defineProperty(this, '_m', { value: new Map() }); }
-  get length() { return this._m.size; }
-  key(i) { return Array.from(this._m.keys())[i] || null; }
-  getItem(k) { k = String(k); return this._m.has(k) ? this._m.get(k) : null; }
-  setItem(k, v) { this._m.set(String(k), String(v)); }
-  removeItem(k) { this._m.delete(String(k)); }
-  clear() { this._m.clear(); }
+  constructor(session) {
+    Object.defineProperty(this, '_s', { value: !!session, configurable: true });
+    // Items are also reachable as properties (localStorage.foo).
+    return new Proxy(this, {
+      get(t, k, r) { if (typeof k !== 'string' || k in t) return Reflect.get(t, k, r); return t.getItem(k); },
+      set(t, k, v) { if (typeof k !== 'string' || k in t) return Reflect.set(t, k, v); t.setItem(k, v); return true; },
+      has(t, k) { return k in t || (typeof k === 'string' && t.getItem(k) !== null); },
+      deleteProperty(t, k) { if (typeof k === 'string' && !(k in t)) t.removeItem(k); return true; },
+      ownKeys(t) { return K.storage(4, t._s); },
+      getOwnPropertyDescriptor(t, k) {
+        const v = typeof k === 'string' ? t.getItem(k) : null;
+        return v === null ? undefined : { value: v, writable: true, enumerable: true, configurable: true };
+      },
+    });
+  }
+  get length() { return K.storage(4, this._s).length; }
+  key(i) { const k = K.storage(4, this._s)[i | 0]; return k === undefined ? null : k; }
+  getItem(k) { return K.storage(0, this._s, String(k)); }
+  setItem(k, v) {
+    if (!K.storage(1, this._s, String(k), String(v)))
+      throw new DOMException("Failed to execute 'setItem' on 'Storage': exceeded the quota.", 'QuotaExceededError');
+  }
+  removeItem(k) { K.storage(2, this._s, String(k)); }
+  clear() { K.storage(3, this._s); }
 }
 
 const consoleObj = {};
@@ -1591,7 +1641,128 @@ class MediaQueryList extends EventTarget {
   removeListener(fn) { this.removeEventListener('change', fn); }
 }
 
-class MutationObserver { constructor(cb) { this._cb = cb; } observe() {} disconnect() {} takeRecords() { return []; } }
+// MutationObserver: the DOM primitives report every change; records are
+// delivered in a microtask.
+const moRegs = new Map();  // node handle -> [{ obs, opts }]
+let moCount = 0;
+const moPending = new Set();
+function moDeliver() {
+  const list = Array.from(moPending);
+  moPending.clear();
+  for (const o of list) {
+    const recs = o._q;
+    o._q = [];
+    if (recs.length) { try { o._cb.call(o, recs, o); } catch (e) { reportError(e); } }
+  }
+}
+function moQueue(type, h, rec) {
+  const seen = new Set();
+  for (let n = h, first = true; n; n = K.parent(n), first = false) {
+    const regs = moRegs.get(n);
+    if (!regs) continue;
+    for (const r of regs) {
+      const o = r.opts;
+      if (!first && !o.subtree) continue;
+      if (type === 'childList' && !o.childList) continue;
+      if (type === 'attributes' && (!o.attributes || (o.attributeFilter && o.attributeFilter.indexOf(rec.attributeName) < 0))) continue;
+      if (type === 'characterData' && !o.characterData) continue;
+      if (seen.has(r.obs)) continue;
+      seen.add(r.obs);
+      const record = { type, target: W(h), addedNodes: nodeList([]), removedNodes: nodeList([]), previousSibling: null,
+        nextSibling: null, attributeName: null, attributeNamespace: null, oldValue: null };
+      Object.assign(record, rec);
+      if ((type === 'attributes' && !o.attributeOldValue) || (type === 'characterData' && !o.characterDataOldValue)) record.oldValue = null;
+      r.obs._q.push(record);
+      if (!moPending.size) Promise.resolve().then(moDeliver);
+      moPending.add(r.obs);
+    }
+  }
+}
+function siblingsOf(p, c) {
+  const kids = K.kids(p);
+  const i = kids.indexOf(c);
+  return [i > 0 ? W(kids[i - 1]) : null, i >= 0 && i + 1 < kids.length ? W(kids[i + 1]) : null];
+}
+{
+  const rawInsert = K.insert, rawRemove = K.remove, rawSetAttr = K.setAttr, rawDelAttr = K.delAttr, rawSetData = K.setData;
+  K.insert = function (p, c, before) {
+    if (!moCount) return rawInsert(p, c, before);
+    const added = K.type(c) === 11 ? K.kids(c) : [c];
+    const old = K.type(c) === 11 ? 0 : K.parent(c);
+    if (old) {
+      const [ps, ns] = siblingsOf(old, c);
+      moQueue('childList', old, { removedNodes: nodeList([W(c)]), previousSibling: ps, nextSibling: ns });
+    }
+    const r = rawInsert(p, c, before);
+    if (added.length) {
+      const [ps] = siblingsOf(p, added[0]);
+      const [, ns] = siblingsOf(p, added[added.length - 1]);
+      moQueue('childList', p, { addedNodes: nodeList(added.map(W)), previousSibling: ps, nextSibling: ns });
+    }
+    return r;
+  };
+  K.remove = function (c) {
+    const p = moCount ? K.parent(c) : 0;
+    if (!p) return rawRemove(c);
+    const [ps, ns] = siblingsOf(p, c);
+    const r = rawRemove(c);
+    moQueue('childList', p, { removedNodes: nodeList([W(c)]), previousSibling: ps, nextSibling: ns });
+    return r;
+  };
+  K.setAttr = function (h, n, v) {
+    if (!moCount) return rawSetAttr(h, n, v);
+    const old = K.attr(h, n);
+    const r = rawSetAttr(h, n, v);
+    moQueue('attributes', h, { attributeName: String(n).toLowerCase(), oldValue: old });
+    return r;
+  };
+  K.delAttr = function (h, n) {
+    if (!moCount) return rawDelAttr(h, n);
+    const old = K.attr(h, n);
+    const r = rawDelAttr(h, n);
+    if (old !== null) moQueue('attributes', h, { attributeName: String(n).toLowerCase(), oldValue: old });
+    return r;
+  };
+  K.setData = function (h, v) {
+    if (!moCount) return rawSetData(h, v);
+    const old = K.data(h);
+    const r = rawSetData(h, v);
+    moQueue('characterData', h, { oldValue: old });
+    return r;
+  };
+}
+class MutationObserver {
+  constructor(cb) {
+    if (typeof cb !== 'function') throw new TypeError('MutationObserver: callback is not a function');
+    this._cb = cb; this._q = []; this._targets = new Set();
+  }
+  observe(target, options) {
+    if (!target || !target._h) throw new TypeError("Failed to execute 'observe' on 'MutationObserver': parameter 1 is not a Node.");
+    const o = Object.assign({}, options || {});
+    if (o.attributeOldValue || o.attributeFilter) o.attributes = o.attributes !== false;
+    if (o.characterDataOldValue) o.characterData = o.characterData !== false;
+    if (!o.childList && !o.attributes && !o.characterData)
+      throw new TypeError("Failed to execute 'observe' on 'MutationObserver': no mutation type selected.");
+    if (o.attributeFilter) o.attributeFilter = Array.from(o.attributeFilter, x => String(x).toLowerCase());
+    let regs = moRegs.get(target._h);
+    if (!regs) { regs = []; moRegs.set(target._h, regs); }
+    const existing = regs.find(r => r.obs === this);
+    if (existing) existing.opts = o;
+    else { regs.push({ obs: this, opts: o }); moCount++; this._targets.add(target._h); }
+  }
+  disconnect() {
+    for (const h of this._targets) {
+      const regs = moRegs.get(h);
+      if (!regs) continue;
+      const left = regs.filter(r => r.obs !== this);
+      moCount -= regs.length - left.length;
+      if (left.length) moRegs.set(h, left); else moRegs.delete(h);
+    }
+    this._targets.clear();
+    this._q = [];
+  }
+  takeRecords() { const r = this._q; this._q = []; return r; }
+}
 class IntersectionObserver {
   constructor(cb, opts) { this._cb = cb; this._t = []; this.root = null; this.rootMargin = '0px'; this.thresholds = [0]; }
   observe(el) {
@@ -1651,9 +1822,9 @@ const navigator = {
 Object.assign(G, {
   window: G, self: G, top: G, parent: G, frames: G, globalThis: G, document: doc,
   location, navigator, console: consoleObj, performance,
-  history: { length: 1, state: null, scrollRestoration: 'auto', pushState(s) { this.state = s; }, replaceState(s) { this.state = s; }, back() {}, forward() {}, go() {} },
+  history, PopStateEvent, HashChangeEvent,
   screen: { width: 1024, height: 768, availWidth: 1024, availHeight: 740, colorDepth: 24, pixelDepth: 24, orientation: { type: 'landscape-primary', angle: 0, addEventListener() {} } },
-  localStorage: new Storage(), sessionStorage: new Storage(),
+  localStorage: new Storage(false), sessionStorage: new Storage(true),
   setTimeout: makeTimer(false), setInterval: makeTimer(true),
   clearTimeout: id => K.clearTimer(id | 0), clearInterval: id => K.clearTimer(id | 0),
   requestAnimationFrame: fn => K.timer(() => fn(performance.now()), 16, false),

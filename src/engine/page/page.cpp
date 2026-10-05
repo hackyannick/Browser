@@ -36,6 +36,12 @@ void Page::LoadHtml(const std::string& utf8, const std::string& url) {
   }
 }
 
+void Page::SetUrl(const std::string& url) {
+  // The base URL follows unless a <base> element set it.
+  if (baseUrl_.SpecNoFragment() == Url::Parse(url_).SpecNoFragment()) baseUrl_ = Url::Parse(url);
+  url_ = url;
+}
+
 void Page::LoadPlainText(const std::string& utf8, const std::string& url) {
   std::string html = "<!DOCTYPE html><html><head><title>" + HtmlEscape(url) +
                      "</title></head><body style=\"margin:8px\"><pre style=\"white-space:pre-wrap;"
@@ -142,37 +148,48 @@ void Page::CollectDocumentInfo() {
   AddSheetsFromNode(doc_->root.get());
 }
 
-static bool IsClassicScript(Node* n) {
+// 0: not run (data blocks, nomodule fallbacks), 1: classic, 2: module,
+// 3: import map.
+static int ScriptKind(Node* n) {
   std::string type = AsciiLower(Trim(n->Attr("type")));
   if (type.empty() || type == "text/javascript" || type == "application/javascript" ||
       type == "application/x-javascript" || type == "text/ecmascript" ||
       type == "application/ecmascript" || type == "text/jscript")
-    return true;
-  return false;
+    return n->HasAttr("nomodule") ? 0 : 1;
+  if (type == "module") return 2;
+  if (type == "importmap") return 3;
+  return 0;
+}
+
+bool Page::MakeScriptEntry(Node* n, bool parserInserted, ScriptEntry& e) {
+  int kind = ScriptKind(n);
+  if (!kind) return false;
+  n->scriptDone = true;
+  e.node = n;
+  e.parserInserted = parserInserted;
+  e.loaded = e.failed = e.requested = e.done = false;
+  e.kind = kind;
+  if (n->HasAttr("src") && kind != 3) {
+    Url u = baseUrl_.Resolve(n->Attr("src"));
+    if (u.valid() && (u.scheme() == "http" || u.scheme() == "https" || u.scheme() == "file"))
+      e.url = u.SpecNoFragment();
+    else
+      e.failed = true;
+    e.moduleName = e.url;
+  } else {
+    e.source = n->TextContent();
+    e.loaded = true;
+    e.moduleName = baseUrl_.SpecNoFragment() + "#module-" + IntToString(++inlineModules_);
+  }
+  return true;
 }
 
 void Page::CollectScripts(Node* n) {
   if (n->IsElement()) {
     if (n->tag == "template" || n->tag == "svg") return;
     if (n->tag == "script") {
-      if (!n->scriptDone && IsClassicScript(n)) {
-        n->scriptDone = true;
-        ScriptEntry e;
-        e.node = n;
-        e.parserInserted = true;
-        e.loaded = e.failed = e.requested = e.done = false;
-        if (n->HasAttr("src")) {
-          Url u = baseUrl_.Resolve(n->Attr("src"));
-          if (u.valid() && (u.scheme() == "http" || u.scheme() == "https" || u.scheme() == "file"))
-            e.url = u.SpecNoFragment();
-          else
-            e.failed = true;
-        } else {
-          e.source = n->TextContent();
-          e.loaded = true;
-        }
-        scripts_.push_back(e);
-      }
+      ScriptEntry e;
+      if (!n->scriptDone && MakeScriptEntry(n, true, e)) scripts_.push_back(e);
       return;
     }
   }
@@ -180,27 +197,13 @@ void Page::CollectScripts(Node* n) {
 }
 
 void Page::OnScriptInserted(Node* n) {
-  if (!scriptingEnabled() || n->scriptDone || !IsClassicScript(n)) return;
+  if (!scriptingEnabled() || n->scriptDone || !ScriptKind(n)) return;
   // Only scripts that are actually connected to the document run.
   Node* top = n;
   while (top->parent) top = top->parent;
   if (!doc_ || top != doc_->root.get()) return;
-  n->scriptDone = true;
   ScriptEntry e;
-  e.node = n;
-  e.parserInserted = false;
-  e.loaded = e.failed = e.requested = e.done = false;
-  if (n->HasAttr("src")) {
-    Url u = baseUrl_.Resolve(n->Attr("src"));
-    if (u.valid() && (u.scheme() == "http" || u.scheme() == "https" || u.scheme() == "file"))
-      e.url = u.SpecNoFragment();
-    else
-      e.failed = true;
-  } else {
-    e.source = n->TextContent();
-    e.loaded = true;
-  }
-  scripts_.push_back(e);
+  if (MakeScriptEntry(n, false, e)) scripts_.push_back(e);
 }
 
 std::vector<std::string> Page::PendingScripts() {
@@ -213,10 +216,20 @@ std::vector<std::string> Page::PendingScripts() {
     for (size_t k = 0; k < out.size(); ++k) dup = dup || out[k] == e.url;
     if (!dup) out.push_back(e.url);
   }
+  // Imports of modules compiled so far.
+  if (script_) {
+    std::vector<std::string> mods = script_->TakeModuleRequests();
+    for (size_t i = 0; i < mods.size(); ++i) {
+      Url u = Url::Parse(mods[i]);
+      if (u.scheme() == "http" || u.scheme() == "https" || u.scheme() == "file") out.push_back(mods[i]);
+      else script_->ProvideModule(mods[i], std::string(), false);
+    }
+  }
   return out;
 }
 
 void Page::ProvideScript(const std::string& url, const std::string& source, bool ok) {
+  if (script_) script_->ProvideModule(url, source, ok);
   for (size_t i = 0; i < scripts_.size(); ++i) {
     ScriptEntry& e = scripts_[i];
     if (e.url != url || e.loaded || e.failed) continue;
@@ -237,14 +250,51 @@ bool Page::RunScripts() {
   while (progress && script_) {
     progress = false;
     bool blocked = false;  // a parser-inserted script is still loading
+    bool moduleBlocked = false;  // an earlier module is still loading
     for (size_t i = 0; i < scripts_.size(); ++i) {
       ScriptEntry& e = scripts_[i];
       if (e.done) continue;
+      if (e.kind == 2) {
+        // Modules are deferred: they never block classic scripts, but run
+        // in document order among themselves once their graph is loaded.
+        if (moduleBlocked) continue;
+        if (!e.loaded && !e.failed) {
+          moduleBlocked = e.parserInserted;
+          continue;
+        }
+        if (e.loaded && !e.registered) {
+          e.registered = true;
+          script_->AddModule(e.moduleName, e.source);
+        }
+        int state = e.failed ? -1 : script_->ModuleGraphState(e.moduleName);
+        if (state == 0) {
+          moduleBlocked = e.parserInserted;
+          continue;
+        }
+        e.done = true;
+        Node* node = e.node;
+        bool external = !e.url.empty();
+        if (state < 0) {
+          script_->DispatchEvent(node, "error");
+        } else {
+          script_->RunModule(e.moduleName, node);
+          if (external) script_->DispatchEvent(node, "load");
+        }
+        ran = true;
+        progress = true;
+        break;
+      }
       if (!e.loaded && !e.failed) {
         if (e.parserInserted) blocked = true;
         continue;
       }
       if (e.parserInserted && blocked) continue;
+      if (e.kind == 3) {
+        e.done = true;
+        script_->SetImportMap(e.source, url_);
+        progress = true;
+        break;
+      }
       e.done = true;
       Node* node = e.node;
       std::string src = e.source, name = e.url.empty() ? url_ : e.url;

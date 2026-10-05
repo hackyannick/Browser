@@ -164,6 +164,15 @@ class HeadlessHost : public ScriptHost {
   void SetTitle(const std::string&) {}
   void ScrollTo(float, float) {}
   void GetScroll(float& x, float& y) { x = y = 0; }
+  bool FetchSync(const std::string& url, std::string& body) {
+    FetchRequest r;
+    r.url = url;
+    r.accept = "*/*";
+    FetchResponse s = Network::Get().Fetch(r);
+    if (!s.ok || s.status >= 400) return false;
+    body = ConvertToUtf8(s.body, s.Charset().empty() ? "utf-8" : s.Charset());
+    return true;
+  }
 };
 
 // Runs scripts, timers and fetch() requests synchronously for a while.

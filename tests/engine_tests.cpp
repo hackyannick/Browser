@@ -2,6 +2,8 @@
 // host). A tiny self-contained test harness keeps the dependencies at zero.
 #include <cmath>
 #include <cstdio>
+#include <map>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -15,6 +17,7 @@
 #include "image/image.h"
 #include "image/svg.h"
 #include "net/hpack.h"
+#include "script/storage.h"
 #include "net/http.h"
 #include "net/http2.h"
 #include "net/url.h"
@@ -518,6 +521,12 @@ class TestHost : public ScriptHost {
   void SetTitle(const std::string& t) { title = t; }
   void ScrollTo(float x, float y) { sx = x; sy = y; }
   void GetScroll(float& x, float& y) { x = sx; y = sy; }
+  std::map<std::string, std::string> files;  // for FetchSync
+  bool FetchSync(const std::string& url, std::string& body) {
+    if (!files.count(url)) return false;
+    body = files[url];
+    return true;
+  }
 };
 
 struct ScriptPage {
@@ -951,6 +960,103 @@ void TestPerspective() {
   }
 }
 
+void TestModules() {
+  ScriptPage p(
+      "<div id=out></div>"
+      "<script type=importmap>{\"imports\":{\"lib\":\"/lib/main.js\",\"pkg/\":\"/pkg/\"}}</script>"
+      "<script type=module>import { add, name } from 'lib'; import def from 'pkg/x.js';"
+      "window.r = add(2, 3) + ':' + name + ':' + def + ':' + (document.currentScript === null);</script>"
+      "<script type=module src=entry.js></script>"
+      "<script nomodule>window.legacy = 1;</script>"
+      "<script>window.order = (window.r === undefined) ? 'classic-first' : 'module-first';</script>");
+  // The modules wait for their imports.
+  CHECK_EQ(p.Eval("window.r"), "undefined");
+  CHECK_EQ(p.Eval("window.order"), "classic-first");
+  CHECK_EQ(p.Eval("window.legacy"), "undefined");
+  std::vector<std::string> urls = p.page.PendingScripts();
+  std::set<std::string> want(urls.begin(), urls.end());
+  CHECK(want.count("http://test.local/lib/main.js"));
+  CHECK(want.count("http://test.local/pkg/x.js"));
+  CHECK(want.count("http://test.local/dir/entry.js"));
+  p.page.ProvideScript("http://test.local/lib/main.js",
+                       "export { add } from './util.js'; export const name = import.meta.url.split('/').pop();", true);
+  p.page.ProvideScript("http://test.local/pkg/x.js", "export default 'X';", true);
+  p.page.ProvideScript("http://test.local/dir/entry.js", "window.entryRan = true;", true);
+  p.page.RunScripts();
+  CHECK_EQ(p.Eval("window.r"), "undefined");  // util.js still missing
+  urls = p.page.PendingScripts();
+  CHECK_EQ(urls.size(), 1u);
+  if (urls.size() == 1) CHECK_EQ(urls[0], "http://test.local/lib/util.js");
+  p.page.ProvideScript("http://test.local/lib/util.js", "export function add(a, b) { return a + b; }", true);
+  p.page.RunScripts();
+  CHECK_EQ(p.Eval("window.r"), "5:main.js:X:true");
+  CHECK_EQ(p.Eval("window.entryRan"), "true");
+  // Dynamic import() falls back to a blocking fetch.
+  p.host.files["http://test.local/dir/dyn.js"] = "export const v = 7;";
+  p.Eval("(function(){ import('./dyn.js').then(function(m){ window.dyn = m.v; }); return 1; })()");
+  CHECK_EQ(p.Eval("window.dyn"), "7");
+  // A failing import is reported, not fatal.
+  ScriptPage q("<div id=out></div><script type=module>import x from 'nowhere'; window.bad = 1;</script>");
+  CHECK_EQ(q.Eval("window.bad"), "undefined");
+  CHECK(q.Console().find("nowhere") != std::string::npos);
+}
+
+void TestWebApis() {
+  ScriptPage p("<div id=out></div><div id=box><p id=a>x</p></div>");
+  // MutationObserver: batched records delivered in a microtask.
+  p.Eval("(function(){ window.recs = []; var mo = new MutationObserver(function(list){"
+         "  list.forEach(function(r){ recs.push(r.type + ':' + (r.attributeName || '') + ':' + r.addedNodes.length +"
+         "    ':' + r.removedNodes.length + ':' + (r.oldValue === null ? '-' : r.oldValue)); }); });"
+         "var box = document.getElementById('box');"
+         "mo.observe(box, { childList: true, attributes: true, attributeOldValue: true, subtree: true, characterData: true });"
+         "box.appendChild(document.createElement('span'));"
+         "document.getElementById('a').setAttribute('title', 't1');"
+         "document.getElementById('a').setAttribute('title', 't2');"
+         "document.getElementById('a').firstChild.data = 'y';"
+         "box.removeChild(document.getElementById('a'));"
+         "window.sync = recs.length; return 1; })()");
+  CHECK_EQ(p.Eval("sync"), "0");  // not delivered synchronously
+  CHECK_EQ(p.Eval("recs.join('|')"),
+           "childList::1:0:-|attributes:title:0:0:-|attributes:title:0:0:t1|characterData::0:0:-|childList::0:1:-");
+  p.Eval("(function(){ recs = []; var mo2 = new MutationObserver(function(l){ recs.push('other'); });"
+         "mo2.observe(document.body, { attributes: true, attributeFilter: ['data-x'] });"
+         "document.body.setAttribute('class', 'c'); document.body.setAttribute('data-x', '1'); window.mo2 = mo2;"
+         "return 1; })()");
+  CHECK_EQ(p.Eval("recs.join('|')"), "other");
+  p.Eval("(function(){ mo2.disconnect(); document.body.setAttribute('data-x', '2'); return 1; })()");
+  CHECK_EQ(p.Eval("recs.join('|')"), "other");
+
+  // localStorage goes through the host's store; property access works.
+  p.page.script()->Execute("localStorage.setItem('a', 1); localStorage.b = 'zwei'; sessionStorage.setItem('s', 'x')",
+                           "test", 0);
+  CHECK_EQ(p.Eval("localStorage.getItem('a') + localStorage.b + localStorage.length + Object.keys(localStorage)"),
+           "1zwei2a,b");
+  CHECK_EQ(p.Eval("sessionStorage.getItem('a') + ':' + sessionStorage.s"), "null:x");
+  p.page.script()->Execute("localStorage.removeItem('a'); delete localStorage.b", "test", 0);
+  CHECK_EQ(p.Eval("localStorage.length"), "0");
+  CHECK_EQ(p.Eval("(function(){ try { localStorage.setItem('big', 'x'.repeat(6 * 1024 * 1024)); return 'ok'; }"
+                  " catch (e) { return e.name; } })()"),
+           "QuotaExceededError");
+  WebStorage ws;
+  ws.Set("https://a.example", "k\tey", "line1\nline2");
+  ws.Set("https://b.example", "x", "y");
+  WebStorage ws2;
+  ws2.Deserialize(ws.Serialize());
+  CHECK(ws2.Get("https://a.example", "k\tey") && *ws2.Get("https://a.example", "k\tey") == "line1\nline2");
+  CHECK(ws2.Get("https://b.example", "x") != 0);
+
+  // history.pushState changes the URL without loading; popstate restores states.
+  p.Eval("(function(){ window.pops = []; addEventListener('popstate', function(e){ pops.push(JSON.stringify(e.state)); });"
+         "history.pushState({n: 1}, '', 'step1'); history.replaceState({n: 2}, '', '?q=2'); return 1; })()");
+  CHECK_EQ(p.Eval("location.href"), "http://test.local/dir/step1?q=2");
+  CHECK_EQ(p.Eval("history.state.n"), "2");
+  CHECK_EQ(p.Eval("(function(){ try { history.pushState(null, '', 'https://evil.example/'); return 'ok'; }"
+                  " catch (e) { return e.name; } })()"),
+           "SecurityError");
+  p.page.script()->PopState(0, false, "");
+  CHECK_EQ(p.Eval("pops.join() + ':' + history.state"), "null:null");
+}
+
 void TestHpack() {
   // RFC 7541 C.4: requests with Huffman coding and a shared dynamic table.
   HpackDecoder d;
@@ -1032,6 +1138,8 @@ int main() {
   TestHpack();
   TestAnimatedImages();
   TestPerspective();
+  TestModules();
+  TestWebApis();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

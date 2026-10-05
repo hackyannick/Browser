@@ -38,6 +38,7 @@ const UINT_PTR kTimerScriptBase = 0x3000;
 const UINT_PTR kTimerAnimBase = 0x4000;  // CSS animation frames (~30 fps)
 // Deferred navigation requested by a script (location.href = ..., form.submit()).
 const UINT WM_KITE_JSNAV = WM_APP + 3;
+const UINT WM_KITE_HISTGO = WM_APP + 4;  // history.go(delta) from a script
 const int kZoomLevels[] = {30, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300};
 
 struct HistoryEntry {
@@ -46,6 +47,8 @@ struct HistoryEntry {
   float scrollY;
   bool isPost;
   FormSubmission post;
+  int docId = 0;    // entries with the same id share one loaded document
+  int stateId = 0;  // history.pushState state (kept by the script engine)
   HistoryEntry() : scrollY(0), isPost(false) {}
 };
 
@@ -76,6 +79,12 @@ class TabScriptHost : public ScriptHost {
   void SetTitle(const std::string& title);
   void ScrollTo(float x, float y);
   void GetScroll(float& x, float& y);
+  WebStorage* Storage(bool session);
+  bool PushState(const std::string& url, bool replace, int stateId);
+  int HistoryLength();
+  void HistoryGo(int delta);
+  WebStorage session;
+  bool FetchSync(const std::string& url, std::string& body);
 };
 
 class Tab {
@@ -90,6 +99,7 @@ class Tab {
   std::unique_ptr<Page> page;
   std::vector<HistoryEntry> history;
   int historyIndex;
+  int docSerial = 0;
   bool loading;
   int generation;
   std::shared_ptr<CancelToken> cancel;
@@ -209,6 +219,7 @@ class Browser {
   void EndScript(Tab* t);
   void AfterScript(Tab* t);
   void PumpScripts(Tab* t);
+  void FetchPendingScripts(Tab* t);
   void ScheduleScriptTimer(Tab* t);
   void ScheduleAnimation(Tab* t);
   void ScheduleImageAnimation();
@@ -717,13 +728,21 @@ void Browser::Navigate(Tab* t, const std::string& input, const std::string& refe
       HistoryEntry e;
       e.url = target.Spec();
       e.title = t->title;
+      e.docId = t->historyIndex >= 0 ? t->history[t->historyIndex].docId : 0;
       t->history.resize(t->historyIndex + 1);
       t->history.push_back(e);
       t->historyIndex = (int)t->history.size() - 1;
+      std::string oldUrl = t->url;
       t->url = t->displayUrl = target.Spec();
+      t->page->SetUrl(t->url);
       float y = t->page->AnchorPosition(target.fragment());
       if (y >= 0) ScrollTo(t->scrollX, y * ZoomF());
       UpdateUi();
+      if (t->page->script() && cur.fragment() != target.fragment()) {
+        BeginScript();
+        t->page->script()->PopState(0, true, oldUrl);
+        EndScript(t);
+      }
       return;
     }
   }
@@ -785,9 +804,12 @@ void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure)
   e.url = nav.viewSource ? "view-source:" + finalUrl : finalUrl;
   e.isPost = nav.isPost;
   e.post = nav.post;
+  e.docId = ++t->docSerial;
   if (nav.fromHistory && nav.historyTarget >= 0 && nav.historyTarget < (int)t->history.size()) {
     t->historyIndex = nav.historyTarget;
     t->history[t->historyIndex].url = e.url;
+    t->history[t->historyIndex].docId = e.docId;
+    t->history[t->historyIndex].stateId = 0;
     t->restoreScroll = t->history[t->historyIndex].scrollY;
   } else if (nav.replace && t->historyIndex >= 0) {
     t->history[t->historyIndex] = e;
@@ -800,6 +822,7 @@ void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure)
   }
   t->url = finalUrl;
   t->displayUrl = e.url;
+  App::Get().SaveStorage();  // data of the page just left
   KillTimer(hwnd_, kTimerScriptBase + t->id);
   t->pendingScripts = 0;
   t->jsNavPending = false;
@@ -826,6 +849,32 @@ void Browser::GoHistory(Tab* t, int delta) {
   int target = t->historyIndex + delta;
   if (target < 0 || target >= (int)t->history.size()) return;
   const HistoryEntry& e = t->history[target];
+  // Entries created by pushState or fragment links: same document.
+  if (delta != 0 && t->rendered && t->historyIndex >= 0 && e.docId != 0 &&
+      e.docId == t->history[t->historyIndex].docId && !StartsWith(e.url, "view-source:")) {
+    t->history[t->historyIndex].scrollY = t->scrollY;
+    std::string oldUrl = t->url;
+    t->historyIndex = target;
+    t->url = t->displayUrl = e.url;
+    t->page->SetUrl(e.url);
+    Url a = Url::Parse(oldUrl), b = Url::Parse(e.url);
+    bool hashChanged = a.SpecNoFragment() == b.SpecNoFragment() && a.fragment() != b.fragment();
+    if (t->page->script()) {
+      BeginScript();
+      t->page->script()->PopState(e.stateId, hashChanged, oldUrl);
+      EndScript(t);
+    }
+    if (TabIndex(t) < 0) return;
+    float y = t->history[t->historyIndex].scrollY;
+    if (hashChanged && y == 0 && b.HasFragment()) {
+      float a2 = t->page->AnchorPosition(b.fragment());
+      if (a2 >= 0) y = a2 * ZoomF();
+    }
+    ScrollTo(t->scrollX, y);
+    UpdateTabLabel(t);
+    if (t == current_) UpdateUi();
+    return;
+  }
   PendingNav nav;
   nav.url = e.url;
   nav.fromHistory = true;
@@ -1949,8 +1998,9 @@ void Browser::OnCommand(int id) {
       break;
     case ID_TOOLS_CLEARCOOKIES:
       Network::Get().cookies().Clear();
+      App::Get().localStorage.ClearAll();
       App::Get().SaveCookies();
-      SetStatus("Alle Cookies wurden gel\xC3\xB6scht.");
+      SetStatus("Alle Cookies und Websitedaten wurden gel\xC3\xB6scht.");
       break;
     case ID_VIEW_CONSOLE:
       ShowConsole();
@@ -2165,6 +2215,18 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       }
       OnFetched((FetchJob*)l);
       return 0;
+    case WM_KITE_HISTGO: {
+      Tab* t = TabById((int)w);
+      if (!t) return 0;
+      if (scriptDepth_ > 0) {
+        PostMessageW(hwnd_, WM_KITE_HISTGO, w, l);  // after the running script
+        return 0;
+      }
+      int delta = (int)l;
+      if (delta == 0) Reload(t);
+      else GoHistory(t, delta);
+      return 0;
+    }
     case WM_KITE_JSNAV: {
       Tab* t = TabById((int)w);
       if (!t || !t->jsNavPending || scriptDepth_ > 0) return 0;
@@ -2351,6 +2413,57 @@ void TabScriptHost::GetScroll(float& x, float& y) {
   y = t ? t->scrollY / z : 0;
 }
 
+WebStorage* TabScriptHost::Storage(bool sessionStore) {
+  return sessionStore ? &session : &App::Get().localStorage;
+}
+
+bool TabScriptHost::PushState(const std::string& url, bool replace, int stateId) {
+  Tab* t = g_browser->TabById(tabId);
+  if (!t || t->historyIndex < 0) return false;
+  HistoryEntry e;
+  e.url = url;
+  e.title = t->title;
+  e.docId = t->history[t->historyIndex].docId;
+  e.stateId = stateId;
+  if (replace) {
+    e.scrollY = t->history[t->historyIndex].scrollY;
+    t->history[t->historyIndex] = e;
+  } else {
+    t->history[t->historyIndex].scrollY = t->scrollY;
+    t->history.resize(t->historyIndex + 1);
+    t->history.push_back(e);
+    t->historyIndex = (int)t->history.size() - 1;
+  }
+  t->url = t->displayUrl = url;
+  if (t == g_browser->current_) g_browser->UpdateUi();
+  return true;
+}
+
+int TabScriptHost::HistoryLength() {
+  Tab* t = g_browser->TabById(tabId);
+  return t ? (int)t->history.size() : 1;
+}
+
+void TabScriptHost::HistoryGo(int delta) {
+  PostMessageW(g_browser->hwnd_, WM_KITE_HISTGO, tabId, (LPARAM)delta);
+}
+
+bool TabScriptHost::FetchSync(const std::string& url, std::string& body) {
+  // Blocks the window while it runs (only dynamic import() needs it).
+  FetchRequest r;
+  r.url = url;
+  r.accept = "*/*";
+  Tab* t = g_browser ? g_browser->TabById(tabId) : 0;
+  if (t) r.referrer = t->url;
+  HCURSOR old = SetCursor(LoadCursor(0, IDC_WAIT));
+  FetchResponse s = Network::Get().Fetch(r);
+  SetCursor(old);
+  if (!s.ok || s.status >= 400) return false;
+  std::string cs = s.Charset();
+  body = ConvertToUtf8(s.body, cs.empty() ? "utf-8" : cs);
+  return true;
+}
+
 void Browser::EndScript(Tab* t) {
   if (--scriptDepth_ > 0) return;
   if (t && TabIndex(t) >= 0) AfterScript(t);
@@ -2360,31 +2473,38 @@ void Browser::EndScript(Tab* t) {
   for (size_t i = 0; i < jobs.size(); ++i) PostMessageW(hwnd_, WM_KITE_FETCHED, 0, (LPARAM)jobs[i]);
 }
 
+void Browser::FetchPendingScripts(Tab* t) {
+  std::vector<std::string> urls = t->page->PendingScripts();
+  for (size_t i = 0; i < urls.size(); ++i) {
+    FetchJob* job = new FetchJob;
+    job->kind = FetchJob::kScript;
+    job->tabId = t->id;
+    job->generation = t->generation;
+    job->notify = hwnd_;
+    job->request.url = urls[i];
+    job->request.cancel = t->cancel;
+    job->request.referrer = t->url;
+    job->request.accept = "*/*";
+    ++t->pendingScripts;
+    StartFetch(job);
+  }
+}
+
 void Browser::AfterScript(Tab* t) {
   Page* page = t->page.get();
   ScriptEngine* js = page->script();
   if (!js) return;
   // Scripts inserted by scripts.
   for (int round = 0; round < 8; ++round) {
-    std::vector<std::string> urls = page->PendingScripts();
-    for (size_t i = 0; i < urls.size(); ++i) {
-      FetchJob* job = new FetchJob;
-      job->kind = FetchJob::kScript;
-      job->tabId = t->id;
-      job->generation = t->generation;
-      job->notify = hwnd_;
-      job->request.url = urls[i];
-      job->request.cancel = t->cancel;
-      job->request.referrer = t->url;
-      job->request.accept = "*/*";
-      ++t->pendingScripts;
-      StartFetch(job);
-    }
+    FetchPendingScripts(t);
     if (!t->rendered) break;
     ++scriptDepth_;
     bool ran = page->RunScripts();
     --scriptDepth_;
-    if (!ran) break;
+    if (!ran) {
+      FetchPendingScripts(t);  // imports of modules compiled just now
+      break;
+    }
   }
   // Images loaded by scripts (new Image()).
   std::vector<std::string> imgs = js->TakeImageLoads();
@@ -2577,8 +2697,9 @@ INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       switch (LOWORD(w)) {
         case IDC_SET_CLEARCOOKIES:
           Network::Get().cookies().Clear();
+          App::Get().localStorage.ClearAll();
           App::Get().SaveCookies();
-          SetDlgItemTextW(h, IDC_SET_COOKIEINFO, L"Alle Cookies gel\x00f6scht.");
+          SetDlgItemTextW(h, IDC_SET_COOKIEINFO, L"Alle Cookies und Websitedaten gel\x00f6scht.");
           return TRUE;
         case IDOK: {
           wchar_t buf[2048];

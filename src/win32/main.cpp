@@ -98,6 +98,7 @@ void App::Init(HINSTANCE inst) {
                 L"Kite", MB_ICONWARNING);
   }
   Network::Get().cookies().Deserialize(ReadFileUtf8(dataDir + L"\\cookies.txt"));
+  localStorage.Deserialize(ReadFileUtf8(dataDir + L"\\storage.txt"));
   ApplyNetworkSettings();
   LoadBookmarks();
 }
@@ -123,6 +124,13 @@ void App::SaveSettings() {
 
 void App::SaveCookies() {
   WriteFileUtf8(dataDir + L"\\cookies.txt", Network::Get().cookies().Serialize());
+  SaveStorage();
+}
+
+void App::SaveStorage() {
+  if (!localStorage.dirty()) return;
+  WriteFileUtf8(dataDir + L"\\storage.txt", localStorage.Serialize());
+  localStorage.ClearDirty();
 }
 
 void App::LoadBookmarks() {

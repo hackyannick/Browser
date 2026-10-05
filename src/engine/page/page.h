@@ -45,6 +45,8 @@ class Page {
   void LoadImageDocument(const std::string& url);
 
   const std::string& url() const { return url_; }
+  // Same-document URL change (pushState, fragment navigation).
+  void SetUrl(const std::string& url);
   FontProvider* fonts() { return fonts_; }
   ImageProvider* images() { return images_; }
   std::string Title() const;
@@ -153,7 +155,12 @@ class Page {
     std::string source;
     bool parserInserted;
     bool loaded, failed, requested, done;
+    int kind = 1;  // 1 classic script, 2 module, 3 import map
+    std::string moduleName;  // modules: URL (inline: document URL + #module-N)
+    bool registered = false;
   };
+  bool MakeScriptEntry(Node* n, bool parserInserted, ScriptEntry& e);
+  int inlineModules_ = 0;
 
   FontProvider* fonts_;
   ImageProvider* images_;

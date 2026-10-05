@@ -37526,7 +37526,7 @@ static JSValue __JS_EvalInternal(JSContext *ctx, JSValueConst this_obj,
     /* Could add a flag to avoid resolution if necessary */
     if (m) {
         m->func_obj = fun_obj;
-        if (js_resolve_module(ctx, m) < 0)
+        if (!(flags & JS_EVAL_FLAG_NO_RESOLVE) && js_resolve_module(ctx, m) < 0)
             goto fail1;
         fun_obj = JS_NewModuleValue(ctx, m);
     }
@@ -37602,6 +37602,18 @@ JSValue JS_Eval(JSContext *ctx, const char *input, size_t input_len,
 {
     return JS_EvalThis(ctx, ctx->global_obj, input, input_len, filename,
                        eval_flags);
+}
+
+int JS_GetModuleRequestCount(JSModuleDef *m)
+{
+    return m->req_module_entries_count;
+}
+
+JSAtom JS_GetModuleRequest(JSContext *ctx, JSModuleDef *m, int index)
+{
+    if (index < 0 || index >= m->req_module_entries_count)
+        return JS_ATOM_NULL;
+    return JS_DupAtom(ctx, m->req_module_entries[index].module_name);
 }
 
 int JS_ResolveModule(JSContext *ctx, JSValueConst obj)

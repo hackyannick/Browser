@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <set>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -20,6 +21,7 @@
 #include "css/resolver.h"
 #include "css/stylesheet.h"
 #include "html/parser.h"
+#include "net/url.h"
 #include "page/page.h"
 
 extern "C" {
@@ -1004,10 +1006,102 @@ std::string SerializeNode(const Node* n, bool outer) {
 }
 
 
+// pushState(url, replace, stateId) -> bool
+KITE_FN(PushState) {
+  ARGS_AT_LEAST(3);
+  ScriptEngine* e = Engine(ctx);
+  std::string url = Str(ctx, argv[0]);
+  Url target = Url::Parse(url), cur = Url::Parse(e->page()->url());
+  if (!target.valid() || target.Origin() != cur.Origin()) return JS_FALSE;
+  if (e->host() && !e->host()->PushState(target.Spec(), JS_ToBool(ctx, argv[1]) != 0, Int(ctx, argv[2])))
+    return JS_FALSE;
+  e->page()->SetUrl(target.Spec());
+  return JS_TRUE;
+}
+
+KITE_FN(HistLen) { return JS_NewInt32(ctx, Engine(ctx)->host() ? Engine(ctx)->host()->HistoryLength() : 1); }
+
+KITE_FN(HistGo) {
+  ARGS_AT_LEAST(1);
+  if (Engine(ctx)->host()) Engine(ctx)->host()->HistoryGo(Int(ctx, argv[0]));
+  return JS_UNDEFINED;
+}
+
+// storage(op, session, key, value): 0 get, 1 set, 2 remove, 3 clear, 4 keys.
+KITE_FN(StorageOp) {
+  ARGS_AT_LEAST(2);
+  ScriptEngine* e = Engine(ctx);
+  WebStorage* st = e->StorageFor(JS_ToBool(ctx, argv[1]) != 0);
+  std::string origin = Url::Parse(e->page()->url()).Origin();
+  int op = Int(ctx, argv[0]);
+  std::string key = argc > 2 ? Str(ctx, argv[2]) : std::string();
+  switch (op) {
+    case 0: {
+      const std::string* v = st->Get(origin, key);
+      return v ? NewStr(ctx, *v) : JS_NULL;
+    }
+    case 1:
+      return JS_NewBool(ctx, st->Set(origin, key, argc > 3 ? Str(ctx, argv[3]) : std::string()));
+    case 2:
+      st->Remove(origin, key);
+      return JS_UNDEFINED;
+    case 3:
+      st->Clear(origin);
+      return JS_UNDEFINED;
+    default: {
+      JSValue arr = JS_NewArray(ctx);
+      const WebStorage::Items* items = st->ItemsOf(origin);
+      if (items)
+        for (size_t i = 0; i < items->size(); ++i)
+          JS_SetPropertyUint32(ctx, arr, (uint32_t)i, NewStr(ctx, (*items)[i].first));
+      return arr;
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// ES module loading (QuickJS callbacks)
+
+static char* NormalizeModule(JSContext* ctx, const char* base, const char* name, void*) {
+  std::string url = Engine(ctx)->ResolveModuleSpecifier(name, base);
+  if (url.empty()) {
+    JS_ThrowTypeError(ctx, "Failed to resolve module specifier \"%s\"", name);
+    return 0;
+  }
+  char* out = (char*)js_malloc(ctx, url.size() + 1);
+  if (!out) return 0;
+  memcpy(out, url.c_str(), url.size() + 1);
+  return out;
+}
+
+static JSModuleDef* LoadModule(JSContext* ctx, const char* name, void*) {
+  JSModuleDef* m = (JSModuleDef*)Engine(ctx)->LoadModuleNow(name);
+  if (!m && !JS_HasException(ctx)) JS_ThrowReferenceError(ctx, "could not load module '%s'", name);
+  return m;
+}
+
 // ---------------------------------------------------------------------------
 // ScriptEngine
 
 static int InterruptCb(JSRuntime*, void* opaque);
+
+// Unhandled promise rejections are reported once the job queue is empty.
+static void RejectionTracker(JSContext* ctx, JSValueConst promise, JSValueConst reason, JS_BOOL handled,
+                             void* opaque) {
+  ScriptEngine* e = (ScriptEngine*)opaque;
+  void* key = JS_VALUE_GET_PTR(promise);
+  if (handled) {
+    e->ForgetRejection(key);
+    return;
+  }
+  std::string msg = Str(ctx, reason);
+  if (JS_IsError(ctx, reason)) {
+    JSValue stack = JS_GetPropertyStr(ctx, reason, "stack");
+    if (JS_IsString(stack)) msg += "\n" + Str(ctx, stack);
+    JS_FreeValue(ctx, stack);
+  }
+  e->NoteRejection(key, msg);
+}
 
 ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
     : page_(page), host_(host), nextTimer_(1), nextRequest_(1), dirty_(false), currentScript_(0),
@@ -1017,6 +1111,8 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
   JS_SetMemoryLimit(rt, 128 * 1024 * 1024);
   JS_SetMaxStackSize(rt, 256 * 1024);
   JS_SetInterruptHandler(rt, InterruptCb, this);
+  JS_SetModuleLoaderFunc(rt, NormalizeModule, LoadModule, this);
+  JS_SetHostPromiseRejectionTracker(rt, RejectionTracker, this);
   JSContext* ctx = JS_NewContext(rt);
   JS_SetContextOpaque(ctx, this);
   rt_ = rt;
@@ -1049,6 +1145,7 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"cvMeasure", CvMeasure, 2}, {"cvImage", CvImage, 10}, {"cvGetData", CvGetData, 5},
       {"cvPutData", CvPutData, 10}, {"cvDataUrl", CvDataUrl, 1}, {"imgLoad", ImgLoad, 1},
       {"imgSize", ImgSize, 1}, {"cvSvgPath", CvSvgPath, 2},
+      {"storage", StorageOp, 4}, {"pushState", PushState, 3}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
   };
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)
     JS_SetPropertyStr(ctx, k, fns[i].name, JS_NewCFunction(ctx, fns[i].fn, fns[i].name, fns[i].argc));
@@ -1059,6 +1156,11 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
 
 ScriptEngine::~ScriptEngine() {
   JSContext* ctx = (JSContext*)ctx_;
+  for (std::map<std::string, ModuleRec>::iterator it = modules_.begin(); it != modules_.end(); ++it)
+    if (it->second.value) {
+      JS_FreeValue(ctx, *(JSValue*)it->second.value);
+      delete (JSValue*)it->second.value;
+    }
   for (size_t i = 0; i < timers_.size(); ++i) {
     JS_FreeValue(ctx, *(JSValue*)timers_[i].fn);
     delete (JSValue*)timers_[i].fn;
@@ -1127,6 +1229,26 @@ void ScriptEngine::RunJobs() {
       break;
     }
   }
+  for (size_t i = 0; i < rejections_.size(); ++i)
+    Log("Fehler: Uncaught (in promise) " + rejections_[i].second);
+  rejections_.clear();
+}
+
+WebStorage* ScriptEngine::StorageFor(bool session) {
+  WebStorage* st = host_ ? host_->Storage(session) : 0;
+  return st ? st : (session ? &ownSession_ : &ownLocal_);
+}
+
+void ScriptEngine::NoteRejection(void* promise, const std::string& message) {
+  rejections_.push_back(std::make_pair(promise, message));
+}
+
+void ScriptEngine::ForgetRejection(void* promise) {
+  for (size_t i = 0; i < rejections_.size(); ++i)
+    if (rejections_[i].first == promise) {
+      rejections_.erase(rejections_.begin() + i);
+      return;
+    }
 }
 
 void ScriptEngine::Execute(const std::string& source, const std::string& fileName, Node* scriptElement) {
@@ -1166,6 +1288,16 @@ void ScriptEngine::DispatchDocumentEvent(const char* type) {
   JSValue arg = JS_NewString(ctx, type);
   CallKiteHook(this, ctx, "__kiteDocEvent", 1, &arg, 0);
   JS_FreeValue(ctx, arg);
+  RunJobs();
+  deadline_ = 0;
+}
+
+void ScriptEngine::PopState(int stateId, bool hashChanged, const std::string& oldUrl) {
+  JSContext* ctx = (JSContext*)ctx_;
+  deadline_ = NowMs() + timeLimit_;
+  JSValue args[3] = {JS_NewInt32(ctx, stateId), JS_NewBool(ctx, hashChanged), NewStr(ctx, oldUrl)};
+  CallKiteHook(this, ctx, "__kitePopState", 3, args, 0);
+  JS_FreeValue(ctx, args[2]);
   RunJobs();
   deadline_ = 0;
 }
@@ -1384,6 +1516,210 @@ bool ScriptEngine::TakeDirty() {
   bool d = dirty_;
   dirty_ = false;
   return d;
+}
+
+// ---------------------------------------------------------------------------
+// ES modules
+
+void ScriptEngine::SetImportMap(const std::string& json, const std::string& baseUrl) {
+  JSContext* ctx = (JSContext*)ctx_;
+  JSValue obj = JS_ParseJSON(ctx, json.c_str(), json.size(), "importmap");
+  if (JS_IsException(obj)) {
+    ReportException();
+    return;
+  }
+  JSValue imports = JS_GetPropertyStr(ctx, obj, "imports");
+  JSPropertyEnum* tab = 0;
+  uint32_t len = 0;
+  Url base = Url::Parse(baseUrl);
+  if (JS_IsObject(imports) &&
+      JS_GetOwnPropertyNames(ctx, &tab, &len, imports, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) == 0) {
+    for (uint32_t i = 0; i < len; ++i) {
+      JSValue v = JS_GetProperty(ctx, imports, tab[i].atom);
+      const char* key = JS_AtomToCString(ctx, tab[i].atom);
+      if (key && JS_IsString(v)) {
+        Url u = base.Resolve(Str(ctx, v));
+        if (u.valid()) importMap_.push_back(std::make_pair(std::string(key), u.Spec()));
+      }
+      if (key) JS_FreeCString(ctx, key);
+      JS_FreeValue(ctx, v);
+      JS_FreeAtom(ctx, tab[i].atom);
+    }
+    js_free(ctx, tab);
+  }
+  JS_FreeValue(ctx, imports);
+  JS_FreeValue(ctx, obj);
+}
+
+std::string ScriptEngine::ResolveModuleSpecifier(const std::string& spec, const std::string& base) {
+  // Import map: exact entries, then the longest matching "prefix/" entry.
+  size_t best = std::string::npos, bestLen = 0;
+  for (size_t i = 0; i < importMap_.size(); ++i) {
+    const std::string& k = importMap_[i].first;
+    if (k == spec) return importMap_[i].second;
+    if (!k.empty() && k[k.size() - 1] == '/' && spec.compare(0, k.size(), k) == 0 && k.size() > bestLen) {
+      best = i;
+      bestLen = k.size();
+    }
+  }
+  if (best != std::string::npos) return importMap_[best].second + spec.substr(bestLen);
+  bool relative = StartsWith(spec, "/") || StartsWith(spec, "./") || StartsWith(spec, "../");
+  bool absolute = false;
+  size_t colon = spec.find(':');
+  if (colon != std::string::npos && colon > 0) {
+    absolute = true;
+    for (size_t i = 0; i < colon; ++i) {
+      char c = spec[i];
+      if (!(isalnum((unsigned char)c) || c == '+' || c == '-' || c == '.')) absolute = false;
+    }
+  }
+  if (!relative && !absolute) return std::string();  // bare specifier without a mapping
+  Url b = Url::Parse(base);
+  if (!b.valid() || b.scheme() == "javascript") b = Url::Parse(page_->url());
+  Url u = b.Resolve(spec);
+  if (!u.valid()) return std::string();
+  return u.SpecNoFragment();
+}
+
+bool ScriptEngine::CompileModule(const std::string& url, const std::string& source) {
+  JSContext* ctx = (JSContext*)ctx_;
+  ModuleRec& rec = modules_[url];
+  rec.source = source;
+  deadline_ = NowMs() + timeLimit_;
+  JSValue m = JS_Eval(ctx, source.c_str(), source.size(), url.c_str(),
+                      JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY | JS_EVAL_FLAG_NO_RESOLVE);
+  deadline_ = 0;
+  if (JS_IsException(m)) {
+    ReportException();
+    rec.state = -1;
+    return false;
+  }
+  JSModuleDef* def = (JSModuleDef*)JS_VALUE_GET_PTR(m);
+  JSValue meta = JS_GetImportMeta(ctx, def);
+  if (!JS_IsException(meta)) JS_SetPropertyStr(ctx, meta, "url", NewStr(ctx, url));
+  JS_FreeValue(ctx, meta);
+  rec.value = new JSValue(m);
+  rec.state = 1;
+  int n = JS_GetModuleRequestCount(def);
+  std::vector<std::string> deps;
+  for (int i = 0; i < n; ++i) {
+    JSAtom a = JS_GetModuleRequest(ctx, def, i);
+    const char* spec = JS_AtomToCString(ctx, a);
+    JS_FreeAtom(ctx, a);
+    if (!spec) continue;
+    std::string dep = ResolveModuleSpecifier(spec, url);
+    if (dep.empty()) Log(std::string("Fehler: Modul \"") + spec + "\" kann nicht aufgel\xC3\xB6st werden (" + url + ")");
+    JS_FreeCString(ctx, spec);
+    if (dep.empty()) {
+      modules_[url].state = -1;
+      continue;
+    }
+    deps.push_back(dep);
+    if (!modules_.count(dep)) {
+      modules_[dep].state = 0;
+      moduleRequests_.push_back(dep);
+    }
+  }
+  modules_[url].deps = deps;
+  return true;
+}
+
+void ScriptEngine::AddModule(const std::string& url, const std::string& source) {
+  std::map<std::string, ModuleRec>::iterator it = modules_.find(url);
+  if (it != modules_.end() && it->second.state != 0) return;  // already known
+  CompileModule(url, source);
+}
+
+std::vector<std::string> ScriptEngine::TakeModuleRequests() {
+  std::vector<std::string> out;
+  out.swap(moduleRequests_);
+  return out;
+}
+
+bool ScriptEngine::ProvideModule(const std::string& url, const std::string& source, bool ok) {
+  std::map<std::string, ModuleRec>::iterator it = modules_.find(url);
+  if (it == modules_.end() || it->second.state != 0) return false;
+  if (!ok) {
+    it->second.state = -1;
+    Log("Fehler: Modul " + url + " konnte nicht geladen werden");
+    return true;
+  }
+  CompileModule(url, source);
+  return true;
+}
+
+int ScriptEngine::ModuleGraphState(const std::string& url) {
+  std::vector<std::string> stack(1, url);
+  std::set<std::string> seen;
+  int state = 1;
+  while (!stack.empty()) {
+    std::string u = stack.back();
+    stack.pop_back();
+    if (!seen.insert(u).second) continue;
+    std::map<std::string, ModuleRec>::iterator it = modules_.find(u);
+    if (it == modules_.end() || it->second.state < 0) return -1;
+    if (it->second.state == 0) {
+      state = 0;
+      continue;
+    }
+    for (size_t i = 0; i < it->second.deps.size(); ++i) stack.push_back(it->second.deps[i]);
+  }
+  return state;
+}
+
+void ScriptEngine::RunModule(const std::string& url, Node* scriptElement) {
+  JSContext* ctx = (JSContext*)ctx_;
+  std::map<std::string, ModuleRec>::iterator it = modules_.find(url);
+  if (it == modules_.end() || !it->second.value) return;
+  Node* prev = currentScript_;
+  currentScript_ = 0;  // document.currentScript is null in modules
+  deadline_ = NowMs() + timeLimit_;
+  JSValue m = *(JSValue*)it->second.value;
+  if (JS_ResolveModule(ctx, m) < 0) {
+    ReportException();
+  } else {
+    JSValue r = JS_EvalFunction(ctx, JS_DupValue(ctx, m));
+    if (JS_IsException(r)) {
+      ReportException();
+    } else {
+      RunJobs();
+      if (JS_PromiseState(ctx, r) == JS_PROMISE_REJECTED) {
+        JSValue reason = JS_PromiseResult(ctx, r);
+        std::string msg = Str(ctx, reason);
+        if (JS_IsError(ctx, reason)) {
+          JSValue stack = JS_GetPropertyStr(ctx, reason, "stack");
+          if (!JS_IsUndefined(stack)) msg += "\n" + Str(ctx, stack);
+          JS_FreeValue(ctx, stack);
+        }
+        JS_FreeValue(ctx, reason);
+        Log("Fehler: " + msg);
+      }
+    }
+    JS_FreeValue(ctx, r);
+  }
+  RunJobs();
+  deadline_ = 0;
+  currentScript_ = prev;
+}
+
+void* ScriptEngine::LoadModuleNow(const std::string& url) {
+  JSContext* ctx = (JSContext*)ctx_;
+  std::string source;
+  std::map<std::string, ModuleRec>::iterator it = modules_.find(url);
+  if (it != modules_.end() && it->second.state == 1) {
+    source = it->second.source;  // compiled before but dropped by QuickJS: compile again
+  } else if (!host_ || !host_->FetchSync(url, source)) {
+    return 0;
+  }
+  JSValue m = JS_Eval(ctx, source.c_str(), source.size(), url.c_str(),
+                      JS_EVAL_TYPE_MODULE | JS_EVAL_FLAG_COMPILE_ONLY);
+  if (JS_IsException(m)) return 0;
+  JSModuleDef* def = (JSModuleDef*)JS_VALUE_GET_PTR(m);
+  JSValue meta = JS_GetImportMeta(ctx, def);
+  if (!JS_IsException(meta)) JS_SetPropertyStr(ctx, meta, "url", NewStr(ctx, url));
+  JS_FreeValue(ctx, meta);
+  JS_FreeValue(ctx, m);  // the context's module list keeps it
+  return def;
 }
 
 }  // namespace kite
