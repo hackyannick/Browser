@@ -9,6 +9,26 @@
 # cached in the Docker volume "kite-build-cache".
 set -e
 cd "$(dirname "$0")/.."
+# Docker Desktop's credential helper lives inside the app bundle; when its
+# directory is not on PATH, even pulling public images fails with
+# 'docker-credential-desktop: executable file not found'.
+for d in /Applications/Docker.app/Contents/Resources/bin "$HOME/.docker/bin"; do
+  if ! command -v docker-credential-desktop >/dev/null 2>&1 && [ -x "$d/docker-credential-desktop" ]; then
+    PATH="$PATH:$d"
+  fi
+done
+export PATH
+if ! command -v docker >/dev/null 2>&1; then
+  echo "FEHLER: docker nicht gefunden (Docker Desktop oder OrbStack installieren und starten)" >&2
+  exit 1
+fi
+if grep -q '"credsStore" *: *"desktop"' "$HOME/.docker/config.json" 2>/dev/null &&
+   ! command -v docker-credential-desktop >/dev/null 2>&1; then
+  echo "FEHLER: ~/.docker/config.json verlangt den Helfer docker-credential-desktop, der fehlt." >&2
+  echo "Die Zeile mit \"credsStore\" aus ~/.docker/config.json entfernen (fuer oeffentliche" >&2
+  echo "Images wie ubuntu:24.04 ist keine Anmeldung noetig) und das Skript erneut starten." >&2
+  exit 1
+fi
 mkdir -p dist
 docker run --rm \
   -v "$PWD":/host:ro \
