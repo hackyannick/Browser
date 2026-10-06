@@ -32,7 +32,8 @@ if [ ! -f "$TARBALL" ]; then
   done
 fi
 [ -f "$TARBALL" ] || { echo "FEHLER: FFmpeg-Quellen nicht ladbar" >&2; exit 1; }
-SUM=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+if command -v sha256sum >/dev/null 2>&1; then SUM=$(sha256sum "$TARBALL" | cut -d' ' -f1)
+else SUM=$(shasum -a 256 "$TARBALL" | cut -d' ' -f1); fi  # macOS
 if [ "$SUM" != "$SHA256" ]; then
   echo "WARNUNG: SHA-256 des FFmpeg-Archivs weicht ab ($SUM)" >&2
 fi
@@ -71,11 +72,11 @@ if [ "$TARGET" = win32 ]; then
     --disable-pthreads --disable-w32threads --disable-schannel --disable-dxva2 --disable-d3d11va \
     --disable-mediafoundation --extra-cflags="-D_WIN32_WINNT=0x0500 -O2" >configure.log
   # BCryptGenRandom is Vista+; av_get_random_seed falls back to other sources.
-  sed -i 's/#define HAVE_BCRYPT 1/#define HAVE_BCRYPT 0/' config.h
+  sed 's/#define HAVE_BCRYPT 1/#define HAVE_BCRYPT 0/' config.h > config.h.new && mv config.h.new config.h
 else
   "$SRC/configure" $COMMON --enable-pic --disable-pthreads >configure.log
 fi
-make -j"$(nproc 2>/dev/null || echo 2)" >make.log 2>&1 || { tail -20 make.log; exit 1; }
+make -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)" >make.log 2>&1 || { tail -20 make.log; exit 1; }
 make install >/dev/null
 touch "$PREFIX/.stamp"
 echo "FFmpeg ($TARGET) gebaut: $PREFIX"

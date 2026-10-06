@@ -83,6 +83,20 @@ sudo apt install cmake g++-mingw-w64-i686 nasm   # Debian/Ubuntu
 ./build-win2k.sh                                  # Ergebnis: dist/Kite/kite.exe
 ```
 
+Auf einem Mac (auch Apple Silicon) am zuverlässigsten in einem
+Linux-Container mit derselben Toolchain wie die CI:
+
+```sh
+docker run --rm -v "$PWD":/src -w /src ubuntu:24.04 sh -c \
+  'apt-get update && apt-get install -y cmake g++ g++-mingw-w64-i686 nasm curl xz-utils make && ./build-win2k.sh'
+```
+
+Alternativ direkt mit Homebrew (`brew install mingw-w64 cmake nasm`, dann
+`./build-win2k.sh`). Die Homebrew-Toolchain muss dabei die klassische
+`msvcrt` verwenden; die Importprüfung bricht ab, falls die EXE stattdessen
+die Universal CRT (`ucrtbase.dll`, `api-ms-win-*`) braucht, die es unter
+Windows 2000 nicht gibt.
+
 `build-win2k.sh` lädt beim ersten Mal die FFmpeg-Quellen (4.4.2, SHA-256
 geprüft) und baut daraus mit `tools/build-ffmpeg.sh` nur die benötigten
 Decoder als statische Bibliotheken (`third_party/ffmpeg/`, einige Minuten).

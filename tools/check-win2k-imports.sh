@@ -29,8 +29,18 @@ if [ "$OSV" -gt 5 ] || [ "$SSV" -gt 5 ]; then
   echo "FEHLER: PE-Header verlangt eine neuere Windows-Version als 5.0" >&2
   exit 1
 fi
-IMPORTS=$(echo "$PE" | sed -n '/The Import Tables/,/The Export Tables\|Resource/p' |
-          grep -E '^\s+[0-9a-f]+\s+[0-9]+ ' | awk '{print $3}')
+# Only the import section (it ends at the next "The ... Table" heading).
+IMPORTS=$(echo "$PE" | awk '/^The Import Tables/{on=1; next} /^The /{on=0} on' |
+          grep -E '^[[:space:]]+[0-9a-f]+[[:space:]]+[0-9]+ ' | awk '{print $3}')
+# DLLs: only system libraries that Windows 2000 ships. A toolchain that
+# defaults to the Universal CRT (ucrtbase/api-ms-win-*) cannot work there.
+DLLS=$(echo "$PE" | awk '/DLL Name:/{print tolower($3)}')
+BADDLL=$(echo "$DLLS" | grep -vE '^(kernel32|user32|gdi32|advapi32|shell32|comctl32|comdlg32|ws2_32|winmm|msvcrt|ole32|oleaut32|wsock32|version|shlwapi)\.dll$' || true)
+if [ -n "$BADDLL" ]; then
+  echo "FEHLER: DLLs, die es unter Windows 2000 nicht gibt (Toolchain mit msvcrt statt UCRT verwenden):" >&2
+  echo "$BADDLL" >&2
+  exit 1
+fi
 BAD=$(echo "$IMPORTS" | grep -E "^($DENY)\$" || true)
 if [ -n "$BAD" ]; then
   echo "FEHLER: Importe, die es unter Windows 2000 nicht gibt:" >&2

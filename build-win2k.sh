@@ -7,7 +7,7 @@ cd "$(dirname "$0")"
 # Audio/video decoders (FFmpeg, LGPL). KITE_NO_FFMPEG=1 builds without media playback.
 if [ "${KITE_NO_FFMPEG:-0}" != 1 ]; then sh tools/build-ffmpeg.sh win32; fi
 cmake -S . -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64-i686.cmake -DCMAKE_BUILD_TYPE=Release
-cmake --build build-win -j"$(nproc 2>/dev/null || echo 2)"
+cmake --build build-win -j"$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || echo 2)"
 i686-w64-mingw32-strip build-win/kite.exe
 sh tools/check-win2k-imports.sh build-win/kite.exe
 rm -rf dist && mkdir -p dist/Kite
