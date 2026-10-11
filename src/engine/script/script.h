@@ -52,6 +52,9 @@ class ScriptHost {
   // id (iframe element's frameId) for embedded documents. |data| is a
   // structured-clone serialization.
   virtual int FrameDepth() { return 0; }
+  // window.open / target=_blank from a script: opens a new tab if the popup
+  // policy allows it (returns false when blocked).
+  virtual bool OpenWindow(const std::string& url) { return false; }
   virtual void PostFrameMessage(int target, const std::string& data, const std::string& targetOrigin) {}
   virtual std::string FrameUrl(int target) { return std::string(); }  // empty when cross-origin
   virtual void NavigateFrame(int target, const std::string& url) {}

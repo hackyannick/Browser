@@ -23,6 +23,16 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
   Bild speichern …)
 - Downloads mit „Speichern unter“, Seitenquelltext (Strg+U), Seite speichern
 - Cookies (dauerhaft gespeichert), HTTP-Proxy, einstellbare Suchmaschine
+- **Werbe- und Trackerblocker** (eingebaute Liste der großen Werbenetze und
+  Tracker, eigene Regeln in `blocklist.txt` neben `kite.exe`: Hostnamen,
+  `||host^` oder Ausnahmen `@@||host^`); die Statusleiste zeigt, wie viele
+  Anfragen blockiert wurden
+- **Festplattencache** (Größe einstellbar, Standard 50 MB) mit
+  Revalidierung per ETag/Last-Modified – spart auf langsamen Leitungen viel Zeit
+- **Popup-Blocker**: `window.open` öffnet nur direkt nach einem Klick einen
+  neuen Tab
+- Tabs beim Start wiederherstellen (auch nach einem Absturz), optional
+  „Als Firefox ausgeben“ für Seiten, die nach dem Browser filtern
 - JavaScript (abschaltbar unter Extras → Einstellungen), JavaScript-Konsole
   (Strg+Umschalt+J), `alert`/`confirm`/`prompt` als Windows-Dialoge
 - Portabel: Einstellungen liegen in `kite.ini` neben `kite.exe`

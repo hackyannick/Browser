@@ -12,6 +12,7 @@
 
 namespace kite {
 class Http2Connection;
+class HttpCache;
 }
 #include "net/url.h"
 
@@ -32,6 +33,10 @@ struct FetchRequest {
   // Optional progress callback (called from the worker thread).
   void (*progress)(void* ctx, size_t received, size_t total);
   void* progressCtx;
+  // Navigation of a tab (never subject to the content blocker).
+  bool topLevel = false;
+  // Ignore fresh cache entries (reload): always ask the server.
+  bool revalidate = false;
   FetchRequest() : method("GET"), maxBytes(64 * 1024 * 1024), progress(0), progressCtx(0) {}
 };
 
@@ -45,6 +50,7 @@ struct FetchResponse {
   bool secure;           // delivered over TLS
   std::string protocol;  // "http/1.1" or "h2"
   std::string tlsVersion;  // "TLS 1.3" / "TLS 1.2" (https only)
+  bool blocked = false;    // refused by the content blocker
 
   FetchResponse() : ok(false), status(0), secure(false) {}
   std::string Header(const std::string& name) const;
@@ -91,6 +97,9 @@ class Network {
   void SetUserAgent(const std::string& ua) { MutexLock l(mu_); userAgent_ = ua; }
   std::string userAgent() { MutexLock l(mu_); return userAgent_; }
   CookieJar& cookies() { return cookies_; }
+  // Disk cache for GET responses (null = none).
+  void SetCache(const std::shared_ptr<HttpCache>& c) { MutexLock l(mu_); cache_ = c; }
+  std::shared_ptr<HttpCache> cache() { MutexLock l(mu_); return cache_; }
   // HTTP/2 via ALPN (on by default).
   void SetHttp2Enabled(bool on) { MutexLock l(mu_); http2_ = on; }
   bool http2Enabled() { MutexLock l(mu_); return http2_; }
@@ -112,11 +121,18 @@ class Network {
   std::vector<std::string> connecting_;       // origins with a connection being set up
   FetchResponse FetchData(const Url& url);
 
+  FetchResponse FetchNetwork(const FetchRequest& req, const Url& url);
+  std::shared_ptr<HttpCache> cache_;
   Mutex mu_;
   ProxyConfig proxy_;
   std::string userAgent_;
   CookieJar cookies_;
 };
+
+// Current time and HTTP dates ("Wed, 21 Oct 2015 07:28:00 GMT") as Unix
+// seconds (0 if unparsable).
+long long HttpNowUnix();
+long long HttpParseDate(const std::string& s);
 
 // Decompression helpers (gzip / zlib / raw deflate).
 bool Inflate(const std::string& in, const std::string& encoding, std::string& out);

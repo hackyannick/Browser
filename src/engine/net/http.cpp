@@ -1,4 +1,7 @@
 #include "net/http.h"
+
+#include "net/blocker.h"
+#include "net/cache.h"
 #include "net/http2.h"
 
 #include <algorithm>
@@ -107,6 +110,9 @@ std::string StatusText(int code) {
 }
 
 }  // namespace
+
+long long HttpNowUnix() { return NowUnix(); }
+long long HttpParseDate(const std::string& s) { return ParseHttpDate(s); }
 
 // ---------------------------------------------------------------------------
 // FetchResponse
@@ -389,6 +395,12 @@ FetchResponse Network::Fetch(const FetchRequest& req) {
     resp.finalUrl = req.url;
     return resp;
   }
+  if (!req.topLevel && ContentBlocker::Get().ShouldBlock(req.url, req.referrer)) {
+    resp.error = "Vom Werbe- und Trackerblocker blockiert";
+    resp.finalUrl = req.url;
+    resp.blocked = true;
+    return resp;
+  }
   if (url.scheme() == "file") return FetchFile(url);
   if (url.scheme() == "data") return FetchData(url);
   if (url.scheme() == "about") {
@@ -403,6 +415,40 @@ FetchResponse Network::Fetch(const FetchRequest& req) {
     resp.finalUrl = req.url;
     return resp;
   }
+  // Disk cache: plain GETs without credentials or ranges.
+  std::shared_ptr<HttpCache> cache = this->cache();
+  bool cacheable = cache && (req.method.empty() || req.method == "GET") && req.body.empty() && req.headers.empty();
+  if (!cacheable) return FetchNetwork(req, url);
+  HttpCache::Entry entry;
+  bool have = cache->Lookup(req.url, entry);
+  if (have && !req.revalidate && cache->Fresh(entry)) {
+    HttpCache::ToResponse(entry, resp);
+    resp.finalUrl = req.url;
+    return resp;
+  }
+  FetchRequest cond = req;
+  if (have) {
+    if (!entry.etag.empty()) cond.headers.push_back(std::make_pair(std::string("If-None-Match"), entry.etag));
+    if (!entry.lastModified.empty())
+      cond.headers.push_back(std::make_pair(std::string("If-Modified-Since"), entry.lastModified));
+  }
+  resp = FetchNetwork(cond, url);
+  bool sameUrl = Url::Parse(resp.finalUrl).SpecNoFragment() == url.SpecNoFragment();
+  if (have && resp.ok && resp.status == 304 && sameUrl) {
+    cache->Refresh(req.url, resp, entry);
+    FetchResponse cached;
+    HttpCache::ToResponse(entry, cached);
+    cached.finalUrl = resp.finalUrl;
+    cached.protocol = resp.protocol;
+    return cached;
+  }
+  if (resp.ok && resp.status == 200 && sameUrl) cache->Store(req.url, resp);
+  return resp;
+}
+
+FetchResponse Network::FetchNetwork(const FetchRequest& req, const Url& startUrl) {
+  FetchResponse resp;
+  Url url = startUrl;
   std::string method = req.method;
   std::string body = req.body;
   for (int redirects = 0; redirects < 15; ++redirects) {

@@ -612,7 +612,12 @@ class Element extends Node {
     const ok = this.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true }));
     if (!ok) return;
     const link = this.closest('a[href]');
-    if (link) { K.navigate(link.getAttribute('href'), false); return; }
+    if (link) {
+      const t = (link.getAttribute('target') || '').toLowerCase();
+      if (t === '_blank') K.openWin(link.getAttribute('href'));
+      else K.navigate(link.getAttribute('href'), false);
+      return;
+    }
     if ((tag === 'button' && (type === '' || type === 'submit')) || (tag === 'input' && (type === 'submit' || type === 'image'))) {
       const f = this.form; if (f) f.requestSubmit(this);
     }
@@ -2216,8 +2221,9 @@ function getComputedStyle(el) {
 const selection = { rangeCount: 0, isCollapsed: true, toString: () => '', removeAllRanges() {}, addRange() {}, getRangeAt() { return null; }, collapse() {}, empty() {} };
 
 const navigator = {
-  userAgent: 'Mozilla/5.0 (Windows NT 5.0) Kite/1.0 (like Gecko)',
-  appName: 'Netscape', appCodeName: 'Mozilla', appVersion: '5.0 (Windows NT 5.0)', product: 'Gecko',
+  get userAgent() { return K.ua(); },
+  get appVersion() { return K.ua().replace(/^Mozilla\//, ''); },
+  appName: 'Netscape', appCodeName: 'Mozilla', product: 'Gecko',
   platform: 'Win32', vendor: '', language: 'de-DE', languages: ['de-DE', 'de', 'en'],
   cookieEnabled: true, onLine: true, doNotTrack: '1', hardwareConcurrency: 1, maxTouchPoints: 0,
   webdriver: false, pdfViewerEnabled: false, plugins: [], mimeTypes: [],
@@ -2243,7 +2249,17 @@ Object.assign(G, {
   confirm: m => K.confirm(m === undefined ? '' : String(m)),
   prompt: (m, d) => K.prompt(m === undefined ? '' : String(m), d === undefined ? '' : String(d)),
   print() {}, focus() {}, blur() {}, close() {}, stop() {},
-  open: (url) => { if (url) K.navigate(String(url), false); return null; },
+  open(url, target) {
+    url = url === undefined || url === null ? '' : String(url);
+    target = target === undefined ? '_blank' : String(target).toLowerCase();
+    if (target === '_self') { if (url) K.navigate(url, false); return G; }
+    if (target === '_top' || target === '_parent') { if (url) { if (K.frameDepth() > 0) K.frameNav(target === '_top' ? -2 : -1, url); else K.navigate(url, false); } return G[target.slice(1)]; }
+    if (!K.openWin(url)) return null;  // blocked
+    const loc = { href: url, assign() {}, replace() {}, reload() {}, toString() { return url; } };
+    return { closed: false, opener: G, location: loc, close() { this.closed = true; }, focus() {}, blur() {},
+      postMessage() {}, addEventListener() {}, removeEventListener() {},
+      get document() { throw new DOMException('Blocked a frame from accessing a cross-origin frame.', 'SecurityError'); } };
+  },
   postMessage(data) { const c = __kiteDeserialize(__kiteSerialize(data)); setTimeout(() => G.dispatchEvent(new MessageEvent('message', { data: c, origin: location.origin, source: G })), 0); },
   getComputedStyle, matchMedia: q => new MediaQueryList(String(q)), getSelection: () => selection,
   scrollTo(x, y) { if (x && typeof x === 'object') { y = x.top; x = x.left; } K.scrollTo(+x || 0, +y || 0); },

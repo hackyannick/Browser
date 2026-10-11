@@ -7,10 +7,13 @@
 
 #include <algorithm>
 #include <cmath>
+#include <map>
 #include <set>
 
 #include "base/strings.h"
 #include "base/thread.h"
+#include "net/blocker.h"
+#include "net/cache.h"
 #include "html/parser.h"
 #include "image/svg.h"
 #include "page/page.h"
@@ -45,6 +48,7 @@ const UINT WM_KITE_WAKE = WM_APP + 5;    // worker/WebSocket events are waiting
 const UINT WM_KITE_FRAMEGONE = WM_APP + 6;  // an <iframe> element was destroyed
 const UINT WM_KITE_FRAMEMSG = WM_APP + 7;   // postMessage between frames is waiting
 const UINT WM_KITE_FRAMELOAD = WM_APP + 8;  // an iframe finished loading (fires its load event)
+const UINT WM_KITE_OPENTAB = WM_APP + 9;    // window.open from a script
 const int kMaxFrameDepth = 3;
 const int kMaxFramesPerPage = 24;
 const UINT_PTR kTimerWake = 4;
@@ -70,6 +74,7 @@ struct PendingNav {
   bool isPost;
   FormSubmission post;
   bool viewSource;
+  bool reload = false;  // revalidate cached copies of the document
   PendingNav() : replace(false), fromHistory(false), historyTarget(-1), restoreScroll(-1),
                  isPost(false), viewSource(false) {}
 };
@@ -98,6 +103,7 @@ class TabScriptHost : public ScriptHost {
   void PostFrameMessage(int target, const std::string& data, const std::string& targetOrigin);
   std::string FrameUrl(int target);
   void NavigateFrame(int target, const std::string& url);
+  bool OpenWindow(const std::string& url);
 };
 
 class Tab {
@@ -146,6 +152,7 @@ class Tab {
   bool jsNavIsForm = false;
   std::string jsNavUrl;
   FormSubmission jsNavForm;
+  int blocked = 0;  // requests refused by the content blocker (this page and its frames)
   // <iframe> documents are tabs without a tab strip entry.
   Tab* parentTab = nullptr;
   Node* frameNode = nullptr;   // the <iframe> element in the parent (null once destroyed)
@@ -227,6 +234,9 @@ class Browser {
   std::map<int, Tab*> frameTabs_;
   std::vector<FrameMessage> frameMessages_;
   std::vector<int> frameLoads_;
+  DWORD lastUserInput_ = 0;  // popups are allowed shortly after a click or key press
+  std::vector<std::pair<std::string, std::string> > pendingOpens_;  // url, referrer
+  void SaveSession();
 
  private:
   Tab* editTab_ = 0;
@@ -429,7 +439,14 @@ bool Browser::Create(HINSTANCE inst, const std::wstring& startUrl) {
   accel_ = CreateAcceleratorTableW(acc, sizeof acc / sizeof acc[0]);
 
   std::string start = startUrl.empty() ? App::Get().settings.homePage : Narrow(startUrl);
-  NewTab(start, true);
+  std::vector<std::string> session = Split(App::Get().ReadDataFile(L"session.txt"), '\n');
+  long long active = 0;
+  if (startUrl.empty() && App::Get().settings.restoreSession && session.size() > 1 && ParseInt(session[0], active)) {
+    for (size_t i = 1; i < session.size() && i <= 30; ++i)
+      if (!Trim(session[i]).empty()) NewTab(Trim(session[i]), false);
+  }
+  if (tabList_.empty()) NewTab(start, true);
+  else ActivateTab(tabList_[std::min((size_t)std::max(0LL, active), tabList_.size() - 1)]);
   ShowWindow(hwnd_, SW_SHOWNORMAL);
   UpdateWindow(hwnd_);
   return true;
@@ -860,6 +877,7 @@ void Browser::CloseTab(Tab* t) {
   DestroyFrames(t);
   tabList_.erase(tabList_.begin() + idx);
   TabCtrl_DeleteItem(tabs_, idx);
+  if (!tabList_.empty()) SaveSession();
   if (tabList_.empty()) {
     current_ = 0;
     delete t;
@@ -1004,6 +1022,8 @@ void Browser::StartLoad(Tab* t, const PendingNav& nav, const std::string& referr
   job->request.url = nav.url;
   job->request.cancel = t->cancel;
   job->request.referrer = referrer;
+  job->request.topLevel = !t->parentTab;
+  job->request.revalidate = nav.reload;
   if (nav.isPost) {
     job->request.method = "POST";
     job->request.body = nav.post.body;
@@ -1043,6 +1063,8 @@ void Browser::LoadInternal(Tab* t, const std::string& html, const std::string& u
 
 void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure) {
   DestroyFrames(t);  // the frames of the document just replaced
+  if (!t->parentTab) t->blocked = 0;
+  lastUserInput_ = 0;  // a navigation consumes the user activation
   PendingNav& nav = t->pending;
   if (t->historyIndex >= 0 && t->historyIndex < (int)t->history.size())
     t->history[t->historyIndex].scrollY = t->scrollY;
@@ -1090,6 +1112,19 @@ void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure)
     editNode_ = 0;
     editTab_ = 0;
   }
+  if (!t->parentTab) SaveSession();
+}
+
+// Open tabs for "restore session" (also written after every navigation, so
+// it survives a crash).
+void Browser::SaveSession() {
+  std::string out = IntToString(std::max(0, TabIndex(current_))) + "\n";
+  for (size_t i = 0; i < tabList_.size(); ++i) {
+    std::string u = tabList_[i]->history.empty() ? tabList_[i]->url : tabList_[i]->history[tabList_[i]->historyIndex].url;
+    if (u.empty()) u = "about:home";
+    out += u + "\n";
+  }
+  App::Get().WriteDataFile(L"session.txt", out);
 }
 
 void Browser::GoHistory(Tab* t, int delta) {
@@ -1126,6 +1161,7 @@ void Browser::GoHistory(Tab* t, int delta) {
   nav.url = e.url;
   nav.fromHistory = true;
   nav.historyTarget = target;
+  nav.reload = delta == 0;
   nav.isPost = e.isPost;
   nav.post = e.post;
   if (StartsWith(e.url, "about:")) {
@@ -1162,6 +1198,13 @@ void Browser::Stop(Tab* t) {
 void Browser::OnFetched(FetchJob* job) {
   FetchFinished();
   std::unique_ptr<FetchJob> owned(job);
+  if (job->response.blocked) {
+    Tab* bt = Root(TabById(job->tabId));
+    if (bt) {
+      ++bt->blocked;
+      if (bt == current_) UpdateUi();
+    }
+  }
   if (job->kind == FetchJob::kDownload) {
     if (!job->response.ok || job->response.status >= 400) {
       std::string msg = job->response.error.empty() ? "HTTP " + IntToString(job->response.status)
@@ -1262,6 +1305,14 @@ void Browser::OnFetched(FetchJob* job) {
 void Browser::OnDocument(Tab* t, FetchJob* job) {
   FetchResponse& r = job->response;
   PendingNav nav = t->pending;
+  if (!r.ok && t->parentTab) {
+    // Failed or blocked frame: leave it empty instead of an error page.
+    t->loading = false;
+    t->page->LoadHtml("<html><body></body></html>", "about:blank");
+    CommitNavigation(t, "about:blank", false);
+    RenderTab(t, true);
+    return;
+  }
   if (!r.ok) {
     t->loading = false;
     if (t->cancel && t->cancel->cancelled()) {
@@ -1666,7 +1717,7 @@ void Browser::UpdateUi() {
   std::string sec = StartsWith(t->url, "https:") ? (t->secure ? "Sicher (" + (t->tlsVersion.empty() ? std::string("TLS") : t->tlsVersion) + (t->protocol == "h2" ? ", HTTP/2)" : ")") : "") :
                     StartsWith(t->url, "http:") ? "Nicht sicher" : "";
   SendMessageW(status_, SB_SETTEXTW, 3, (LPARAM)Widen(sec).c_str());
-  std::string prog = t->loading ? "Laden ..." : "";
+  std::string prog = t->loading ? "Laden ..." : t->blocked ? IntToString(t->blocked) + " blockiert" : "";
   SendMessageW(status_, SB_SETTEXTW, 1, (LPARAM)Widen(prog).c_str());
 }
 
@@ -1854,6 +1905,7 @@ void Browser::OnClick(int x, int y, bool newTab) {
 LRESULT CALLBACK Browser::EditCtlProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   Browser* b = g_browser;
   if (m == WM_KEYDOWN) {
+    b->lastUserInput_ = GetTickCount();
     bool multi = (GetWindowLongW(h, GWL_STYLE) & ES_MULTILINE) != 0;
     if (w == VK_RETURN && !multi) {
       b->CommitEdit(true);
@@ -2609,6 +2661,15 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         }
       }
       return 0;
+    case WM_KITE_OPENTAB: {
+      std::vector<std::pair<std::string, std::string> > list;
+      list.swap(pendingOpens_);
+      for (size_t i = 0; i < list.size(); ++i) {
+        Tab* nt = NewTab(list[i].first == "about:blank" ? std::string("about:blank") : list[i].first, true);
+        (void)nt;
+      }
+      return 0;
+    }
     case WM_KITE_FRAMEMSG:
       DeliverFrameMessages();
       return 0;
@@ -2674,6 +2735,7 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       DestroyWindow(hwnd_);
       return 0;
     case WM_DESTROY:
+      SaveSession();
       for (size_t i = 0; i < tabList_.size(); ++i)
         if (tabList_[i]->cancel) tabList_[i]->cancel->Cancel();
       App::Get().SaveCookies();
@@ -2949,6 +3011,20 @@ void TabScriptHost::NavigateFrame(int target, const std::string& url) {
   PostMessageW(g_browser->hwnd_, WM_KITE_JSNAV, to->id, 0);
 }
 
+bool TabScriptHost::OpenWindow(const std::string& url) {
+  Browser* b = g_browser;
+  Tab* t = b->TabById(tabId);
+  if (!t) return false;
+  if (App::Get().settings.blockPopups && GetTickCount() - b->lastUserInput_ > 1500) {
+    b->SetStatus("Popup blockiert: " + url);
+    return false;
+  }
+  b->lastUserInput_ = 0;  // one popup per click
+  b->pendingOpens_.push_back(std::make_pair(url, t->url));
+  PostMessageW(b->hwnd_, WM_KITE_OPENTAB, 0, 0);
+  return true;
+}
+
 void Browser::EndScript(Tab* t) {
   if (--scriptDepth_ > 0) return;
   if (IsAlive(t)) AfterScript(t);
@@ -3177,6 +3253,20 @@ INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       SetDlgItemInt(h, IDC_SET_ZOOM, s.defaultZoom, FALSE);
       CheckDlgButton(h, IDC_SET_IMAGES, s.loadImages ? BST_CHECKED : BST_UNCHECKED);
       CheckDlgButton(h, IDC_SET_JS, s.javaScript ? BST_CHECKED : BST_UNCHECKED);
+      CheckDlgButton(h, IDC_SET_ADBLOCK, s.blockAds ? BST_CHECKED : BST_UNCHECKED);
+      CheckDlgButton(h, IDC_SET_POPUPS, s.blockPopups ? BST_CHECKED : BST_UNCHECKED);
+      CheckDlgButton(h, IDC_SET_RESTORE, s.restoreSession ? BST_CHECKED : BST_UNCHECKED);
+      CheckDlgButton(h, IDC_SET_COMPATUA, s.compatUa ? BST_CHECKED : BST_UNCHECKED);
+      SetDlgItemInt(h, IDC_SET_CACHE, s.cacheMb, FALSE);
+      {
+        std::shared_ptr<HttpCache> c = Network::Get().cache();
+        long long used = c ? c->size() : 0;
+        std::string usedText = used < 1024 * 1024 ? IntToString((used + 1023) / 1024) + " KB"
+                                                  : IntToString(used / (1024 * 1024)) + " MB";
+        std::string info = "Cache belegt " + usedText + "; bisher " +
+                           IntToString(ContentBlocker::Get().blockedTotal()) + " Werbe-/Trackeranfragen blockiert.";
+        SetDlgItemTextW(h, IDC_SET_CACHEINFO, Widen(info).c_str());
+      }
       SetDlgItemTextW(h, IDC_SET_COOKIEINFO,
                       Widen("Gespeicherte Cookies: " + IntToString((long long)Network::Get().cookies().Count())).c_str());
       return TRUE;
@@ -3188,6 +3278,12 @@ INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           App::Get().SaveCookies();
           SetDlgItemTextW(h, IDC_SET_COOKIEINFO, L"Alle Cookies und Websitedaten gel\x00f6scht.");
           return TRUE;
+        case IDC_SET_CLEARCACHE: {
+          std::shared_ptr<HttpCache> c = Network::Get().cache();
+          if (c) c->Clear();
+          SetDlgItemTextW(h, IDC_SET_CACHEINFO, L"Der Cache wurde geleert.");
+          return TRUE;
+        }
         case IDOK: {
           wchar_t buf[2048];
           GetDlgItemTextW(h, IDC_SET_HOME, buf, 2048);
@@ -3201,6 +3297,12 @@ INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
           if (z >= 30 && z <= 300) s.defaultZoom = z;
           s.loadImages = IsDlgButtonChecked(h, IDC_SET_IMAGES) == BST_CHECKED;
           s.javaScript = IsDlgButtonChecked(h, IDC_SET_JS) == BST_CHECKED;
+          s.blockAds = IsDlgButtonChecked(h, IDC_SET_ADBLOCK) == BST_CHECKED;
+          s.blockPopups = IsDlgButtonChecked(h, IDC_SET_POPUPS) == BST_CHECKED;
+          s.restoreSession = IsDlgButtonChecked(h, IDC_SET_RESTORE) == BST_CHECKED;
+          s.compatUa = IsDlgButtonChecked(h, IDC_SET_COMPATUA) == BST_CHECKED;
+          int mb = (int)GetDlgItemInt(h, IDC_SET_CACHE, 0, FALSE);
+          if (mb >= 0 && mb <= 2000) s.cacheMb = mb;
           if (s.homePage.empty()) s.homePage = "about:home";
           EndDialog(h, IDOK);
           return TRUE;
@@ -3307,6 +3409,7 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_KEYDOWN: {
       if (!t) return 0;
+      lastUserInput_ = GetTickCount();
       RECT rc;
       GetClientRect(h, &rc);
       bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -3402,6 +3505,7 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_LBUTTONUP: {
       if (!t) return 0;
+      lastUserInput_ = GetTickCount();
       ReleaseCapture();
       bool wasDragging = dragging_;
       dragging_ = false;

@@ -215,6 +215,11 @@ WFN(WorkerName) {
   return JS_NewStringLen(ctx, n.data(), n.size());
 }
 
+WFN(WorkerUa) {
+  std::string ua = Network::Get().userAgent();
+  return JS_NewStringLen(ctx, ua.data(), ua.size());
+}
+
 int Interrupt(JSRuntime*, void* opaque) { return ((WorkerThread*)opaque)->terminated() ? 1 : 0; }
 
 void Rejection(JSContext* ctx, JSValueConst promise, JSValueConst reason, JS_BOOL handled, void*) {
@@ -358,7 +363,7 @@ void WorkerThread::Run() {
                            {"timer", SetTimer, 3},      {"clearTimer", ClearTimer, 1},
                            {"importScripts", ImportScripts, 1}, {"fetchSync", FetchSync, 4},
                            {"close", Close, 0},         {"url", WorkerUrl, 0},
-                           {"name", WorkerName, 0}};
+                           {"name", WorkerName, 0},     {"ua", WorkerUa, 0}};
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)
     JS_SetPropertyStr(ctx, k, fns[i].name, JS_NewCFunction(ctx, fns[i].fn, fns[i].name, fns[i].argc));
   JS_SetPropertyStr(ctx, global, "__w", k);

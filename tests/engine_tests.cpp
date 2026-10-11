@@ -22,6 +22,8 @@
 #include "image/image.h"
 #include "image/svg.h"
 #include "media/media.h"
+#include "net/blocker.h"
+#include "net/cache.h"
 #include "net/hpack.h"
 #include "net/tls13.h"
 #include "net/websocket.h"
@@ -1506,6 +1508,98 @@ void TestFrames() {
   }
 }
 
+void TestBlockerAndCache() {
+  ContentBlocker& b = ContentBlocker::Get();
+  CHECK_EQ(ContentBlocker::SiteOf("www.news.example.co.uk"), "example.co.uk");
+  CHECK_EQ(ContentBlocker::SiteOf("a.b.example.com"), "example.com");
+  CHECK_EQ(ContentBlocker::SiteOf("192.168.1.10"), "192.168.1.10");
+  CHECK(b.ShouldBlock("https://securepubads.g.doubleclick.net/tag/js/gpt.js", "https://www.spiegel.de/"));
+  CHECK(b.ShouldBlock("https://www.google-analytics.com/analytics.js", "https://example.org/"));
+  CHECK(!b.ShouldBlock("https://www.google.com/recaptcha/api.js", "https://example.org/"));
+  CHECK(!b.ShouldBlock("https://cdn.example.org/app.js", "https://example.org/"));
+  // First-party requests stay allowed.
+  CHECK(!b.ShouldBlock("https://www.criteo.com/wp-content/x.css", "https://www.criteo.com/"));
+  b.AddRules("! comment\n||ads.example.net^\n0.0.0.0 track.example.io\n@@||good.doubleclick.net^\n||x.com/path\n");
+  CHECK(b.ShouldBlock("http://ads.example.net/a.js", "https://site.test/"));
+  CHECK(b.ShouldBlock("http://sub.ads.example.net/a.js", "https://site.test/"));
+  CHECK(b.ShouldBlock("https://track.example.io/p", "https://site.test/"));
+  CHECK(!b.ShouldBlock("https://good.doubleclick.net/p", "https://site.test/"));
+  CHECK(!b.ShouldBlock("https://x.com/path", "https://site.test/"));
+  b.SetEnabled(false);
+  CHECK(!b.ShouldBlock("https://www.google-analytics.com/analytics.js", "https://example.org/"));
+  b.SetEnabled(true);
+  // The network refuses blocked requests before connecting.
+  {
+    FetchRequest r;
+    r.url = "https://www.googletagmanager.com/gtm.js";
+    r.referrer = "https://example.org/";
+    FetchResponse resp = Network::Get().Fetch(r);
+    CHECK(resp.blocked);
+    CHECK(!resp.ok);
+  }
+
+  // Disk cache.
+  std::string dir = "kite-test-cache";
+  {
+    HttpCache c(dir, 1024 * 1024);
+    c.Clear();
+    FetchResponse r;
+    r.ok = true;
+    r.status = 200;
+    r.secure = true;
+    r.body = std::string("body\nwith\0nul", 13);
+    r.headers.push_back(std::make_pair(std::string("Content-Type"), std::string("text/css")));
+    r.headers.push_back(std::make_pair(std::string("Cache-Control"), std::string("public, max-age=600")));
+    r.headers.push_back(std::make_pair(std::string("ETag"), std::string("\"v1\"")));
+    r.headers.push_back(std::make_pair(std::string("Content-Encoding"), std::string("gzip")));
+    c.Store("https://cdn.test/a.css#frag", r);
+    HttpCache::Entry e;
+    CHECK(c.Lookup("https://cdn.test/a.css", e));
+    CHECK(c.Fresh(e));
+    CHECK_EQ(e.body, r.body);
+    CHECK_EQ(e.etag, "\"v1\"");
+    FetchResponse out;
+    HttpCache::ToResponse(e, out);
+    CHECK_EQ(out.Header("content-type"), "text/css");
+    CHECK_EQ(out.Header("content-encoding"), "");  // stored decoded
+    // Not cacheable: no-store, cookies, Vary.
+    FetchResponse ns = r;
+    ns.headers[1].second = "no-store";
+    c.Store("https://cdn.test/b.css", ns);
+    CHECK(!c.Lookup("https://cdn.test/b.css", e));
+    FetchResponse ck = r;
+    ck.headers.push_back(std::make_pair(std::string("Set-Cookie"), std::string("a=1")));
+    c.Store("https://cdn.test/c.css", ck);
+    CHECK(!c.Lookup("https://cdn.test/c.css", e));
+    // Stale with a validator: kept for revalidation; 304 refreshes it.
+    FetchResponse st = r;
+    st.headers[1].second = "no-cache";
+    c.Store("https://cdn.test/d.js", st);
+    CHECK(c.Lookup("https://cdn.test/d.js", e));
+    CHECK(!c.Fresh(e));
+    FetchResponse nm;
+    nm.ok = true;
+    nm.status = 304;
+    nm.headers.push_back(std::make_pair(std::string("Cache-Control"), std::string("max-age=60")));
+    c.Refresh("https://cdn.test/d.js", nm, e);
+    CHECK(c.Fresh(e));
+    CHECK_EQ(e.body, r.body);
+    HttpCache::Entry e2;
+    CHECK(c.Lookup("https://cdn.test/d.js", e2));
+    CHECK(c.Fresh(e2));
+  }
+  {
+    // Reopened from disk; the size limit evicts the oldest entries.
+    HttpCache c(dir, 1024 * 1024);
+    HttpCache::Entry e;
+    CHECK(c.Lookup("https://cdn.test/a.css", e));
+    CHECK(c.size() > 0);
+    c.SetLimit(1);
+    CHECK_EQ(c.size(), 0);
+    CHECK(!c.Lookup("https://cdn.test/a.css", e));
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1545,6 +1639,7 @@ int main() {
   TestTls13();
   TestMedia();
   TestFrames();
+  TestBlockerAndCache();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

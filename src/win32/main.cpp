@@ -4,6 +4,8 @@
 #include <shellapi.h>
 
 #include "base/strings.h"
+#include "net/blocker.h"
+#include "net/cache.h"
 #include "win32/app.h"
 
 namespace kite {
@@ -86,6 +88,11 @@ void App::Init(HINSTANCE inst) {
   settings.http2 = IniGet(L"Http2", "1") != "0";
   settings.tls13 = IniGet(L"Tls13", "1") != "0";
   if (ParseInt(IniGet(L"DefaultZoom", "100"), v)) settings.defaultZoom = (int)v;
+  settings.blockAds = IniGet(L"BlockAds", "1") != "0";
+  settings.blockPopups = IniGet(L"BlockPopups", "1") != "0";
+  settings.restoreSession = IniGet(L"RestoreSession", "0") != "0";
+  settings.compatUa = IniGet(L"CompatUserAgent", "0") != "0";
+  if (ParseInt(IniGet(L"CacheMB", "50"), v) && v >= 0 && v <= 2000) settings.cacheMb = (int)v;
 
   NetInit();
   std::string pem = ReadFileUtf8(exeDir + L"\\cacert.pem");
@@ -100,6 +107,8 @@ void App::Init(HINSTANCE inst) {
   }
   Network::Get().cookies().Deserialize(ReadFileUtf8(dataDir + L"\\cookies.txt"));
   localStorage.Deserialize(ReadFileUtf8(dataDir + L"\\storage.txt"));
+  // Own filter rules (host names, "||host^", "@@||host^" exceptions).
+  ContentBlocker::Get().AddRules(ReadFileUtf8(dataDir + L"\\blocklist.txt"));
   ApplyNetworkSettings();
   LoadBookmarks();
 }
@@ -111,7 +120,19 @@ void App::ApplyNetworkSettings() {
   Network::Get().SetProxy(pc);
   Network::Get().SetHttp2Enabled(settings.http2);
   SetTls13Enabled(settings.tls13);
+  ContentBlocker::Get().SetEnabled(settings.blockAds);
+  Network::Get().SetUserAgent(settings.compatUa
+                                  ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
+                                  : "Mozilla/5.0 (Windows NT 5.0) Kite/1.0 (like Gecko)");
+  long long cacheBytes = (long long)settings.cacheMb * 1024 * 1024;
+  std::shared_ptr<HttpCache> cache = Network::Get().cache();
+  if (cache) cache->SetLimit(cacheBytes);
+  else if (cacheBytes > 0) Network::Get().SetCache(std::make_shared<HttpCache>(Narrow(dataDir) + "\\cache", cacheBytes));
 }
+
+std::string App::ReadDataFile(const wchar_t* name) { return ReadFileUtf8(dataDir + L"\\" + name); }
+
+void App::WriteDataFile(const wchar_t* name, const std::string& data) { WriteFileUtf8(dataDir + L"\\" + name, data); }
 
 void App::SaveSettings() {
   IniSet(L"HomePage", settings.homePage);
@@ -123,6 +144,11 @@ void App::SaveSettings() {
   IniSet(L"Http2", settings.http2 ? "1" : "0");
   IniSet(L"Tls13", settings.tls13 ? "1" : "0");
   IniSet(L"DefaultZoom", IntToString(settings.defaultZoom));
+  IniSet(L"BlockAds", settings.blockAds ? "1" : "0");
+  IniSet(L"BlockPopups", settings.blockPopups ? "1" : "0");
+  IniSet(L"RestoreSession", settings.restoreSession ? "1" : "0");
+  IniSet(L"CompatUserAgent", settings.compatUa ? "1" : "0");
+  IniSet(L"CacheMB", IntToString(settings.cacheMb));
 }
 
 void App::SaveCookies() {

@@ -38,6 +38,11 @@ struct Settings {
   bool http2;                 // kite.ini: Http2=0 disables HTTP/2
   bool tls13 = true;          // kite.ini: Tls13=0 uses TLS 1.2 only
   int defaultZoom;            // percent
+  bool blockAds = true;       // content blocker for ad and tracking hosts
+  bool blockPopups = true;    // window.open only right after a click or key press
+  bool restoreSession = false;  // reopen the tabs of the last session
+  bool compatUa = false;      // identify as Firefox (sites that sniff browsers)
+  int cacheMb = 50;           // disk cache size, 0 = off
   Settings() : proxyPort(0), loadImages(true), javaScript(true), http2(true), defaultZoom(100) {}
 };
 
@@ -50,6 +55,9 @@ class App {
   void LoadBookmarks();
   void SaveBookmarks();
   void ApplyNetworkSettings();
+  // Files in the data directory (session.txt ...).
+  std::string ReadDataFile(const wchar_t* name);
+  void WriteDataFile(const wchar_t* name, const std::string& data);
 
   HINSTANCE instance;
   std::wstring dataDir;  // where kite.ini, cookies.txt, bookmarks.txt live

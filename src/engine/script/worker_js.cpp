@@ -121,7 +121,7 @@ class XMLHttpRequest extends EventTarget {
   abort() {}
 }
 const performance = { now: () => Date.now() - start, timeOrigin: start, mark() {}, measure() {}, getEntriesByName: () => [], getEntriesByType: () => [] };
-const navigator = { userAgent: 'Mozilla/5.0 (Windows NT 5.0) Kite/1.0 (like Gecko)', language: 'de-DE', languages: ['de-DE', 'de', 'en'],
+const navigator = { userAgent: __w.ua(), language: 'de-DE', languages: ['de-DE', 'de', 'en'],
   hardwareConcurrency: 1, onLine: true, platform: 'Win32' };
 Object.assign(G, {
   self: G, console: consoleObj, location, navigator, performance, fetch, XMLHttpRequest,

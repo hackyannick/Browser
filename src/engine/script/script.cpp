@@ -22,6 +22,7 @@
 #include "css/stylesheet.h"
 #include "html/parser.h"
 #include "media/media.h"
+#include "net/http.h"
 #include "net/url.h"
 #include "page/page.h"
 #include "script/common.h"
@@ -676,6 +677,21 @@ KITE_FN(FrameNav) {
   Engine(ctx)->host()->NavigateFrame(Int(ctx, argv[0]), Str(ctx, argv[1]));
   return JS_UNDEFINED;
 }
+
+KITE_FN(OpenWin) {
+  ARGS_AT_LEAST(1);
+  ScriptEngine* e = Engine(ctx);
+  std::string s = Str(ctx, argv[0]);
+  std::string url = "about:blank";
+  if (!s.empty()) {
+    Url u = e->page()->ResolveUrl(s);
+    if (!u.valid()) return JS_FALSE;
+    url = u.Spec();
+  }
+  return JS_NewBool(ctx, e->host()->OpenWindow(url));
+}
+
+KITE_FN(UserAgent) { return NewStr(ctx, Network::Get().userAgent()); }
 
 KITE_FN(MdCanPlay) {
   ARGS_AT_LEAST(1);
@@ -1366,7 +1382,7 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"attachShadow", AttachShadow, 1}, {"shadow", ShadowOf, 1}, {"host", HostOf, 1},
       {"setDefined", SetDefined, 1}, {"customs", Customs, 1}, {"connected", Connected, 1}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
       {"frameDepth", FrameDepth, 0}, {"frameId", FrameIdOf, 1}, {"postFrame", PostFrame, 3},
-      {"frameUrl", FrameUrl, 1}, {"frameNav", FrameNav, 2},
+      {"frameUrl", FrameUrl, 1}, {"frameNav", FrameNav, 2}, {"openWin", OpenWin, 1}, {"ua", UserAgent, 0},
       {"mdLoad", MdLoad, 1}, {"mdCmd", MdCmd, 3}, {"mdStatus", MdStatus, 1}, {"mdCanPlay", MdCanPlay, 1},
   };
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)
