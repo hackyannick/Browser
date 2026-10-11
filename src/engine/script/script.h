@@ -67,6 +67,16 @@ struct ScriptRequest {
   std::vector<std::pair<std::string, std::string> > headers;
 };
 
+// Details of a user input event (mouse coordinates are viewport CSS px).
+struct InputEventInfo {
+  float clientX = 0, clientY = 0;
+  int button = 0, buttons = 0;
+  std::string key, code;  // KeyboardEvent.key / .code
+  int keyCode = 0;
+  bool shift = false, ctrl = false, alt = false, repeat = false;
+  std::string data;  // InputEvent.data
+};
+
 class ScriptEngine {
  public:
   ScriptEngine(Page* page, ScriptHost* host);
@@ -83,6 +93,13 @@ class ScriptEngine {
   // Dispatches a DOM event (click, input, change, submit ...) to |target|.
   // Returns false if a listener called preventDefault().
   bool DispatchEvent(Node* target, const char* type);
+  // A user input event (mouse, pointer, keyboard, focus, input) with its
+  // details; null target = the focused element (or body). Returns false if
+  // a listener called preventDefault().
+  bool DispatchInput(Node* target, const char* type, const InputEventInfo& info);
+  // Hover moved from |from| to |to|: mouseout/over, mouseleave/enter and the
+  // pointer variants.
+  void DispatchHover(Node* from, Node* to, const InputEventInfo& info);
 
   // Timers: milliseconds until the next timer is due (-1 if none).
   int NextTimerDelay();

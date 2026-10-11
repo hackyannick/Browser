@@ -75,7 +75,8 @@ const EVENT_PROPS = ['click', 'dblclick', 'mousedown', 'mouseup', 'mouseover', '
   'readystatechange', 'message', 'popstate', 'hashchange', 'DOMContentLoaded', 'abort', 'progress',
   'loadend', 'loadstart', 'timeout', 'open', 'close', 'messageerror', 'play', 'pause', 'playing', 'ended',
   'timeupdate', 'durationchange', 'loadedmetadata', 'loadeddata', 'canplay', 'canplaythrough', 'seeking', 'seeked',
-  'volumechange', 'ratechange', 'waiting', 'emptied', 'stalled', 'suspend'];
+  'volumechange', 'ratechange', 'waiting', 'emptied', 'stalled', 'suspend', 'pointermove', 'pointerover', 'pointerout',
+  'pointerenter', 'pointerleave', 'pointercancel', 'focusin', 'focusout', 'auxclick', 'beforeinput'];
 
 class EventTarget {
   addEventListener(type, fn, opts) {
@@ -2361,7 +2362,10 @@ G.__kiteDocEvent = function (type) {
     G.dispatchEvent(new Event('pageshow'));
   }
 };
-G.__kiteWinEvent = type => { G.dispatchEvent(new Event(type)); };
+G.__kiteWinEvent = type => {
+  if (type === 'scroll') doc.dispatchEvent(new Event('scroll', { bubbles: true }));  // reaches window too
+  else G.dispatchEvent(new Event(type));
+};
 G.__kiteMediaEvent = function (h, type) {
   const el = W(h);
   if (!el) return;
@@ -2372,6 +2376,49 @@ G.__kiteMediaEvent = function (h, type) {
   const ev = new Event(type);
   ev.isTrusted = true;
   el.dispatchEvent(ev);
+};
+// User input from the platform with coordinates, keys and modifiers.
+const NO_BUBBLE = { mouseenter: 1, mouseleave: 1, pointerenter: 1, pointerleave: 1, focus: 1, blur: 1, load: 1 };
+function makeInputEvent(type, info) {
+  const bubbles = !NO_BUBBLE[type];
+  const cancelable = type !== 'focus' && type !== 'blur' && type !== 'focusin' && type !== 'focusout' && type !== 'input' &&
+    type !== 'mouseenter' && type !== 'mouseleave' && type !== 'pointerenter' && type !== 'pointerleave';
+  const init = Object.assign({ bubbles, cancelable, composed: true }, info);
+  let ev;
+  if (type.startsWith('pointer')) ev = new PointerEvent(type, init);
+  else if (type.startsWith('mouse') || type === 'click' || type === 'dblclick' || type === 'contextmenu' || type === 'auxclick') ev = new MouseEvent(type, init);
+  else if (type.startsWith('key')) ev = new KeyboardEvent(type, init);
+  else if (type.startsWith('focus') || type === 'blur') ev = new FocusEvent(type, init);
+  else if (type === 'input' || type === 'beforeinput') ev = new InputEvent(type, Object.assign(init, { data: info.data || null, inputType: info.data ? 'insertText' : 'deleteContentBackward' }));
+  else if (type === 'wheel') ev = new MouseEvent(type, init);
+  else ev = new Event(type, init);
+  if (ev.repeat !== undefined) ev.repeat = !!info.repeat;
+  ev.isTrusted = true;
+  ev.composed = true;
+  return ev;
+}
+G.__kiteInput = function (h, type, info) {
+  let target = h ? W(h) : null;
+  if (!target) target = doc.activeElement || doc.body || doc.documentElement;
+  if (!target) return true;
+  if (type === 'focus' || type === 'focusin') doc._active = target;
+  if ((type === 'blur' || type === 'focusout') && doc._active === target) doc._active = null;
+  const ev = makeInputEvent(type, info);
+  if (ev instanceof MouseEvent) {
+    try { const r = target.getBoundingClientRect(); ev.offsetX = ev.clientX - r.left; ev.offsetY = ev.clientY - r.top; } catch (e) {}
+    ev.pageX = ev.clientX + G.scrollX; ev.pageY = ev.clientY + G.scrollY;
+  }
+  return target.dispatchEvent(ev);
+};
+G.__kiteHover = function (fromH, toH, info) {
+  const from = fromH ? W(fromH) : null, to = toH ? W(toH) : null;
+  const chain = n => { const a = []; for (; n && n.nodeType === 1; n = n.parentNode || (n.host || null)) a.push(n); return a; };
+  const fromChain = chain(from), toChain = chain(to);
+  const fire = (t, type, related) => { const ev = makeInputEvent(type, Object.assign({}, info, { relatedTarget: related })); ev.relatedTarget = related; t.dispatchEvent(ev); };
+  if (from && from.isConnected !== false) { fire(from, 'pointerout', to); fire(from, 'mouseout', to); }
+  for (const n of fromChain) if (toChain.indexOf(n) < 0) { fire(n, 'pointerleave', to); fire(n, 'mouseleave', to); }
+  if (to) { fire(to, 'pointerover', from); fire(to, 'mouseover', from); }
+  for (const n of toChain.slice().reverse()) if (fromChain.indexOf(n) < 0) { fire(n, 'pointerenter', from); fire(n, 'mouseenter', from); }
 };
 G.__kiteDispatch = function (h, type) {
   const target = W(h);

@@ -138,6 +138,11 @@ class Page {
   // Click inside a media element's built-in controls (document coordinates).
   bool MediaClick(Node* target, float x, float y);
 
+  // Element under the mouse and focused element (:hover, :focus,
+  // :focus-within). Returns true if the state changed and a stylesheet
+  // uses those pseudo-classes, i.e. Restyle() + Relayout() are due.
+  bool SetInteraction(const Node* hovered, const Node* focused);
+
   // Plain text of the whole document (for "find in page").
   std::vector<std::pair<Rect, std::string> > TextRuns() const;
 
@@ -180,6 +185,8 @@ class Page {
   std::unique_ptr<LayoutBox> root_;
   LayoutEngine engine_;
   DisplayList display_;
+  const Node* hovered_ = nullptr;
+  const Node* focused_ = nullptr;
   std::map<int, std::pair<int, int> > mediaSizes_;  // player id -> video size at the last layout
   unsigned mediaGeneration_ = 0;
   float lastViewportW_ = 800, lastViewportH_ = 600;

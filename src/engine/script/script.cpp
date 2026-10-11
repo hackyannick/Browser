@@ -1568,6 +1568,48 @@ bool ScriptEngine::DispatchEvent(Node* target, const char* type) {
   return ok;
 }
 
+static JSValue InfoObject(JSContext* ctx, const InputEventInfo& in) {
+  JSValue o = JS_NewObject(ctx);
+  JS_SetPropertyStr(ctx, o, "clientX", JS_NewFloat64(ctx, in.clientX));
+  JS_SetPropertyStr(ctx, o, "clientY", JS_NewFloat64(ctx, in.clientY));
+  JS_SetPropertyStr(ctx, o, "button", JS_NewInt32(ctx, in.button));
+  JS_SetPropertyStr(ctx, o, "buttons", JS_NewInt32(ctx, in.buttons));
+  JS_SetPropertyStr(ctx, o, "key", JS_NewStringLen(ctx, in.key.data(), in.key.size()));
+  JS_SetPropertyStr(ctx, o, "code", JS_NewStringLen(ctx, in.code.data(), in.code.size()));
+  JS_SetPropertyStr(ctx, o, "keyCode", JS_NewInt32(ctx, in.keyCode));
+  JS_SetPropertyStr(ctx, o, "shiftKey", JS_NewBool(ctx, in.shift));
+  JS_SetPropertyStr(ctx, o, "ctrlKey", JS_NewBool(ctx, in.ctrl));
+  JS_SetPropertyStr(ctx, o, "altKey", JS_NewBool(ctx, in.alt));
+  JS_SetPropertyStr(ctx, o, "repeat", JS_NewBool(ctx, in.repeat));
+  JS_SetPropertyStr(ctx, o, "data", JS_NewStringLen(ctx, in.data.data(), in.data.size()));
+  return o;
+}
+
+bool ScriptEngine::DispatchInput(Node* target, const char* type, const InputEventInfo& info) {
+  JSContext* ctx = (JSContext*)ctx_;
+  deadline_ = NowMs() + timeLimit_;
+  JSValue args[3] = {JS_NewInt32(ctx, HandleOf(target)), JS_NewString(ctx, type), InfoObject(ctx, info)};
+  JSValue r;
+  CallKiteHook(this, ctx, "__kiteInput", 3, args, &r);
+  bool ok = JS_ToBool(ctx, r) != 0 || JS_IsUndefined(r);
+  JS_FreeValue(ctx, r);
+  JS_FreeValue(ctx, args[1]);
+  JS_FreeValue(ctx, args[2]);
+  RunJobs();
+  deadline_ = 0;
+  return ok;
+}
+
+void ScriptEngine::DispatchHover(Node* from, Node* to, const InputEventInfo& info) {
+  JSContext* ctx = (JSContext*)ctx_;
+  deadline_ = NowMs() + timeLimit_;
+  JSValue args[3] = {JS_NewInt32(ctx, HandleOf(from)), JS_NewInt32(ctx, HandleOf(to)), InfoObject(ctx, info)};
+  CallKiteHook(this, ctx, "__kiteHover", 3, args, 0);
+  JS_FreeValue(ctx, args[2]);
+  RunJobs();
+  deadline_ = 0;
+}
+
 int ScriptEngine::HandleOf(Node* n) {
   if (!n) return 0;
   if (n->scriptHandle > 0 && n->scriptHandle < (int)handles_.size() && handles_[n->scriptHandle] == n)

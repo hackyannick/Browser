@@ -14,6 +14,7 @@ Page::Page(FontProvider* fonts, ImageProvider* images)
 Page::~Page() {}
 
 void Page::LoadHtml(const std::string& utf8, const std::string& url) {
+  hovered_ = focused_ = nullptr;
   script_.reset();  // references the old document
   anim_.Clear();
   scripts_.clear();
@@ -44,6 +45,7 @@ void Page::SetUrl(const std::string& url) {
 }
 
 void Page::LoadPlainText(const std::string& utf8, const std::string& url) {
+  hovered_ = focused_ = nullptr;
   std::string html = "<!DOCTYPE html><html><head><title>" + HtmlEscape(url) +
                      "</title></head><body style=\"margin:8px\"><pre style=\"white-space:pre-wrap;"
                      "font-family:monospace;font-size:13px;margin:0\">" +
@@ -52,6 +54,7 @@ void Page::LoadPlainText(const std::string& utf8, const std::string& url) {
 }
 
 void Page::LoadImageDocument(const std::string& url) {
+  hovered_ = focused_ = nullptr;
   std::string name = url.substr(url.rfind('/') + 1);
   std::string html = "<!DOCTYPE html><html><head><title>" + HtmlEscape(name) +
                      "</title></head><body style=\"margin:0;background:#808080;text-align:center\">"
@@ -463,6 +466,8 @@ void Page::Restyle(float viewportW, float viewportH) {
     resolver_.AddAuthorSheet(e.sheet, e.isLink ? e.url : baseUrl_.Spec(), e.scope);
   }
   ElementState st;
+  st.hovered = hovered_;
+  st.focused = focused_;
   anim_.BeforeRestyle(doc_.get());
   resolver_.ResolveDocument(*doc_, mc, baseUrl_.Spec(), st);
   AnimationController::Context ac;
@@ -490,6 +495,20 @@ void Page::Relayout(float viewportW, float viewportH) {
   lastViewportH_ = viewportH;
   Painter p(&engine_, images_);
   p.Paint(root_.get(), viewportW, viewportH, display_);
+}
+
+bool Page::SetInteraction(const Node* hovered, const Node* focused) {
+  if (hovered == hovered_ && focused == focused_) return false;
+  bool hoverChanged = hovered != hovered_, focusChanged = focused != focused_;
+  hovered_ = hovered;
+  focused_ = focused;
+  bool usesHover = false, usesFocus = false;
+  for (size_t i = 0; i < sheets_.size(); ++i) {
+    const std::string& css = sheets_[i].css;
+    if (css.find(":hover") != std::string::npos) usesHover = true;
+    if (css.find(":focus") != std::string::npos) usesFocus = true;
+  }
+  return (hoverChanged && usesHover) || (focusChanged && usesFocus);
 }
 
 int Page::TickMedia() {

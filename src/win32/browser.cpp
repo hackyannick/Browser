@@ -52,6 +52,8 @@ const UINT WM_KITE_OPENTAB = WM_APP + 9;    // window.open from a script
 const int kMaxFrameDepth = 3;
 const int kMaxFramesPerPage = 24;
 const UINT_PTR kTimerWake = 4;
+const UINT_PTR kTimerScrollEvent = 5;  // coalesced "scroll" events for scripts
+const UINT_PTR kTimerHoverStyle = 6;   // restyle for :hover / :focus (debounced)
 const int kZoomLevels[] = {30, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300};
 
 struct HistoryEntry {
@@ -153,6 +155,8 @@ class Tab {
   std::string jsNavUrl;
   FormSubmission jsNavForm;
   int blocked = 0;  // requests refused by the content blocker (this page and its frames)
+  bool scrollEventPending = false;
+  bool hoverStylePending = false;
   // <iframe> documents are tabs without a tab strip entry.
   Tab* parentTab = nullptr;
   Node* frameNode = nullptr;   // the <iframe> element in the parent (null once destroyed)
@@ -235,6 +239,21 @@ class Browser {
   std::vector<FrameMessage> frameMessages_;
   std::vector<int> frameLoads_;
   DWORD lastUserInput_ = 0;  // popups are allowed shortly after a click or key press
+  // Input events for scripts.
+  bool DispatchInput(Tab* t, Node* target, const char* type, const InputEventInfo& info);
+  InputEventInfo MouseInfo(Tab* t, float docX, float docY, int button, int buttons);
+  void UpdateHover(Tab* t, Node* n, const InputEventInfo& info);
+  void OnEditChanged();
+  void ScrollEventLater(Tab* t);
+  void RestyleForInteraction(Tab* t, Node* hovered);
+  int hoverTab_ = 0;
+  Node* hoverNode_ = 0;
+  int focusTab_ = 0;          // document that receives key events (last clicked)
+  DWORD lastMouseMoveEvent_ = 0;
+  bool pendingDblClick_ = false;
+  bool suppressChar_ = false;  // keydown was cancelled: drop its WM_CHAR
+  bool syncingEdit_ = false;
+  std::string editInitial_;    // value when editing started (change event)
   std::vector<std::pair<std::string, std::string> > pendingOpens_;  // url, referrer
   void SaveSession();
 
@@ -275,6 +294,8 @@ class Browser {
   void SetStatus(const std::string& s);
   void OnClick(int x, int y, bool newTab);
   void BeginEdit(Tab* t, Node* n);
+  bool EditRect(Tab* t, Node* n, RECT& out);
+  void FollowEditor(Tab* t);
   void CommitEdit(bool submit);
   void ShowSelectPopup(Tab* t, Node* select);
   void ToggleControl(Tab* t, Node* n);
@@ -353,6 +374,8 @@ bool IsTextMime(const std::string& m) {
          m == "application/xml" || m == "application/rss+xml" || m == "application/atom+xml" ||
          EndsWith(m, "+json");
 }
+
+void KeyInfo(WPARAM vk, LPARAM lp, InputEventInfo& in);
 
 bool IsImageMime(const std::string& m) {
   return m == "image/svg+xml" || m == "image/png" || m == "image/jpeg" || m == "image/jpg" || m == "image/gif" ||
@@ -839,6 +862,10 @@ void Browser::DestroyFrame(Tab* f) {
     editNode_ = 0;
   }
   if (editTab_ == f) editTab_ = 0;
+  if (hoverTab_ == f->id) {
+    hoverTab_ = 0;
+    hoverNode_ = 0;
+  }
   if (f->parentTab) {
     std::vector<Tab*>& v = f->parentTab->frames;
     v.erase(std::remove(v.begin(), v.end(), f), v.end());
@@ -1064,6 +1091,10 @@ void Browser::LoadInternal(Tab* t, const std::string& html, const std::string& u
 void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure) {
   DestroyFrames(t);  // the frames of the document just replaced
   if (!t->parentTab) t->blocked = 0;
+  if (hoverTab_ == t->id) {
+    hoverTab_ = 0;
+    hoverNode_ = 0;
+  }
   lastUserInput_ = 0;  // a navigation consumes the user activation
   PendingNav& nav = t->pending;
   if (t->historyIndex >= 0 && t->historyIndex < (int)t->history.size())
@@ -1480,6 +1511,7 @@ void Browser::RenderTab(Tab* t, bool restyle) {
     Invalidate(t);
   }
   ScheduleAnimation(t);
+  FollowEditor(t);
   int id = t->id;
   if (first) PumpScripts(t);
   if (IsAlive(TabById(id))) SyncFrames(t);
@@ -1652,10 +1684,13 @@ void Browser::UpdateScrollBars() {
 void Browser::ScrollTo(float x, float y) {
   if (!current_) return;
   if (editCtl_) CommitEdit(false);
+  if (!current_) return;
+  float ox = current_->scrollX, oy = current_->scrollY;
   current_->scrollX = x;
   current_->scrollY = y;
   UpdateScrollBars();
   InvalidateRect(view_, 0, FALSE);
+  if (current_->scrollX != ox || current_->scrollY != oy) ScrollEventLater(current_);
 }
 
 void Browser::ScrollBy(float dx, float dy) {
@@ -1764,8 +1799,9 @@ void Browser::OnClick(int x, int y, bool newTab) {
   Node* n = NodeAt(x, y, &t, &docX, &docY);
   if (!n) return;
   int tabId = t->id;
+  focusTab_ = t->id;
   // Scripts see the click first and may cancel the default action.
-  if (!DispatchJs(t, n, "click")) return;
+  if (!DispatchInput(t, n, "click", MouseInfo(t, docX, docY, 0, 0))) return;
   if (!IsAlive(TabById(tabId))) return;
   bool scripted = t->page->script() != 0;
   // Built-in <video>/<audio> controls.
@@ -1904,6 +1940,31 @@ void Browser::OnClick(int x, int y, bool newTab) {
 
 LRESULT CALLBACK Browser::EditCtlProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   Browser* b = g_browser;
+  if ((m == WM_KEYDOWN || m == WM_KEYUP) && b->editNode_ && b->IsAlive(b->editTab_) && b->editTab_->page->script()) {
+    if (m == WM_KEYDOWN) b->lastUserInput_ = GetTickCount();
+    b->OnEditChanged();
+    if (!b->editCtl_) return 0;
+    InputEventInfo in;
+    KeyInfo(w, l, in);
+    Node* n = b->editNode_;
+    bool ok = b->DispatchInput(b->editTab_, n, m == WM_KEYDOWN ? "keydown" : "keyup", in);
+    if (b->editCtl_ != h) return 0;  // the editor was closed by a listener
+    if (m == WM_KEYDOWN && !ok) {
+      b->suppressChar_ = true;
+      return 0;
+    }
+    if (m == WM_KEYDOWN && w == VK_RETURN && !(GetWindowLongW(h, GWL_STYLE) & ES_MULTILINE)) {
+      in.keyCode = 13;
+      if (!b->DispatchInput(b->editTab_, n, "keypress", in) || b->editCtl_ != h) {
+        b->suppressChar_ = true;
+        return 0;
+      }
+    }
+  }
+  if (m == WM_CHAR && b->suppressChar_) {
+    b->suppressChar_ = false;
+    return 0;
+  }
   if (m == WM_KEYDOWN) {
     b->lastUserInput_ = GetTickCount();
     bool multi = (GetWindowLongW(h, GWL_STYLE) & ES_MULTILINE) != 0;
@@ -1934,12 +1995,19 @@ LRESULT CALLBACK Browser::EditCtlProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   return CallWindowProcW(b->oldEditProc_, h, m, w, l);
 }
 
-void Browser::BeginEdit(Tab* t, Node* n) {
-  if (editCtl_) CommitEdit(false);
-  if (!IsAlive(t)) return;
+// Window rectangle of the inline editor for |n| (content box in the view).
+// After a relayout of |t| the inline editor moves with its element.
+void Browser::FollowEditor(Tab* t) {
+  RECT er;
+  if (editCtl_ && editNode_ && IsAlive(editTab_) && (editTab_ == t || Root(editTab_) == Root(t)) &&
+      editNode_->layoutBox && EditRect(editTab_, editNode_, er))
+    MoveWindow(editCtl_, er.left, er.top, er.right - er.left, er.bottom - er.top, TRUE);
+}
+
+bool Browser::EditRect(Tab* t, Node* n, RECT& out) {
   Rect r;
   float ox = 0, oy = 0;
-  if (!t->page->BoxRect(n, r) || !FrameOrigin(t, ox, oy)) return;
+  if (!t->page->BoxRect(n, r) || !FrameOrigin(t, ox, oy)) return false;
   LayoutBox* box = n->layoutBox;
   float z = ZoomF();
   float cx = r.x, cy = r.y, cw = r.w, ch = r.h;
@@ -1949,8 +2017,20 @@ void Browser::BeginEdit(Tab* t, Node* n) {
     cw = box->ContentW();
     ch = box->ContentH();
   }
-  int x = (int)(cx * z + ox), y = (int)(cy * z + oy);
-  int w = std::max(20, (int)(cw * z)), h = std::max(14, (int)(ch * z));
+  out.left = (int)(cx * z + ox);
+  out.top = (int)(cy * z + oy);
+  out.right = out.left + std::max(20, (int)(cw * z));
+  out.bottom = out.top + std::max(14, (int)(ch * z));
+  return true;
+}
+
+void Browser::BeginEdit(Tab* t, Node* n) {
+  if (editCtl_) CommitEdit(false);
+  if (!IsAlive(t)) return;
+  RECT er;
+  if (!EditRect(t, n, er)) return;
+  float z = ZoomF();
+  int x = er.left, y = er.top, w = er.right - er.left, h = er.bottom - er.top;
   bool multi = n->tag == "textarea";
   std::string type = AsciiLower(n->Attr("type"));
   DWORD style = WS_CHILD | WS_VISIBLE | (multi ? ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL
@@ -1972,8 +2052,15 @@ void Browser::BeginEdit(Tab* t, Node* n) {
   SetFocus(editCtl_);
   SendMessageW(editCtl_, EM_SETSEL, 0, -1);
   // Hide the painted value under the edit control.
+  if (multi) value = ReplaceAll(value, "\r\n", "\n");
   n->formValue = value;
   n->formValueSet = true;
+  editInitial_ = value;
+  focusTab_ = t->id;
+  RestyleForInteraction(t, hoverTab_ == t->id ? hoverNode_ : 0);
+  InputEventInfo in;
+  DispatchInput(t, n, "focus", in);
+  if (editNode_ == n) DispatchInput(t, n, "focusin", in);
 }
 
 void Browser::CommitEdit(bool submit) {
@@ -1989,18 +2076,28 @@ void Browser::CommitEdit(bool submit) {
     std::string v = Narrow(WindowTextW(ctl));
     if (n->tag == "textarea") v = ReplaceAll(v, "\r\n", "\n");
     std::string old = n->formValueSet ? n->formValue : (n->tag == "textarea" ? n->TextContent() : n->Attr("value"));
-    changed = v != old;
+    bool typed = v != old;
+    changed = v != editInitial_;
     n->formValue = v;
     n->formValueSet = true;
+    if (typed && t->page->script()) {
+      DestroyWindow(ctl);
+      ctl = 0;
+      int tid = t->id;
+      DispatchInput(t, n, "input", InputEventInfo());
+      if (!IsAlive(TabById(tid))) return;
+    }
   }
-  DestroyWindow(ctl);
+  if (ctl) DestroyWindow(ctl);
   if (!t) return;
   int id = t->id;
+  RestyleForInteraction(t, hoverTab_ == t->id ? hoverNode_ : 0);
   t->page->Repaint();
   Invalidate(t);
-  if (changed) {
-    DispatchJs(t, n, "input");
-    if (IsAlive(TabById(id))) DispatchJs(t, n, "change");
+  if (changed) DispatchJs(t, n, "change");
+  if (n && IsAlive(TabById(id))) {
+    DispatchInput(t, n, "blur", InputEventInfo());
+    if (IsAlive(TabById(id))) DispatchInput(t, n, "focusout", InputEventInfo());
   }
   if (submit && n && IsAlive(TabById(id))) {
     Node* form = Page::FormFor(n);
@@ -2161,8 +2258,17 @@ void Browser::ShowFindBar(bool show) {
 void Browser::ShowContextMenu(int x, int y) {
   Tab* t = current_;
   Tab* hit = 0;
-  Node* n = NodeAt(x, y, &hit);
+  float dx = 0, dy = 0;
+  Node* n = NodeAt(x, y, &hit, &dx, &dy);
   Tab* ht = hit ? hit : t;
+  if (n && hit && hit->page->script()) {
+    if (!DispatchInput(hit, n, "contextmenu", MouseInfo(hit, dx, dy, 2, 2))) return;  // page has its own menu
+    if (!current_) return;
+    t = current_;
+    hit = 0;
+    n = NodeAt(x, y, &hit);
+    ht = hit ? hit : t;
+  }
   ctxLink_.clear();
   ctxImage_.clear();
   Node* link = Page::LinkFor(n);
@@ -2531,6 +2637,7 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         if (r == 2) {
           t->page->Relayout(VW(t), VH(t));
           if (t == current_) UpdateScrollBars();
+          FollowEditor(t);
         } else if (r == 1) {
           t->page->Repaint();
         }
@@ -2558,6 +2665,44 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       if (id == kTimerWake) {
         KillTimer(hwnd_, kTimerWake);
         PostMessageW(hwnd_, WM_KITE_WAKE, 0, 0);
+        return 0;
+      }
+      if (id == kTimerHoverStyle) {
+        KillTimer(hwnd_, kTimerHoverStyle);
+        if (scriptDepth_ > 0) {
+          SetTimer(hwnd_, kTimerHoverStyle, 100, 0);
+          return 0;
+        }
+        std::vector<Tab*> all = AllTabs();
+        std::vector<int> ids;
+        for (size_t i = 0; i < all.size(); ++i)
+          if (all[i]->hoverStylePending) ids.push_back(all[i]->id);
+        for (size_t i = 0; i < ids.size(); ++i) {
+          Tab* ht = TabById(ids[i]);
+          if (!ht) continue;
+          ht->hoverStylePending = false;
+          if (ht->rendered) RenderTab(ht, true);
+        }
+        return 0;
+      }
+      if (id == kTimerScrollEvent) {
+        KillTimer(hwnd_, kTimerScrollEvent);
+        if (scriptDepth_ > 0) {
+          SetTimer(hwnd_, kTimerScrollEvent, 100, 0);
+          return 0;
+        }
+        std::vector<Tab*> all = AllTabs();
+        std::vector<int> ids;
+        for (size_t i = 0; i < all.size(); ++i)
+          if (all[i]->scrollEventPending) ids.push_back(all[i]->id);
+        for (size_t i = 0; i < ids.size(); ++i) {
+          Tab* st = TabById(ids[i]);
+          if (!st || !st->page->script()) continue;
+          st->scrollEventPending = false;
+          BeginScript();
+          st->page->script()->DispatchWindowEvent("scroll");
+          EndScript(st);
+        }
         return 0;
       }
       if (id == kTimerImageAnim) {
@@ -3011,6 +3156,153 @@ void TabScriptHost::NavigateFrame(int target, const std::string& url) {
   PostMessageW(g_browser->hwnd_, WM_KITE_JSNAV, to->id, 0);
 }
 
+namespace {
+
+// KeyboardEvent.key / .code / keyCode for a virtual key.
+void KeyInfo(WPARAM vk, LPARAM lp, InputEventInfo& in) {
+  in.keyCode = (int)vk;
+  in.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+  in.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+  in.alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+  in.repeat = (lp & 0x40000000) != 0;
+  struct Named {
+    WPARAM vk;
+    const char* key;
+    const char* code;
+  };
+  static const Named named[] = {
+      {VK_RETURN, "Enter", "Enter"}, {VK_ESCAPE, "Escape", "Escape"}, {VK_TAB, "Tab", "Tab"},
+      {VK_BACK, "Backspace", "Backspace"}, {VK_DELETE, "Delete", "Delete"}, {VK_INSERT, "Insert", "Insert"},
+      {VK_UP, "ArrowUp", "ArrowUp"}, {VK_DOWN, "ArrowDown", "ArrowDown"}, {VK_LEFT, "ArrowLeft", "ArrowLeft"},
+      {VK_RIGHT, "ArrowRight", "ArrowRight"}, {VK_HOME, "Home", "Home"}, {VK_END, "End", "End"},
+      {VK_PRIOR, "PageUp", "PageUp"}, {VK_NEXT, "PageDown", "PageDown"}, {VK_SPACE, " ", "Space"},
+      {VK_SHIFT, "Shift", "ShiftLeft"}, {VK_CONTROL, "Control", "ControlLeft"}, {VK_MENU, "Alt", "AltLeft"},
+      {VK_CAPITAL, "CapsLock", "CapsLock"}, {VK_LWIN, "Meta", "MetaLeft"}, {VK_APPS, "ContextMenu", "ContextMenu"},
+  };
+  for (size_t i = 0; i < sizeof named / sizeof named[0]; ++i)
+    if (named[i].vk == vk) {
+      in.key = named[i].key;
+      in.code = named[i].code;
+      return;
+    }
+  if (vk >= VK_F1 && vk <= VK_F12) {
+    in.key = in.code = "F" + IntToString((long long)(vk - VK_F1 + 1));
+    return;
+  }
+  if (vk >= 'A' && vk <= 'Z') {
+    char c = (char)vk;
+    bool upper = in.shift != ((GetKeyState(VK_CAPITAL) & 1) != 0);
+    in.key = std::string(1, upper ? c : (char)(c - 'A' + 'a'));
+    in.code = std::string("Key") + c;
+    return;
+  }
+  if (vk >= '0' && vk <= '9') in.code = std::string("Digit") + (char)vk;
+  if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
+    in.key = std::string(1, (char)('0' + vk - VK_NUMPAD0));
+    in.code = "Numpad" + in.key;
+    return;
+  }
+  // Character of the key without touching dead-key state.
+  UINT ch = MapVirtualKeyW((UINT)vk, 2);
+  if (ch & 0x80000000u) {
+    in.key = "Dead";
+  } else if (ch >= 32) {
+    std::wstring w(1, (wchar_t)ch);
+    in.key = Narrow(w);
+  } else {
+    in.key = "Unidentified";
+  }
+}
+
+}  // namespace
+
+bool Browser::DispatchInput(Tab* t, Node* target, const char* type, const InputEventInfo& info) {
+  if (!t) return true;
+  ScriptEngine* js = t->page->script();
+  if (!js) return true;
+  while (target && !target->IsElement()) target = target->parent;
+  BeginScript();
+  bool ok = js->DispatchInput(target, type, info);
+  EndScript(t);
+  return ok;
+}
+
+InputEventInfo Browser::MouseInfo(Tab* t, float docX, float docY, int button, int buttons) {
+  InputEventInfo in;
+  float z = ZoomF();
+  in.clientX = docX - t->scrollX / z;
+  in.clientY = docY - t->scrollY / z;
+  in.button = button;
+  in.buttons = buttons;
+  in.shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+  in.ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+  in.alt = (GetKeyState(VK_MENU) & 0x8000) != 0;
+  return in;
+}
+
+void Browser::UpdateHover(Tab* t, Node* n, const InputEventInfo& info) {
+  while (n && !n->IsElement()) n = n->parent;
+  int tid = t ? t->id : 0;
+  if (tid == hoverTab_ && n == hoverNode_) return;
+  Tab* old = hoverTab_ ? TabById(hoverTab_) : 0;
+  Node* oldNode = hoverNode_;
+  hoverTab_ = tid;
+  hoverNode_ = n;
+  // CSS :hover.
+  if (old && old != t) RestyleForInteraction(old, 0);
+  if (t) RestyleForInteraction(t, n);
+  if (old && old != t && old->page->script() && oldNode) {
+    BeginScript();
+    old->page->script()->DispatchHover(oldNode, 0, info);
+    EndScript(old);
+  }
+  if (t && t->page->script()) {
+    BeginScript();
+    t->page->script()->DispatchHover(old == t ? oldNode : 0, n, info);
+    EndScript(t);
+  }
+}
+
+// :hover / :focus changed: restyle shortly (mouse movements are coalesced).
+void Browser::RestyleForInteraction(Tab* t, Node* hovered) {
+  const Node* focused = editTab_ == t ? editNode_ : 0;
+  if (!t->rendered || !t->page->SetInteraction(hovered, focused)) return;
+  t->hoverStylePending = true;
+  SetTimer(hwnd_, kTimerHoverStyle, 70, 0);
+}
+
+void Browser::ScrollEventLater(Tab* t) {
+  if (!t || !t->page->script()) return;
+  t->scrollEventPending = true;
+  SetTimer(hwnd_, kTimerScrollEvent, 60, 0);
+}
+
+// Text typed into an inline editor: update the element and fire "input".
+void Browser::OnEditChanged() {
+  if (!editCtl_ || !editNode_ || syncingEdit_ || !IsAlive(editTab_)) return;
+  Node* n = editNode_;
+  Tab* t = editTab_;
+  std::string v = Narrow(WindowTextW(editCtl_));
+  if (n->tag == "textarea") v = ReplaceAll(v, "\r\n", "\n");
+  if (n->formValueSet && n->formValue == v) return;
+  std::string old = n->formValue;
+  n->formValue = v;
+  n->formValueSet = true;
+  InputEventInfo in;
+  if (v.size() > old.size() && v.compare(0, old.size(), old) == 0) in.data = v.substr(old.size());
+  int id = t->id;
+  DispatchInput(t, n, "input", in);
+  // A listener may have rewritten the value (masks, controlled inputs).
+  if (editCtl_ && editNode_ == n && IsAlive(TabById(id)) && n->formValue != v) {
+    syncingEdit_ = true;
+    std::string shown = n->tag == "textarea" ? ReplaceAll(n->formValue, "\n", "\r\n") : n->formValue;
+    SetWindowTextW(editCtl_, Widen(shown).c_str());
+    SendMessageW(editCtl_, EM_SETSEL, (WPARAM)-1, -1);
+    SendMessageW(editCtl_, EM_SETSEL, (WPARAM)GetWindowTextLengthW(editCtl_), GetWindowTextLengthW(editCtl_));
+    syncingEdit_ = false;
+  }
+}
+
 bool TabScriptHost::OpenWindow(const std::string& url) {
   Browser* b = g_browser;
   Tab* t = b->TabById(tabId);
@@ -3130,6 +3422,7 @@ void Browser::AfterScript(Tab* t) {
     if (editCtl_ && editTab_ == t && editNode_ && !editNode_->layoutBox) CommitEdit(false);
     if (t == current_) UpdateScrollBars();
     Invalidate(t);
+    FollowEditor(t);
     int id = t->id;
     SyncFrames(t);
     if (!IsAlive(TabById(id))) return;
@@ -3401,15 +3694,53 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
         if (ny != f->scrollY) {
           f->scrollY = ny;
           Invalidate(f);
+          ScrollEventLater(f);
           return 0;
         }
       }
       ScrollBy(0, dy);
       return 0;
     }
+    case WM_KEYUP:
+    case WM_CHAR: {
+      if (!t) return 0;
+      if (m == WM_CHAR && suppressChar_) {
+        suppressChar_ = false;
+        return 0;
+      }
+      Tab* kt = focusTab_ ? TabById(focusTab_) : 0;
+      if (!kt || Root(kt) != t) kt = t;
+      if (kt->page->script()) {
+        InputEventInfo in;
+        if (m == WM_KEYUP) {
+          KeyInfo(w, l, in);
+        } else {
+          if (w < 32) return 0;
+          in.key = Narrow(std::wstring(1, (wchar_t)w));
+          in.keyCode = (int)w;
+        }
+        DispatchInput(kt, 0, m == WM_KEYUP ? "keyup" : "keypress", in);
+      }
+      return 0;
+    }
     case WM_KEYDOWN: {
       if (!t) return 0;
       lastUserInput_ = GetTickCount();
+      {
+        Tab* kt = focusTab_ ? TabById(focusTab_) : 0;
+        if (!kt || Root(kt) != t) kt = t;
+        if (kt->page->script()) {
+          InputEventInfo in;
+          KeyInfo(w, l, in);
+          bool ok = DispatchInput(kt, 0, "keydown", in);
+          if (!current_) return 0;
+          t = current_;
+          if (!ok) {
+            suppressChar_ = true;
+            return 0;  // the page handled the key
+          }
+        }
+      }
       RECT rc;
       GetClientRect(h, &rc);
       bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
@@ -3443,6 +3774,20 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       SetFocus(h);
       if (!t) return 0;
       int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
+      if (m == WM_LBUTTONDBLCLK) pendingDblClick_ = true;
+      {
+        Tab* ht = 0;
+        float dx = 0, dy = 0;
+        Node* hn = NodeAt(x, y, &ht, &dx, &dy);
+        if (hn && ht && ht->page->script()) {
+          InputEventInfo in = MouseInfo(ht, dx, dy, 0, 1);
+          int hid = ht->id;
+          DispatchInput(ht, hn, "pointerdown", in);
+          if (IsAlive(TabById(hid))) DispatchInput(ht, hn, "mousedown", in);
+          if (!current_) return 0;
+          t = current_;
+        }
+      }
       dragStart_.x = x;
       dragStart_.y = y;
       dragging_ = true;
@@ -3470,8 +3815,25 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
         return 0;
       }
       Tab* ht = 0;
-      Node* n = NodeAt(x, y, &ht);
+      float mdx = 0, mdy = 0;
+      Node* n = NodeAt(x, y, &ht, &mdx, &mdy);
       if (!ht) ht = t;
+      if (scriptDepth_ == 0) {
+        InputEventInfo in = MouseInfo(ht, mdx, mdy, 0, (w & MK_LBUTTON) ? 1 : 0);
+        int hid = ht->id;
+        UpdateHover(ht, n, in);
+        DWORD now = GetTickCount();
+        Tab* again = TabById(hid);
+        if (again && n && again->page->script() && now - lastMouseMoveEvent_ >= 50) {
+          lastMouseMoveEvent_ = now;
+          DispatchInput(again, n, "pointermove", in);
+          if (IsAlive(TabById(hid))) DispatchInput(again, n, "mousemove", in);
+        }
+        if (!current_) return 0;
+        t = current_;
+        n = NodeAt(x, y, &ht);
+        if (!ht) ht = t;
+      }
       Node* link = Page::LinkFor(n);
       bool pointer = link != 0;
       bool text = false;
@@ -3509,10 +3871,30 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       ReleaseCapture();
       bool wasDragging = dragging_;
       dragging_ = false;
+      int x = GET_X_LPARAM(l), y = GET_Y_LPARAM(l);
+      {
+        Tab* ht = 0;
+        float dx = 0, dy = 0;
+        Node* hn = NodeAt(x, y, &ht, &dx, &dy);
+        if (hn && ht && ht->page->script()) {
+          InputEventInfo in = MouseInfo(ht, dx, dy, 0, 0);
+          int hid = ht->id;
+          DispatchInput(ht, hn, "pointerup", in);
+          if (IsAlive(TabById(hid))) DispatchInput(ht, hn, "mouseup", in);
+          if (!current_) return 0;
+        }
+      }
       if (wasDragging && !dragMoved_) {
         bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
-        OnClick(GET_X_LPARAM(l), GET_Y_LPARAM(l), ctrl);
+        OnClick(x, y, ctrl);
+        if (pendingDblClick_) {
+          Tab* ht = 0;
+          float dx = 0, dy = 0;
+          Node* hn = NodeAt(x, y, &ht, &dx, &dy);
+          if (hn && ht) DispatchInput(ht, hn, "dblclick", MouseInfo(ht, dx, dy, 0, 0));
+        }
       }
+      pendingDblClick_ = false;
       return 0;
     }
     case WM_MBUTTONUP: {
@@ -3547,6 +3929,10 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       if (LOWORD(l) == HTCLIENT) return TRUE;  // set in WM_MOUSEMOVE
       break;
     case WM_COMMAND:
+      if (editCtl_ && (HWND)l == editCtl_) {
+        if (HIWORD(w) == EN_CHANGE) OnEditChanged();
+        return 0;
+      }
       return SendMessageW(hwnd_, WM_COMMAND, w, l);
   }
   return DefWindowProcW(h, m, w, l);
