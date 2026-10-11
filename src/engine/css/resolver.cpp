@@ -95,6 +95,7 @@ bool MatchPseudo(const SimpleSelector& s, const Node* el, const ElementState& st
   if (n == "hover") return st.hovered && IsAncestorOrSelf(el, st.hovered);
   if (n == "focus" || n == "focus-visible") return st.focused == el;
   if (n == "focus-within") return st.focused && IsAncestorOrSelf(el, st.focused);
+  if (n == "popover-open") return el->HasAttr("kite-popover-open");
   if (n == "checked") {
     if (el->tag == "option") return el->HasAttr("selected");
     return el->checkedSet ? el->checked : el->HasAttr("checked");

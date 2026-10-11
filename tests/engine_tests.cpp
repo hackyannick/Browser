@@ -1708,6 +1708,20 @@ void TestMaskImage() {
   CHECK(!square);
 }
 
+void TestModernApis() {
+  ScriptPage p("<div id=out></div><div id=box></div>");
+  CHECK_EQ(p.Eval("[CSS.supports('display', 'grid'), CSS.supports('(display: grid) and (gap: 1px)'), "
+                  "CSS.supports('display: frobnicate')].join()"), "true,true,false");
+  CHECK_EQ(p.Eval("new DOMRect(1, 2, 3, 4).right + '/' + (document.body.getBoundingClientRect() instanceof DOMRect)"), "4/true");
+  CHECK_EQ(p.Eval("[typeof indexedDB.open, typeof IDBKeyRange.bound, indexedDB.cmp([1, 'a'], [1, 'b'])].join()"), "function,function,-1");
+  CHECK_EQ(p.Eval("typeof new MessageChannel().port1.postMessage + typeof structuredClone"), "functionfunction");
+  CHECK_EQ(p.Eval("typeof document.createElement('x-y').attachInternals().setValidity"), "function");
+  // adoptedStyleSheets apply like <style> elements.
+  p.Eval("(() => { const s = new CSSStyleSheet(); s.replaceSync('#box{width:66px}'); document.adoptedStyleSheets = [s]; return 1; })()");
+  if (p.page.script()->TakeDirty()) p.page.ScriptMutated();
+  CHECK_EQ(p.Eval("document.adoptedStyleSheets.length + ':' + document.getElementById('box').getBoundingClientRect().width"), "1:66");
+}
+
 void TestDns() {
   std::string q = BuildDnsQuery("www.Example.com", 0x1234);
   CHECK_EQ(q.size(), (size_t)(12 + 17 + 4));
@@ -1774,6 +1788,7 @@ int main() {
   TestMaskImage();
   TestGridLayout();
   TestModernCss();
+  TestModernApis();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

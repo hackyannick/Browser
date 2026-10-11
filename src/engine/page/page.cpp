@@ -148,6 +148,18 @@ void Page::AddSheetsFromNode(Node* n, const Node* scope) {
     if (n->tag == "noscript" && scriptingEnabled()) return;
   }
   for (size_t i = 0; i < n->children.size(); ++i) AddSheetsFromNode(n->children[i].get(), scope);
+  // adoptedStyleSheets come after the tree's own sheets.
+  for (size_t i = 0; i < n->adoptedCss.size(); ++i) {
+    SheetEntry e;
+    e.isLink = false;
+    e.css = n->adoptedCss[i];
+    e.scope = scope;
+    e.loaded = true;
+    e.failed = false;
+    e.sheet.reset(new Stylesheet);
+    ParseStylesheet(e.css, *e.sheet);
+    sheets_.push_back(e);
+  }
   if (n->shadowRoot) AddSheetsFromNode(n->shadowRoot.get(), n->shadowRoot.get());
 }
 

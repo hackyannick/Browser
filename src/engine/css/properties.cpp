@@ -1129,7 +1129,16 @@ bool IsCssPropertySupported(const std::string& prop, const std::string& value) {
   std::vector<std::pair<int, std::string> > out;
   if (!ExpandProperty(prop, value, out)) return false;
   std::string v = AsciiLower(Trim(value));
-  if (prop == "display") return v != "ruby" && v != "subgrid";
+  if (prop == "display") {
+    static const char* const kDisplay[] = {"none", "block", "inline", "inline-block", "flex", "inline-flex", "grid",
+        "inline-grid", "contents", "flow-root", "list-item", "table", "inline-table", "table-row", "table-cell",
+        "table-row-group", "table-header-group", "table-footer-group", "table-column", "table-column-group",
+        "table-caption", "flow", "block flow", "inline flow", "block flex", "inline flex", "block grid",
+        "inline grid", "block flow-root", "inline flow-root", "-webkit-box", "-webkit-inline-box", 0};
+    for (int i = 0; kDisplay[i]; ++i)
+      if (v == kDisplay[i]) return true;
+    return v == "inherit" || v == "initial" || v == "unset" || v == "revert";
+  }
   if (prop == "position") return v != "-webkit-sticky";
   if (v.find("subgrid") != std::string::npos || v.find("masonry") != std::string::npos ||
       v.find("anchor") != std::string::npos)

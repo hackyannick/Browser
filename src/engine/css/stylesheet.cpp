@@ -1117,6 +1117,8 @@ void ParseStylesheet(const std::string& rawCss, Stylesheet& out) {
   ParseRules(css, media, st, true);
 }
 
+bool SupportsCondition(const std::string& condition) { return EvaluateSupports(condition); }
+
 bool EvaluateContainerCondition(const std::string& cond, float w, float h) {
   // Size features of the container map onto the media features.
   std::string c = AsciiLower(cond);

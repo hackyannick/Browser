@@ -591,6 +591,20 @@ float FlexLayout::LayoutGrid(LayoutBox* box, float definiteH) {
   for (size_t i = 0; i < g.rowDefs.size(); ++i) rowSizer.defs.push_back(&g.rowDefs[i]);
   bool stretchRows = s->alignContent == kFlexNormal || s->alignContent == kFlexStretch;
   rowSizer.Run(g.items, false, definiteH, rowGap, false, stretchRows);
+  if (definiteH < 0 && s->minHeight.IsFixed() && !s->minHeight.HasPercent()) {
+    // An auto-height grid with a min-height: size the rows again for that
+    // height when they come out smaller (fr rows then fill it).
+    float minH = s->minHeight.Resolve(0);
+    if (s->boxSizing == kBorderBox)
+      minH -= box->padding.top + box->padding.bottom + box->border.top + box->border.bottom;
+    float total = 0;
+    for (size_t i = 0; i < rowSizer.base.size(); ++i) total += rowSizer.base[i];
+    if (rowSizer.base.size() > 1) total += rowGap * (rowSizer.base.size() - 1);
+    if (minH > total + 0.5f) {
+      definiteH = minH;
+      rowSizer.Run(g.items, false, definiteH, rowGap, false, stretchRows);
+    }
+  }
   float rowTotal;
   std::vector<float> rowY = TrackOffsets(rowSizer.base, rowGap, definiteH, s->alignContent, g.rowCollapsed, rowTotal);
 

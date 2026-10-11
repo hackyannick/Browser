@@ -12,6 +12,9 @@ summary, fieldset, dl, dd, dt, ol, ul, menu, dir, optgroup, frameset, frame { di
 head, link, meta, script, style, title, base, template, noembed, noframes,
 area, datalist, param, rp, [hidden], dialog:not([open]), input[type=hidden],
 embed[hidden], audio:not([controls]), track, source { display: none; }
+[popover]:not([kite-popover-open]) { display: none; }
+[popover][kite-popover-open] { position: fixed; inset: 0; margin: auto; width: fit-content; height: fit-content;
+  overflow: auto; color: canvastext; background-color: canvas; border: 1px solid; padding: 0.25em; z-index: 2147483647; }
 html { color: #000; font-family: serif; font-size: 16px; line-height: normal; }
 body { margin: 8px; }
 p, blockquote, figure, listing, plaintext, pre, xmp, dl { margin-top: 1em; margin-bottom: 1em; }

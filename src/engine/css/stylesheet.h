@@ -113,6 +113,8 @@ bool EvaluateMediaQueryList(const std::string& query, const MediaContext& ctx);
 // with this prefix: prefix + container name + '\x01' + size condition.
 const char* const kContainerPrefix = "\x01container:";
 bool EvaluateContainerCondition(const std::string& cond, float width, float height);
+// An @supports condition ("(display: grid) and (not (color: oklch(0 0 0)))").
+bool SupportsCondition(const std::string& condition);
 
 std::string StripCssComments(const std::string& css);
 

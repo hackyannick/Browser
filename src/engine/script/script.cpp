@@ -701,6 +701,43 @@ KITE_FN(OpenWin) {
 
 KITE_FN(UserAgent) { return NewStr(ctx, Network::Get().userAgent()); }
 
+// adopt(documentOrShadowRoot, [cssText, ...])
+KITE_FN(AdoptSheets) {
+  ARGS_AT_LEAST(2);
+  Node* n = Arg(ctx, argv[0]);
+  if (!n) return JS_UNDEFINED;
+  std::vector<std::string> list;
+  uint32_t count = 0;
+  JSValue len = JS_GetPropertyStr(ctx, argv[1], "length");
+  JS_ToUint32(ctx, &count, len);
+  JS_FreeValue(ctx, len);
+  for (uint32_t i = 0; i < count && i < 1000; ++i) {
+    JSValue v = JS_GetPropertyUint32(ctx, argv[1], i);
+    list.push_back(Str(ctx, v));
+    JS_FreeValue(ctx, v);
+  }
+  if (list != n->adoptedCss) {
+    n->adoptedCss.swap(list);
+    Engine(ctx)->MarkDirty();
+  }
+  return JS_UNDEFINED;
+}
+
+KITE_FN(Supports) {
+  ARGS_AT_LEAST(1);
+  return JS_NewBool(ctx, SupportsCondition(Str(ctx, argv[0])));
+}
+
+// inflate(bytes, "gzip" | "deflate" | "deflate-raw") -> ArrayBuffer or null.
+KITE_FN(InflateBytes) {
+  ARGS_AT_LEAST(2);
+  std::string in, out;
+  if (!JsBytes(ctx, &argv[0], in)) return JS_NULL;
+  std::string fmt = Str(ctx, argv[1]);
+  if (!Inflate(in, fmt == "gzip" ? "gzip" : "deflate", out)) return JS_NULL;
+  return JS_NewArrayBufferCopy(ctx, (const uint8_t*)out.data(), out.size());
+}
+
 // Element scrolling: [scrollLeft, scrollTop, scrollWidth, scrollHeight, clientWidth, clientHeight].
 KITE_FN(ScrollInfo) {
   ARGS_AT_LEAST(1);
@@ -1433,7 +1470,7 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"attachShadow", AttachShadow, 1}, {"shadow", ShadowOf, 1}, {"host", HostOf, 1},
       {"setDefined", SetDefined, 1}, {"customs", Customs, 1}, {"connected", Connected, 1}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
       {"frameDepth", FrameDepth, 0}, {"frameId", FrameIdOf, 1}, {"postFrame", PostFrame, 3},
-      {"frameUrl", FrameUrl, 1}, {"frameNav", FrameNav, 2}, {"openWin", OpenWin, 1}, {"ua", UserAgent, 0},
+      {"frameUrl", FrameUrl, 1}, {"frameNav", FrameNav, 2}, {"openWin", OpenWin, 1}, {"ua", UserAgent, 0}, {"supports", Supports, 1}, {"adopt", AdoptSheets, 2}, {"inflate", InflateBytes, 2},
       {"scrollInfo", ScrollInfo, 1}, {"setScroll", SetScroll, 3},
       {"mdLoad", MdLoad, 1}, {"mdCmd", MdCmd, 3}, {"mdStatus", MdStatus, 1}, {"mdCanPlay", MdCanPlay, 1},
   };
