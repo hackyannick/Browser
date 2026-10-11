@@ -624,6 +624,8 @@ std::vector<std::string> Page::ReferencedImages() const {
     if (b->kind != LayoutBox::kText && !b->style->backgroundImage.empty() &&
         seen.insert(b->style->backgroundImage).second)
       out.push_back(b->style->backgroundImage);
+    if (b->kind != LayoutBox::kText && !b->style->maskImage.empty() && seen.insert(b->style->maskImage).second)
+      out.push_back(b->style->maskImage);
     for (size_t i = 0; i < b->children.size(); ++i) stack.push_back(b->children[i].get());
   }
   return out;

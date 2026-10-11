@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "base/geometry.h"
+#include "css/style.h"
 #include "dom/node.h"
 #include "layout/resources.h"
 
@@ -30,6 +31,9 @@ struct DisplayItem {
   float tileX, tileY, tileW, tileH;
   bool repeatX, repeatY;
   float alpha;
+  // Image used as a mask (CSS mask-image): only its alpha channel is used,
+  // filled with |color|.
+  bool tinted = false;
   // Ellipse.
   bool hollow;
   // Inline <svg> element (rasterized by the platform at device size).
@@ -99,6 +103,10 @@ class Painter {
   void PaintBox(LayoutBox* b, float px, float py, float alpha);
   void PaintBoxDecorations(LayoutBox* b, const Rect& r, float alpha, bool skipLeft,
                            bool skipRight);
+  // Adds a (tiled) image item; false if the image is not available.
+  bool TileImage(const std::string& url, int sizeMode, const Length& sizeW, const Length& sizeH,
+                 const Length& px, const Length& py, BgRepeat repeat, const Rect& area, const Rect& origin,
+                 float alpha);
   void PaintBackground(const ComputedStyle* s, const Rect& borderBox, const Rect& paddingBox,
                        float alpha);
   void PaintBorders(const ComputedStyle* s, const Rect& r, const float widths[4], float alpha,

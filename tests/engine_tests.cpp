@@ -1632,6 +1632,19 @@ void TestScrollContainers() {
 
 }  // namespace
 
+void TestMaskImage() {
+  TestPage p("<style>.i{display:inline-block;width:20px;height:20px;background-color:#123456;"
+             "-webkit-mask:url(icons/menu.svg) no-repeat center / 16px}</style><span class=i></span>");
+  std::vector<std::string> imgs = p.page.ReferencedImages();
+  CHECK(std::find(imgs.begin(), imgs.end(), std::string("http://test.local/dir/icons/menu.svg")) != imgs.end());
+  // Without the mask image nothing is drawn (no solid square).
+  const DisplayList& dl = p.page.display();
+  bool square = false;
+  for (size_t i = 0; i < dl.items.size(); ++i)
+    if (dl.items[i].color == Color(0x12, 0x34, 0x56)) square = true;
+  CHECK(!square);
+}
+
 void TestDns() {
   std::string q = BuildDnsQuery("www.Example.com", 0x1234);
   CHECK_EQ(q.size(), (size_t)(12 + 17 + 4));
@@ -1695,6 +1708,7 @@ int main() {
   TestBlockerAndCache();
   TestScrollContainers();
   TestDns();
+  TestMaskImage();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

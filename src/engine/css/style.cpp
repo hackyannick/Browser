@@ -56,6 +56,10 @@ ComputedStyle::ComputedStyle()
       backgroundPosX(Length::Px(0)),
       backgroundPosY(Length::Px(0)),
       backgroundSizeMode(0),
+      maskRepeat(kRepeat),
+      maskPosX(Length::Px(0)),
+      maskPosY(Length::Px(0)),
+      maskSizeMode(0),
       opacity(1),
       blur(0),
       clippedAway(false),
@@ -196,6 +200,13 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   backgroundSizeMode = o.backgroundSizeMode;
   backgroundSizeW = o.backgroundSizeW;
   backgroundSizeH = o.backgroundSizeH;
+  maskImage = o.maskImage;
+  maskRepeat = o.maskRepeat;
+  maskPosX = o.maskPosX;
+  maskPosY = o.maskPosY;
+  maskSizeMode = o.maskSizeMode;
+  maskSizeW = o.maskSizeW;
+  maskSizeH = o.maskSizeH;
   opacity = o.opacity;
   blur = o.blur;
   clippedAway = o.clippedAway;

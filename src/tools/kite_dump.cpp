@@ -402,8 +402,8 @@ int main(int argc, char** argv) {
         printf("rect %.0f,%.0f %.0fx%.0f #%02x%02x%02x/%d\n", it.rect.x, it.rect.y, it.rect.w,
                it.rect.h, it.color.r, it.color.g, it.color.b, it.color.a);
       else if (it.type == DisplayItem::kImage)
-        printf("image %.0f,%.0f %.0fx%.0f %s\n", it.tileX, it.tileY, it.tileW, it.tileH,
-               it.imageUrl.c_str());
+        printf("image %.0f,%.0f %.0fx%.0f %s%s\n", it.tileX, it.tileY, it.tileW, it.tileH,
+               it.tinted ? "mask " : "", it.imageUrl.substr(0, 120).c_str());
       else if (it.type == DisplayItem::kBeginTransform)
         printf("transform [%.3g %.3g %.3g %.3g %.3g %.3g | %.3g %.3g %.3g] -> %d\n", it.matrix[0], it.matrix[1],
                it.matrix[2], it.matrix[3], it.matrix[4], it.matrix[5], it.persp[0], it.persp[1], it.persp[2],

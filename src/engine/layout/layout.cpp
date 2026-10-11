@@ -837,7 +837,8 @@ float LayoutEngine::LayoutInlineContent(LayoutBox* b, FloatContext* fc, float bf
         const ComputedStyle* s = box->style;
         bool visible = !s->backgroundColor.transparent() || box->border.top > 0 ||
                        box->border.bottom > 0 || box->border.left > 0 ||
-                       box->border.right > 0 || !s->backgroundImage.empty();
+                       box->border.right > 0 || !s->backgroundImage.empty() ||
+                       !s->maskImage.empty();
         if (!visible || !s->visible) return;
         FontMetrics fm = Metrics(s);
         LineFragment f;

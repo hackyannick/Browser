@@ -103,43 +103,58 @@ void Painter::Paint(LayoutBox* root, float viewportW, float viewportH, DisplayLi
   PaintBox(root, 0, 0, 1);
 }
 
-void Painter::PaintBackground(const ComputedStyle* s, const Rect& border, const Rect& padding,
-                              float alpha) {
-  if (s->backgroundClipText) return;  // gradient text: draw the text only
-  FillRect(border, s->backgroundColor, alpha);
-  if (s->backgroundImage.empty() || !images_) return;
+bool Painter::TileImage(const std::string& url, int sizeMode, const Length& sizeW, const Length& sizeH,
+                        const Length& px, const Length& py, BgRepeat repeat, const Rect& area,
+                        const Rect& origin, float alpha) {
   int iw = 0, ih = 0;
-  if (images_->GetImage(s->backgroundImage, iw, ih) != ImageProvider::kLoaded || iw <= 0 ||
-      ih <= 0)
-    return;
+  if (!images_ || images_->GetImage(url, iw, ih) != ImageProvider::kLoaded || iw <= 0 || ih <= 0) return false;
   float tw = (float)iw, th = (float)ih;
-  if (s->backgroundSizeMode == 1 || s->backgroundSizeMode == 2) {
-    float sx = padding.w / iw, sy = padding.h / ih;
-    float sc = s->backgroundSizeMode == 1 ? std::max(sx, sy) : std::min(sx, sy);
+  if (sizeMode == 1 || sizeMode == 2) {
+    float sx = origin.w / iw, sy = origin.h / ih;
+    float sc = sizeMode == 1 ? std::max(sx, sy) : std::min(sx, sy);
     tw = iw * sc;
     th = ih * sc;
-  } else if (s->backgroundSizeMode == 3) {
-    bool wAuto = !s->backgroundSizeW.IsFixed(), hAuto = !s->backgroundSizeH.IsFixed();
-    if (!wAuto) tw = s->backgroundSizeW.Resolve(padding.w);
-    if (!hAuto) th = s->backgroundSizeH.Resolve(padding.h);
+  } else if (sizeMode == 3) {
+    bool wAuto = !sizeW.IsFixed(), hAuto = !sizeH.IsFixed();
+    if (!wAuto) tw = sizeW.Resolve(origin.w);
+    if (!hAuto) th = sizeH.Resolve(origin.h);
     if (!wAuto && hAuto) th = tw * ih / iw;
     if (wAuto && !hAuto) tw = th * iw / ih;
   }
-  if (tw < 1 || th < 1) return;
+  if (tw < 1 || th < 1) return false;
   DisplayItem it;
   it.type = DisplayItem::kImage;
-  it.imageUrl = s->backgroundImage;
-  it.rect = border;
+  it.imageUrl = url;
+  it.rect = area;
   it.tileW = tw;
   it.tileH = th;
-  const Length& px = s->backgroundPosX;
-  const Length& py = s->backgroundPosY;
-  it.tileX = padding.x + px.px + px.pct * (padding.w - tw) / 100;
-  it.tileY = padding.y + py.px + py.pct * (padding.h - th) / 100;
-  it.repeatX = s->backgroundRepeat == kRepeat || s->backgroundRepeat == kRepeatX;
-  it.repeatY = s->backgroundRepeat == kRepeat || s->backgroundRepeat == kRepeatY;
+  it.tileX = origin.x + px.px + px.pct * (origin.w - tw) / 100;
+  it.tileY = origin.y + py.px + py.pct * (origin.h - th) / 100;
+  it.repeatX = repeat == kRepeat || repeat == kRepeatX;
+  it.repeatY = repeat == kRepeat || repeat == kRepeatY;
   it.alpha = alpha;
   out_->items.push_back(it);
+  return true;
+}
+
+void Painter::PaintBackground(const ComputedStyle* s, const Rect& border, const Rect& padding,
+                              float alpha) {
+  if (s->backgroundClipText) return;  // gradient text: draw the text only
+  if (!s->maskImage.empty() && s->backgroundImage.empty()) {
+    // The usual icon technique: a background color shaped by an (SVG) mask.
+    // Nothing is drawn until the mask is available.
+    if (s->backgroundColor.transparent()) return;
+    if (TileImage(s->maskImage, s->maskSizeMode, s->maskSizeW, s->maskSizeH, s->maskPosX, s->maskPosY,
+                  s->maskRepeat, border, border, alpha)) {
+      out_->items.back().tinted = true;
+      out_->items.back().color = s->backgroundColor;
+    }
+    return;
+  }
+  FillRect(border, s->backgroundColor, alpha);
+  if (s->backgroundImage.empty()) return;
+  TileImage(s->backgroundImage, s->backgroundSizeMode, s->backgroundSizeW, s->backgroundSizeH, s->backgroundPosX,
+            s->backgroundPosY, s->backgroundRepeat, border, padding, alpha);
 }
 
 void Painter::PaintBorders(const ComputedStyle* s, const Rect& r, const float w[4], float alpha,
@@ -259,7 +274,7 @@ void Painter::PaintBoxDecorations(LayoutBox* b, const Rect& r, float alpha, bool
     out_->items.push_back(it);
     Extend(Rect(it.rect.x - sh.blur, it.rect.y - sh.blur, it.rect.w + 2 * sh.blur, it.rect.h + 2 * sh.blur));
   }
-  if (!rounded) {
+  if (!rounded || !s->maskImage.empty()) {
     if (b != skipBackgroundOf_) PaintBackground(s, r, pad, alpha);
     PaintBorders(s, r, w, alpha, skipLeft, skipRight);
     return;

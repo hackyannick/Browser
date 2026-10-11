@@ -195,7 +195,7 @@ void Renderer::DrawImage(const DisplayItem& it, float ox, float oy, float zoom) 
       for (int y = y0; y < y1; ++y) {
         const uint32_t* src = &img->pixels[(size_t)(y - dy) * img->width + (x0 - dx)];
         uint32_t* dst = bits_ + (size_t)y * bw_ + x0;
-        if (!img->hasAlpha && alpha == 255 && !rounded) {
+        if (!img->hasAlpha && alpha == 255 && !rounded && !it.tinted) {
           for (int x = x0; x < x1; ++x) *dst++ = *src++ & 0xFFFFFF;
           continue;
         }
@@ -205,6 +205,13 @@ void Renderer::DrawImage(const DisplayItem& it, float ox, float oy, float zoom) 
           unsigned sr = (s >> 16) & 255, sg = (s >> 8) & 255, sb = s & 255;
           unsigned a2 = alpha;
           if (rounded) a2 = (unsigned)(alpha * RRectCoverage(x + 0.5f, y + 0.5f, &rc));
+          if (it.tinted) {
+            // Mask: the image's coverage filled with the item color.
+            sa = sa * it.color.a / 255;
+            sr = it.color.r * sa / 255;
+            sg = it.color.g * sa / 255;
+            sb = it.color.b * sa / 255;
+          }
           if (a2 != 255) {
             sa = sa * a2 / 255;
             sr = sr * a2 / 255;

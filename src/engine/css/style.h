@@ -177,6 +177,13 @@ struct ComputedStyle {
   Length backgroundPosX, backgroundPosY;
   int backgroundSizeMode;  // 0 auto, 1 cover, 2 contain, 3 explicit
   Length backgroundSizeW, backgroundSizeH;
+  // mask-image (url only) with its repeat, position and size; same meaning
+  // as the background counterparts.
+  std::string maskImage;
+  BgRepeat maskRepeat;
+  Length maskPosX, maskPosY;
+  int maskSizeMode;
+  Length maskSizeW, maskSizeH;
   float opacity;
   float blur;
   bool clippedAway;

@@ -329,6 +329,12 @@ void CopyPropertyImpl(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropBackgroundSize:
       d.backgroundSizeMode = s.backgroundSizeMode; d.backgroundSizeW = s.backgroundSizeW;
       d.backgroundSizeH = s.backgroundSizeH; break;
+    case kPropMaskImage: d.maskImage = s.maskImage; break;
+    case kPropMaskRepeat: d.maskRepeat = s.maskRepeat; break;
+    case kPropMaskPositionX: d.maskPosX = s.maskPosX; break;
+    case kPropMaskPositionY: d.maskPosY = s.maskPosY; break;
+    case kPropMaskSize:
+      d.maskSizeMode = s.maskSizeMode; d.maskSizeW = s.maskSizeW; d.maskSizeH = s.maskSizeH; break;
     case kPropOpacity: d.opacity = s.opacity; break;
     case kPropAspectRatio: d.aspectRatio = s.aspectRatio; break;
     case kPropObjectFit: d.objectFit = s.objectFit; break;
@@ -552,7 +558,7 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
         un == "justify-content" || un == "align-items" || un == "align-self" ||
         un == "box-sizing" || un == "order" || un == "background-clip" ||
         un == "border-radius" || un == "box-shadow" || StartsWith(un, "transform") ||
-        StartsWith(un, "animation") || StartsWith(un, "transition"))
+        StartsWith(un, "animation") || StartsWith(un, "transition") || StartsWith(un, "mask"))
       name = un;
     else
       return false;
@@ -650,6 +656,23 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
     out.push_back(std::make_pair((int)kPropRowGap, value));
   } else if (name == "grid-column-gap") {
     out.push_back(std::make_pair((int)kPropColumnGap, value));
+  } else if (name == "mask" || name == "mask-position") {
+    // Same syntax as background / background-position (mode, origin and
+    // composite keywords are ignored by that parser).
+    std::vector<std::pair<int, std::string> > bg;
+    ExpandProperty(name == "mask" ? "background" : "background-position", value, bg);
+    for (size_t i = 0; i < bg.size(); ++i) {
+      int m = -1;
+      switch (bg[i].first) {
+        case kPropBackgroundImage: m = kPropMaskImage; break;
+        case kPropBackgroundRepeat: m = kPropMaskRepeat; break;
+        case kPropBackgroundPositionX: m = kPropMaskPositionX; break;
+        case kPropBackgroundPositionY: m = kPropMaskPositionY; break;
+        case kPropBackgroundSize: m = kPropMaskSize; break;
+        default: break;
+      }
+      if (m >= 0) out.push_back(std::make_pair(m, bg[i].second));
+    }
   } else if (name == "background-position") {
     if (global) {
       out.push_back(std::make_pair((int)kPropBackgroundPositionX, value));
@@ -1427,6 +1450,44 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
           if (t.size() > 1 && ParseLength(t[1], lc, h)) s.backgroundSizeH = h;
         }
       }
+      return;
+    }
+    case kPropMaskImage: case kPropMaskRepeat: case kPropMaskPositionX: case kPropMaskPositionY:
+    case kPropMaskSize: {
+      // Parsed like the background counterpart, in the background fields.
+      std::string bgImage;
+      bgImage.swap(s.backgroundImage);
+      BgRepeat bgRepeat = s.backgroundRepeat;
+      Length bgX = s.backgroundPosX, bgY = s.backgroundPosY, bgW = s.backgroundSizeW, bgH = s.backgroundSizeH;
+      int bgMode = s.backgroundSizeMode;
+      Color bgColor = s.backgroundColor;
+      s.backgroundImage.swap(s.maskImage);
+      if (id == kPropMaskImage) s.backgroundImage.clear();  // gradients are not supported as masks
+      s.backgroundRepeat = s.maskRepeat;
+      s.backgroundPosX = s.maskPosX;
+      s.backgroundPosY = s.maskPosY;
+      s.backgroundSizeMode = s.maskSizeMode;
+      s.backgroundSizeW = s.maskSizeW;
+      s.backgroundSizeH = s.maskSizeH;
+      int bgId = id == kPropMaskImage ? kPropBackgroundImage : id == kPropMaskRepeat ? kPropBackgroundRepeat
+                 : id == kPropMaskPositionX ? kPropBackgroundPositionX
+                 : id == kPropMaskPositionY ? kPropBackgroundPositionY : kPropBackgroundSize;
+      ApplyProperty(bgId, value, s, ctx);
+      s.maskImage.swap(s.backgroundImage);
+      s.maskRepeat = s.backgroundRepeat;
+      s.maskPosX = s.backgroundPosX;
+      s.maskPosY = s.backgroundPosY;
+      s.maskSizeMode = s.backgroundSizeMode;
+      s.maskSizeW = s.backgroundSizeW;
+      s.maskSizeH = s.backgroundSizeH;
+      s.backgroundImage.swap(bgImage);
+      s.backgroundRepeat = bgRepeat;
+      s.backgroundPosX = bgX;
+      s.backgroundPosY = bgY;
+      s.backgroundSizeMode = bgMode;
+      s.backgroundSizeW = bgW;
+      s.backgroundSizeH = bgH;
+      s.backgroundColor = bgColor;
       return;
     }
     case kPropOpacity: {

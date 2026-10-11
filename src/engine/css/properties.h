@@ -128,7 +128,12 @@ namespace kite {
   X(TransitionProperty, "transition-property", false)     \
   X(TransitionDuration, "transition-duration", false)     \
   X(TransitionDelay, "transition-delay", false)           \
-  X(TransitionTimingFunction, "transition-timing-function", false)
+  X(TransitionTimingFunction, "transition-timing-function", false) \
+  X(MaskImage, "mask-image", false)                        \
+  X(MaskRepeat, "mask-repeat", false)                      \
+  X(MaskPositionX, "mask-position-x", false)               \
+  X(MaskPositionY, "mask-position-y", false)               \
+  X(MaskSize, "mask-size", false)
 
 enum PropertyId {
 #define KITE_PROP_ENUM(id, name, inh) kProp##id,
