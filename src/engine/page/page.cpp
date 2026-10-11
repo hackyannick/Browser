@@ -664,6 +664,10 @@ bool Page::BoxRect(Node* n, Rect& out) const {
     while (c && c->kind == LayoutBox::kInline) c = c->parent;
     if (!c) return false;
     c->AbsolutePosition(ax, ay);
+    if (c->node && c->style && c->style->ClipsOverflow()) {  // lines scroll with their container
+      ax -= c->node->scrollX;
+      ay -= c->node->scrollY;
+    }
     for (size_t i = 0; i < c->lines.size(); ++i)
       for (size_t k = 0; k < c->lines[i].fragments.size(); ++k) {
         const LineFragment& f = c->lines[i].fragments[k];

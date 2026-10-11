@@ -1600,6 +1600,35 @@ void TestBlockerAndCache() {
   }
 }
 
+void TestScrollContainers() {
+  ScriptPage p("<div id=out></div><div id=box style='overflow:auto;height:100px;width:200px;border:2px solid'>"
+               "<div id=a style='height:80px'>A</div><div id=b style='height:80px'>B</div><div id=c style='height:80px'>C</div></div>");
+  p.page.script()->Execute("var box = document.getElementById('box'), c = document.getElementById('c');", "test", 0);
+  CHECK_EQ(p.Eval("[box.scrollHeight, box.clientHeight, box.scrollTop].join()"), "240,100,0");
+  CHECK_EQ(p.Eval("Math.round(c.getBoundingClientRect().top - box.getBoundingClientRect().top)"), "162");
+  p.Eval("(box.scrollTop = 120, 1)");
+  CHECK_EQ(p.Eval("box.scrollTop"), "120");
+  CHECK_EQ(p.Eval("Math.round(c.getBoundingClientRect().top - box.getBoundingClientRect().top)"), "42");
+  p.Eval("(box.scrollTop = 1000, 1)");
+  CHECK_EQ(p.Eval("box.scrollTop"), "140");  // clamped to scrollHeight - clientHeight
+  p.page.Repaint();
+  // A was scrolled out of view: clicks at its old place hit the visible content.
+  Rect boxRect;
+  CHECK(p.page.BoxRect(p.ById("box"), boxRect));
+  Node* hit = p.page.HitTest(boxRect.x + 10, boxRect.y + 10);
+  CHECK(hit != 0);
+  if (hit) CHECK(hit != p.ById("a"));
+  // The display list has a scroll bar (thumb) inside the box.
+  bool bar = false;
+  for (size_t i = 0; i < p.page.display().items.size(); ++i) {
+    const DisplayItem& it = p.page.display().items[i];
+    if (it.type == DisplayItem::kRect && it.rect.w <= 6 && it.rect.h >= 18 && it.color.a > 60) bar = true;
+  }
+  CHECK(bar);
+  p.Eval("(box.scrollTo({ top: 0 }), c.scrollIntoView(), 1)");
+  CHECK(p.Eval("box.scrollTop") != "0");
+}
+
 }  // namespace
 
 int main() {
@@ -1640,6 +1669,7 @@ int main() {
   TestMedia();
   TestFrames();
   TestBlockerAndCache();
+  TestScrollContainers();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

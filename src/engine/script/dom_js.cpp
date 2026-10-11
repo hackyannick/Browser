@@ -589,19 +589,34 @@ class Element extends Node {
   get offsetLeft() { const r = K.rect(this._h); return Math.round(r[0] + G.scrollX); }
   get offsetTop() { const r = K.rect(this._h); return Math.round(r[1] + G.scrollY); }
   get offsetParent() { return this.isConnected ? G.document.body : null; }
-  get clientWidth() { return this === G.document.documentElement ? G.innerWidth : this.offsetWidth; }
-  get clientHeight() { return this === G.document.documentElement ? G.innerHeight : this.offsetHeight; }
+  get clientWidth() { return this === G.document.documentElement ? G.innerWidth : Math.round(K.scrollInfo(this._h)[4]); }
+  get clientHeight() { return this === G.document.documentElement ? G.innerHeight : Math.round(K.scrollInfo(this._h)[5]); }
   get clientTop() { return 0; }
   get clientLeft() { return 0; }
-  get scrollWidth() { return this.clientWidth; }
-  get scrollHeight() { return this === G.document.documentElement || this === G.document.body ? K.viewport()[2] : this.clientHeight; }
-  get scrollTop() { return this === G.document.documentElement || this === G.document.body ? G.scrollY : 0; }
-  set scrollTop(v) { if (this === G.document.documentElement || this === G.document.body) G.scrollTo(G.scrollX, v); }
-  get scrollLeft() { return 0; }
-  set scrollLeft(v) {}
-  scrollIntoView() { const r = K.rect(this._h); G.scrollTo(0, r[1] + G.scrollY); }
-  scrollTo() {}
-  scrollBy() {}
+  get scrollWidth() { return this === G.document.documentElement || this === G.document.body ? G.innerWidth : K.scrollInfo(this._h)[2]; }
+  get scrollHeight() { return this === G.document.documentElement || this === G.document.body ? K.viewport()[2] : K.scrollInfo(this._h)[3]; }
+  get scrollTop() { return this === G.document.documentElement || this === G.document.body ? G.scrollY : K.scrollInfo(this._h)[1]; }
+  set scrollTop(v) { if (this === G.document.documentElement || this === G.document.body) G.scrollTo(G.scrollX, v); else K.setScroll(this._h, this.scrollLeft, +v || 0); }
+  get scrollLeft() { return this === G.document.documentElement || this === G.document.body ? G.scrollX : K.scrollInfo(this._h)[0]; }
+  set scrollLeft(v) { if (this === G.document.documentElement || this === G.document.body) G.scrollTo(v, G.scrollY); else K.setScroll(this._h, +v || 0, this.scrollTop); }
+  scrollIntoView(opt) {
+    // Scroll containers first (innermost out), then the page.
+    for (let p = this.parentElement; p && p !== G.document.body && p !== G.document.documentElement; p = p.parentElement) {
+      const s = K.scrollInfo(p._h);
+      if (s[3] <= s[5] + 0.5 && s[2] <= s[4] + 0.5) continue;
+      const pr = K.rect(p._h), r = K.rect(this._h);
+      K.setScroll(p._h, s[0] + (r[0] - pr[0]), s[1] + (r[1] - pr[1]));
+    }
+    const r = K.rect(this._h);
+    const block = opt && typeof opt === 'object' ? opt.block : (opt === false ? 'end' : 'start');
+    let y = r[1] + G.scrollY;
+    if (block === 'center') y -= (G.innerHeight - r[3]) / 2;
+    else if (block === 'end') y -= G.innerHeight - r[3];
+    G.scrollTo(G.scrollX, Math.max(0, y));
+  }
+  scrollTo(x, y) { if (x && typeof x === 'object') { y = x.top === undefined ? this.scrollTop : x.top; x = x.left === undefined ? this.scrollLeft : x.left; } K.setScroll(this._h, +x || 0, +y || 0); }
+  scroll(x, y) { this.scrollTo(x, y); }
+  scrollBy(x, y) { if (x && typeof x === 'object') { y = x.top || 0; x = x.left || 0; } K.setScroll(this._h, this.scrollLeft + (+x || 0), this.scrollTop + (+y || 0)); }
   scroll() {}
   focus() { G.document._active = this; }
   blur() { if (G.document._active === this) G.document._active = null; }
@@ -2378,7 +2393,7 @@ G.__kiteMediaEvent = function (h, type) {
   el.dispatchEvent(ev);
 };
 // User input from the platform with coordinates, keys and modifiers.
-const NO_BUBBLE = { mouseenter: 1, mouseleave: 1, pointerenter: 1, pointerleave: 1, focus: 1, blur: 1, load: 1 };
+const NO_BUBBLE = { mouseenter: 1, mouseleave: 1, pointerenter: 1, pointerleave: 1, focus: 1, blur: 1, load: 1, scroll: 1 };
 function makeInputEvent(type, info) {
   const bubbles = !NO_BUBBLE[type];
   const cancelable = type !== 'focus' && type !== 'blur' && type !== 'focusin' && type !== 'focusout' && type !== 'input' &&

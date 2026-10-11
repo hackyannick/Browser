@@ -1978,8 +1978,34 @@ LRESULT CALLBACK Browser::EditCtlProc(HWND h, UINT m, WPARAM w, LPARAM l) {
       return 0;
     }
     if (w == VK_TAB) {
+      // Next (Shift: previous) text field of the document.
+      Tab* t = b->IsAlive(b->editTab_) ? b->editTab_ : 0;
+      Node* from = b->editNode_;
+      bool back = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
       b->CommitEdit(false);
-      SetFocus(b->view_);
+      Node* next = 0;
+      if (t && from && b->IsAlive(t) && t->page->document()) {
+        std::vector<Node*> fields, stack(1, t->page->document()->root.get());
+        while (!stack.empty()) {
+          Node* n = stack.back();
+          stack.pop_back();
+          for (size_t i = n->children.size(); i-- > 0;) stack.push_back(n->children[i].get());
+          if (!n->IsElement() || !n->layoutBox || n->HasAttr("disabled") || n->HasAttr("readonly")) continue;
+          std::string type = AsciiLower(n->Attr("type"));
+          bool text = n->tag == "textarea" ||
+                      (n->tag == "input" && type != "checkbox" && type != "radio" && type != "submit" &&
+                       type != "button" && type != "reset" && type != "image" && type != "hidden" &&
+                       type != "file" && type != "range" && type != "color");
+          if (text) fields.push_back(n);
+        }
+        for (size_t i = 0; i < fields.size(); ++i)
+          if (fields[i] == from) {
+            if (back && i > 0) next = fields[i - 1];
+            if (!back && i + 1 < fields.size()) next = fields[i + 1];
+          }
+      }
+      if (next) b->BeginEdit(t, next);
+      else SetFocus(b->view_);
       return 0;
     }
   }
@@ -3411,6 +3437,10 @@ void Browser::AfterScript(Tab* t) {
   }
   // Canvas drawing only needs a repaint.
   if (js->TakeCanvasDirty()) Invalidate(t);
+  if (js->TakeRepaintDirty() && t->rendered) {
+    page->Repaint();
+    Invalidate(t);
+  }
   // DOM changes: restyle and relayout.
   if (js->TakeDirty() && t->rendered) {
     page->ScriptMutated();
@@ -3685,8 +3715,26 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
       ScreenToClient(h, &pt);
       Tab* ht = 0;
-      NodeAt(pt.x, pt.y, &ht);
+      Node* wn = NodeAt(pt.x, pt.y, &ht);
       float z = ZoomF();
+      // Innermost scroll container under the mouse that can still move.
+      for (Node* p = wn; p && ht;) {
+        LayoutBox* lb = p->IsElement() ? p->layoutBox : 0;
+        if (lb && lb->style && (lb->style->overflowY == kOverflowAuto || lb->style->overflowY == kOverflowScroll)) {
+          float cw, ch;
+          lb->ScrollExtent(cw, ch);
+          float maxY = std::max(0.0f, ch - lb->ClientH());
+          float ny = std::max(0.0f, std::min(maxY, p->scrollY + dy / z));
+          if (ny != p->scrollY) {
+            p->scrollY = ny;
+            ht->page->Repaint();
+            Invalidate(ht);
+            if (ht->page->script()) DispatchInput(ht, p, "scroll", InputEventInfo());
+            return 0;
+          }
+        }
+        p = p->parent ? p->parent : p->host;
+      }
       for (Tab* f = ht; f && f->parentTab; f = f->parentTab) {
         if (f->frameNode && AsciiLower(f->frameNode->Attr("scrolling")) == "no") continue;
         float maxY = std::max(0.0f, f->page->ContentHeight() * z - f->frameH * z);

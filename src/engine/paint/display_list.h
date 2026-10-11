@@ -133,12 +133,18 @@ class Painter {
   LayoutBox* skipBackgroundOf_;
   std::vector<Rect> clipStack_;
   int fixedDepth_;
+  int transformDepth_ = 0;  // open transform layers (hit rects are untransformed there)
   float facing_ = 1;  // sign of the accumulated transform determinant (backface culling)
   // Document position of painted boxes with a 'perspective' (for their children).
   std::map<const LayoutBox*, std::pair<float, float> > perspectiveBoxes_;
   void AddHit(const Rect& r, Node* n) {
     HitRegion h;
     h.rect = r;
+    // Content clipped away (e.g. scrolled out of a scroll container) cannot be hit.
+    if (!clipStack_.empty() && fixedDepth_ == 0 && transformDepth_ == 0) {
+      h.rect = r.intersect(clipStack_.back());
+      if (h.rect.w <= 0 || h.rect.h <= 0) return;
+    }
     h.node = n;
     h.fixed = fixedDepth_ > 0;
     out_->hits.push_back(h);

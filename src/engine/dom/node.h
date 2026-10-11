@@ -45,6 +45,7 @@ class Node {
   int canvasId = 0;                // <canvas> bitmap (see canvas/canvas.h)
   int mediaId = 0;                 // <audio>/<video> player (see media/media.h)
   int frameId = 0;                 // <iframe> document shown by the platform (kFrame items)
+  float scrollX = 0, scrollY = 0;  // scroll position of an overflow container (CSS px)
   bool scriptDone = false;         // <script> already executed
   // Shadow DOM: the shadow tree attached to this element (a kShadowRoot
   // node whose |host| points back here).

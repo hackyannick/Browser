@@ -21,6 +21,7 @@
 #include "css/resolver.h"
 #include "css/stylesheet.h"
 #include "html/parser.h"
+#include "layout/box.h"
 #include "media/media.h"
 #include "net/http.h"
 #include "net/url.h"
@@ -692,6 +693,49 @@ KITE_FN(OpenWin) {
 }
 
 KITE_FN(UserAgent) { return NewStr(ctx, Network::Get().userAgent()); }
+
+// Element scrolling: [scrollLeft, scrollTop, scrollWidth, scrollHeight, clientWidth, clientHeight].
+KITE_FN(ScrollInfo) {
+  ARGS_AT_LEAST(1);
+  ScriptEngine* e = Engine(ctx);
+  Node* n = Arg(ctx, argv[0]);
+  e->page()->EnsureLayout();
+  float v[6] = {0, 0, 0, 0, 0, 0};
+  if (n && n->layoutBox) {
+    LayoutBox* b = n->layoutBox;
+    b->ScrollExtent(v[2], v[3]);
+    v[4] = b->ClientW();
+    v[5] = b->ClientH();
+    v[0] = std::min(n->scrollX, std::max(0.0f, v[2] - v[4]));
+    v[1] = std::min(n->scrollY, std::max(0.0f, v[3] - v[5]));
+  }
+  JSValue arr = JS_NewArray(ctx);
+  for (uint32_t i = 0; i < 6; ++i) JS_SetPropertyUint32(ctx, arr, i, JS_NewFloat64(ctx, v[i]));
+  return arr;
+}
+
+KITE_FN(SetScroll) {
+  ARGS_AT_LEAST(3);
+  ScriptEngine* e = Engine(ctx);
+  Node* n = Arg(ctx, argv[0]);
+  if (!n) return JS_UNDEFINED;
+  e->page()->EnsureLayout();
+  float x = (float)Num(ctx, argv[1]), y = (float)Num(ctx, argv[2]);
+  if (!(x >= 0)) x = 0;
+  if (!(y >= 0)) y = 0;
+  if (n->layoutBox) {
+    float w, h;
+    n->layoutBox->ScrollExtent(w, h);
+    x = std::min(x, std::max(0.0f, w - n->layoutBox->ClientW()));
+    y = std::min(y, std::max(0.0f, h - n->layoutBox->ClientH()));
+  }
+  if (x != n->scrollX || y != n->scrollY) {
+    n->scrollX = x;
+    n->scrollY = y;
+    e->MarkRepaint();
+  }
+  return JS_UNDEFINED;
+}
 
 KITE_FN(MdCanPlay) {
   ARGS_AT_LEAST(1);
@@ -1383,6 +1427,7 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"setDefined", SetDefined, 1}, {"customs", Customs, 1}, {"connected", Connected, 1}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
       {"frameDepth", FrameDepth, 0}, {"frameId", FrameIdOf, 1}, {"postFrame", PostFrame, 3},
       {"frameUrl", FrameUrl, 1}, {"frameNav", FrameNav, 2}, {"openWin", OpenWin, 1}, {"ua", UserAgent, 0},
+      {"scrollInfo", ScrollInfo, 1}, {"setScroll", SetScroll, 3},
       {"mdLoad", MdLoad, 1}, {"mdCmd", MdCmd, 3}, {"mdStatus", MdStatus, 1}, {"mdCanPlay", MdCanPlay, 1},
   };
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)

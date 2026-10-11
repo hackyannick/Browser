@@ -118,7 +118,13 @@ class LayoutBox {
   float ContentW() const { return w - border.left - border.right - padding.left - padding.right; }
   float ContentH() const { return h - border.top - border.bottom - padding.top - padding.bottom; }
   // Absolute position of the border box in document coordinates.
+  // Position in the document, including the scroll offsets of ancestor
+  // scroll containers.
   void AbsolutePosition(float& ax, float& ay) const;
+  // Extent of the content of a scroll container (padding box size at least).
+  void ScrollExtent(float& width, float& height) const;
+  float ClientW() const { return w - border.left - border.right; }
+  float ClientH() const { return h - border.top - border.bottom; }
   LayoutBox* ContainingBlockForPositioned();
 
  private:

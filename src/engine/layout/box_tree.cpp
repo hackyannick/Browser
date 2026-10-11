@@ -1,6 +1,9 @@
 #include "layout/box.h"
 
+#include <algorithm>
+
 #include "base/strings.h"
+#include "css/style.h"
 #include "net/url.h"
 
 namespace kite {
@@ -52,7 +55,51 @@ void LayoutBox::AbsolutePosition(float& ax, float& ay) const {
   for (const LayoutBox* b = this; b; b = b->coordParent) {
     ax += b->x + b->relX;
     ay += b->y + b->relY;
+    if (b != this && b->node && b->style && b->style->ClipsOverflow()) {
+      ax -= b->node->scrollX;
+      ay -= b->node->scrollY;
+    }
   }
+}
+
+namespace {
+
+void ExtendContents(const LayoutBox* b, float x, float y, float& right, float& bottom, int depth);
+
+void ExtendBy(const LayoutBox* c, float ox, float oy, float& right, float& bottom, int depth) {
+  float x = ox + c->x + c->relX, y = oy + c->y + c->relY;
+  right = std::max(right, x + c->w);
+  bottom = std::max(bottom, y + c->h);
+  if (depth > 48 || (c->style && c->style->ClipsOverflow())) return;  // clipped content stays inside
+  ExtendContents(c, x, y, right, bottom, depth + 1);
+}
+
+void ExtendContents(const LayoutBox* b, float x, float y, float& right, float& bottom, int depth) {
+  for (size_t i = 0; i < b->lines.size(); ++i) {
+    const LineBox& lb = b->lines[i];
+    bottom = std::max(bottom, y + lb.y + lb.h);
+    for (size_t k = 0; k < lb.fragments.size(); ++k)
+      right = std::max(right, x + lb.fragments[k].x + lb.fragments[k].w);
+  }
+  for (size_t i = 0; i < b->children.size(); ++i) {
+    const LayoutBox* c = b->children[i].get();
+    if (c->isPositionedChild || c->kind == LayoutBox::kText || c->kind == LayoutBox::kInline ||
+        c->kind == LayoutBox::kLineBreak)
+      continue;
+    ExtendBy(c, x, y, right, bottom, depth);
+  }
+  for (size_t i = 0; i < b->positioned.size(); ++i)
+    if (b->positioned[i]->isPositionedChild) ExtendBy(b->positioned[i], x, y, right, bottom, depth);
+}
+
+}  // namespace
+
+void LayoutBox::ScrollExtent(float& width, float& height) const {
+  float right = 0, bottom = 0;
+  ExtendContents(this, 0, 0, right, bottom, 0);
+  // Content measured from the padding box, plus the end padding.
+  width = std::max(ClientW(), right - border.left + padding.right);
+  height = std::max(ClientH(), bottom - border.top + padding.bottom);
 }
 
 LayoutBox* LayoutBox::ContainingBlockForPositioned() {

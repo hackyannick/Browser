@@ -76,6 +76,7 @@ void Painter::Paint(LayoutBox* root, float viewportW, float viewportH, DisplayLi
   out.Clear();
   clipStack_.clear();
   fixedDepth_ = 0;
+  transformDepth_ = 0;
   skipBackgroundOf_ = 0;
   out.width = viewportW;
   out.height = 0;
@@ -1014,6 +1015,7 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     for (int k = 0; k < 3; ++k) ti.persp[k] = tp[k];
     transformItem = (int)out_->items.size();
     out_->items.push_back(ti);
+    ++transformDepth_;
   } else if (s->backfaceHidden && facing_ < 0) {
     facing_ = savedFacing;
     if (fixed) {
@@ -1046,6 +1048,7 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     }
     if (transformItem >= 0) {
       CloseTransform(transformItem, hitStart, ax, ay, b->w, b->h);
+      --transformDepth_;
       transformItem = -1;
     }
     Context3d c;
@@ -1064,13 +1067,31 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     out_->items.push_back(it);
     clipStack_.push_back(clipStack_.empty() ? it.rect : it.rect.intersect(clipStack_.back()));
   }
-  PaintPositioned(b, ax, ay, alpha, true);
+  // Scroll containers: the content moves by the element's scroll offset.
+  float sx = 0, sy = 0, maxX = 0, maxY = 0;
+  bool scrollBarY = false, scrollBarX = false;
+  if (clip && b->parent && b->node &&
+      (s->overflowX == kOverflowAuto || s->overflowX == kOverflowScroll || s->overflowY == kOverflowAuto ||
+       s->overflowY == kOverflowScroll || b->node->scrollX != 0 || b->node->scrollY != 0)) {
+    float cw, ch;
+    b->ScrollExtent(cw, ch);
+    maxX = std::max(0.0f, cw - b->ClientW());
+    maxY = std::max(0.0f, ch - b->ClientH());
+    b->node->scrollX = std::max(0.0f, std::min(b->node->scrollX, maxX));
+    b->node->scrollY = std::max(0.0f, std::min(b->node->scrollY, maxY));
+    sx = b->node->scrollX;
+    sy = b->node->scrollY;
+    scrollBarY = maxY > 0.5f && (s->overflowY == kOverflowAuto || s->overflowY == kOverflowScroll);
+    scrollBarX = maxX > 0.5f && (s->overflowX == kOverflowAuto || s->overflowX == kOverflowScroll);
+  }
+  float cx = ax - sx, cy = ay - sy;
+  PaintPositioned(b, cx, cy, alpha, true);
   if (b->kind == LayoutBox::kReplaced) {
     if (s->visible) PaintReplaced(b, ax, ay, alpha);
   } else if (b->inlineContent) {
     if (!linesDone) {
-      PaintLines(b, ax, ay, alpha);
-      PaintFloatsInInline(b, b, ax, ay, alpha);
+      PaintLines(b, cx, cy, alpha);
+      PaintFloatsInInline(b, b, cx, cy, alpha);
     }
   } else {
     for (size_t i = 0; i < b->children.size(); ++i) {
@@ -1079,10 +1100,26 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
       if (c->kind == LayoutBox::kText || c->kind == LayoutBox::kInline ||
           c->kind == LayoutBox::kLineBreak)
         continue;
-      PaintBox(c, ax, ay, alpha);
+      PaintBox(c, cx, cy, alpha);
     }
   }
-  PaintPositioned(b, ax, ay, alpha, false);
+  PaintPositioned(b, cx, cy, alpha, false);
+  if (scrollBarY || scrollBarX) {
+    // Thin overlay scroll bars (wheel and scripts scroll the element).
+    float px0 = ax + b->border.left, py0 = ay + b->border.top, cw = b->ClientW(), ch = b->ClientH();
+    if (scrollBarY) {
+      Rect track(px0 + cw - 7, py0 + 1, 6, ch - 2);
+      FillRect(track, Color(0, 0, 0, 25), alpha);
+      float th = std::max(18.0f, track.h * track.h / (track.h + maxY));
+      FillRect(Rect(track.x + 1, track.y + (track.h - th) * (sy / maxY), 4, th), Color(0, 0, 0, 110), alpha);
+    }
+    if (scrollBarX) {
+      Rect track(px0 + 1, py0 + ch - 7, cw - 2, 6);
+      FillRect(track, Color(0, 0, 0, 25), alpha);
+      float tw = std::max(18.0f, track.w * track.w / (track.w + maxX));
+      FillRect(Rect(track.x + (track.w - tw) * (sx / maxX), track.y + 1, tw, 4), Color(0, 0, 0, 110), alpha);
+    }
+  }
   if (clip && b->parent) {
     DisplayItem it;
     it.type = DisplayItem::kPopClip;
@@ -1095,7 +1132,10 @@ void Painter::PaintBox(LayoutBox* b, float px, float py, float alpha) {
     ctx = !context3d_.empty() && context3d_.back().owner == parent ? &context3d_.back() : 0;
   }
   facing_ = savedFacing;
-  if (transformItem >= 0) CloseTransform(transformItem, hitStart, ax, ay, b->w, b->h);
+  if (transformItem >= 0) {
+    CloseTransform(transformItem, hitStart, ax, ay, b->w, b->h);
+    --transformDepth_;
+  }
   if (fixed) {
     DisplayItem fi;
     fi.type = DisplayItem::kEndFixed;

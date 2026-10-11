@@ -178,6 +178,13 @@ class ScriptEngine {
   Canvas2D* CanvasById(int id);
   int CreateCanvas(Node* n);
   void MarkCanvasDirty() { canvasDirty_ = true; }
+  // Element scroll positions changed: the page needs Repaint() (no relayout).
+  void MarkRepaint() { repaintDirty_ = true; }
+  bool TakeRepaintDirty() {
+    bool d = repaintDirty_;
+    repaintDirty_ = false;
+    return d;
+  }
   void WatchImage(Node* img, const std::string& url, bool request);
   std::map<int, std::shared_ptr<void> >& canvasObjects() { return canvasObjects_; }
 
@@ -226,6 +233,7 @@ class ScriptEngine {
   bool dirty_;
   bool layoutStale_ = false;
   bool canvasDirty_ = false;
+  bool repaintDirty_ = false;
   std::map<int, std::unique_ptr<Canvas2D> > canvases_;
   std::map<int, std::shared_ptr<void> > canvasObjects_;  // patterns
   std::vector<std::pair<std::string, Node*> > imageWaiters_;
