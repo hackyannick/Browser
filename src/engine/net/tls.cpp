@@ -311,6 +311,15 @@ bool TlsStream::WaitReadable(int timeoutMs) {
   return sock_->WaitReadable(timeoutMs);
 }
 
+int TlsStream::ReadAvailable(char* buf, int len) {
+  if (impl_->t13) {
+    int r = impl_->t13->Read(buf, len, false);
+    if (r == -1) error_ = impl_->t13->error();
+    return r;
+  }
+  return Read(buf, len);
+}
+
 int TlsStream::Read(char* buf, int len) {
   if (impl_->t13) {
     int r = impl_->t13->Read(buf, len);

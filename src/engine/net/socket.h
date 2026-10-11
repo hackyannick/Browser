@@ -67,6 +67,9 @@ class TlsStream : public Stream {
   bool needsTls12Retry() const { return needs12_; }
   std::string version() const;
   int Read(char* buf, int len);
+  // Like Read, but returns -2 instead of waiting when the readable bytes
+  // were only TLS records without application data (session tickets).
+  int ReadAvailable(char* buf, int len);
   bool WriteAll(const char* buf, int len);
   // True when decrypted data is buffered or the socket becomes readable.
   bool WaitReadable(int timeoutMs);

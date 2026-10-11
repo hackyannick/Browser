@@ -23,6 +23,7 @@ typedef int socklen_t;
 #include <cstring>
 
 #include "base/strings.h"
+#include "net/dns.h"
 
 namespace kite {
 
@@ -86,27 +87,9 @@ bool TcpSocket::Connect(const std::string& host, int port, int timeoutMs, Cancel
   addr.sin_port = htons((unsigned short)port);
   unsigned long ip = inet_addr(host.c_str());
   if (ip == INADDR_NONE || host.find_first_not_of("0123456789.") != std::string::npos) {
-#ifdef _WIN32
-    // gethostbyname is available on Windows 2000 (getaddrinfo is not) and
-    // uses thread-local storage, so it is safe in worker threads.
-    struct hostent* he = gethostbyname(host.c_str());
-    if (!he || he->h_addrtype != AF_INET || !he->h_addr_list[0]) {
-      error_ = "Host nicht gefunden: " + host;
-      return false;
-    }
-    memcpy(&addr.sin_addr, he->h_addr_list[0], 4);
-#else
-    struct addrinfo hints, *res = 0;
-    memset(&hints, 0, sizeof hints);
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    if (getaddrinfo(host.c_str(), 0, &hints, &res) != 0 || !res) {
-      error_ = "Host nicht gefunden: " + host;
-      return false;
-    }
-    memcpy(&addr.sin_addr, &((struct sockaddr_in*)res->ai_addr)->sin_addr, 4);
-    freeaddrinfo(res);
-#endif
+    unsigned long resolved = 0;
+    if (!ResolveHost(host, resolved, error_)) return false;
+    addr.sin_addr.s_addr = resolved;
   } else {
     addr.sin_addr.s_addr = ip;
   }

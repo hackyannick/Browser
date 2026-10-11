@@ -128,7 +128,10 @@ bool Http2Connection::Pump(int timeoutMs) {
   if (dead_) return false;
   if (!tls_->WaitReadable(timeoutMs)) return true;  // nothing yet
   char buf[16384];
-  int r = tls_->Read(buf, sizeof buf);
+  // Never block here: this runs with the connection locked, and a session
+  // ticket arriving alone must not hold up the other streams.
+  int r = tls_->ReadAvailable(buf, sizeof buf);
+  if (r == -2) return true;
   if (r <= 0) {
     FailAll(r == 0 ? "Verbindung vom Server geschlossen" : "Lesefehler: " + tls_->error(), true, 0);
     return false;

@@ -313,7 +313,10 @@ bool Tls13Client::NextHandshake(int& type, std::string& msg, bool encrypted) {
     std::string rec;
     if (!ReadRecord(rtype, rec)) return false;
     std::string header = rec.substr(0, 5), body = rec.substr(5);
-    if (rtype == 20) continue;  // middlebox-compatibility ChangeCipherSpec
+    if (rtype == 20) {
+      hsSeen_ = true;
+      continue;
+    }  // middlebox-compatibility ChangeCipherSpec
     if (rtype == 21) {
       if (body.size() >= 2) return Fail("TLS-Fehlermeldung vom Server (" + IntToString((unsigned char)body[1]) + ")");
       return Fail("TLS-Fehlermeldung vom Server");
@@ -613,9 +616,14 @@ Tls13Client::Result Tls13Client::Handshake(const std::string& host, const char* 
   }
 }
 
-int Tls13Client::Read(char* buf, int len) {
+int Tls13Client::Read(char* buf, int len, bool wait) {
   while (pos_ >= plain_.size()) {
     if (eof_) return 0;
+    // Post-handshake messages carry no data: do not block for more unless asked.
+    if (!wait && hsSeen_ && !sock_->WaitReadable(0)) {
+      hsSeen_ = false;
+      return kWouldBlock;
+    }
     plain_.clear();
     pos_ = 0;
     int rtype;
@@ -642,6 +650,7 @@ int Tls13Client::Read(char* buf, int len) {
       error_ = "TLS-Fehlermeldung vom Server";
       return -1;
     } else if (inner == 22) {
+      hsSeen_ = true;
       hsBuffer_ += body;
       while (hsBuffer_.size() >= 4) {
         size_t mlen = ((unsigned char)hsBuffer_[1] << 16) | ((unsigned char)hsBuffer_[2] << 8) | (unsigned char)hsBuffer_[3];

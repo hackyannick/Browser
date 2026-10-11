@@ -14,6 +14,7 @@
 #include "base/thread.h"
 #include "net/blocker.h"
 #include "net/cache.h"
+#include "net/dns.h"
 #include "html/parser.h"
 #include "image/svg.h"
 #include "page/page.h"
@@ -3889,6 +3890,7 @@ INT_PTR CALLBACK Browser::SettingsProc(HWND h, UINT m, WPARAM w, LPARAM l) {
         case IDC_SET_CLEARCACHE: {
           std::shared_ptr<HttpCache> c = Network::Get().cache();
           if (c) c->Clear();
+          ClearDnsCache();
           SetDlgItemTextW(h, IDC_SET_CACHEINFO, L"Der Cache wurde geleert.");
           return TRUE;
         }

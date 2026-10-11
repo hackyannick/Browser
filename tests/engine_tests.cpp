@@ -34,6 +34,7 @@
 #include "page/animation.h"
 #include "page/page.h"
 #include "text/fontfile.h"
+#include "net/dns.h"
 
 using namespace kite;
 
@@ -1631,6 +1632,29 @@ void TestScrollContainers() {
 
 }  // namespace
 
+void TestDns() {
+  std::string q = BuildDnsQuery("www.Example.com", 0x1234);
+  CHECK_EQ(q.size(), (size_t)(12 + 17 + 4));
+  CHECK_EQ(q.substr(12, 4), std::string("\x03www", 4));
+  CHECK(BuildDnsQuery("a..b", 1).empty());
+  // Response: CNAME www.example.com -> example.com, then A 93.184.216.34.
+  std::string r = q;
+  r[2] = (char)0x81; r[3] = (char)0x80; r[7] = 2;
+  r += std::string("\xc0\x0c\x00\x05\x00\x01\x00\x00\x00\x3c\x00\x02\xc0\x10", 14);
+  r += std::string("\xc0\x10\x00\x01\x00\x01\x00\x00\x01\x2c\x00\x04\x5d\xb8\xd8\x22", 16);
+  unsigned long ip = 0; long ttl = 0; int rcode = -1;
+  CHECK(ParseDnsResponse(r, 0x1234, ip, ttl, rcode));
+  const unsigned char* b = (const unsigned char*)&ip;
+  CHECK(b[0] == 93 && b[1] == 184 && b[2] == 216 && b[3] == 34);
+  CHECK_EQ(ttl, 300L);
+  CHECK(!ParseDnsResponse(r, 0x9999, ip, ttl, rcode));
+  std::string nx = q;
+  nx[2] = (char)0x81; nx[3] = (char)0x83;
+  CHECK(!ParseDnsResponse(nx, 0x1234, ip, ttl, rcode));
+  CHECK_EQ(rcode, 3);
+  CHECK(ResolveHost("localhost", ip, q));
+}
+
 int main() {
   TestStrings();
   TestUrl();
@@ -1670,6 +1694,7 @@ int main() {
   TestFrames();
   TestBlockerAndCache();
   TestScrollContainers();
+  TestDns();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

@@ -20,7 +20,11 @@ class Tls13Client {
   // |anchors| is a br_x509_trust_anchor array.
   Result Handshake(const std::string& host, const char* const* alpn, int alpnCount, const void* anchors,
                    size_t anchorCount);
-  int Read(char* buf, int len);  // bytes, 0 at EOF, -1 on error
+  // Bytes, 0 at EOF, -1 on error. With |wait| false it returns kWouldBlock
+  // instead of blocking when only non-data records (session tickets,
+  // KeyUpdate) were available.
+  int Read(char* buf, int len, bool wait = true);
+  static const int kWouldBlock = -2;
   bool WriteAll(const char* buf, int len);
   bool HasBuffered() const { return pos_ < plain_.size(); }
   const std::string& alpn() const { return alpn_; }
@@ -54,6 +58,7 @@ class Tls13Client {
   size_t keyLen_ = 16;
   std::string transcript_;
   std::string hsBuffer_;  // handshake bytes not yet consumed
+  bool hsSeen_ = false;  // a non-data record was just processed
   Keys clientHs_, serverHs_, clientAp_, serverAp_;
   bool encrypted_ = false;
   std::string plain_;  // decrypted application data
