@@ -1722,6 +1722,24 @@ void TestModernApis() {
   CHECK_EQ(p.Eval("document.adoptedStyleSheets.length + ':' + document.getElementById('box').getBoundingClientRect().width"), "1:66");
 }
 
+void TestDomCompat() {
+  ScriptPage p("<div id=out></div><form id=f name=login><input name=user value=ada>"
+               "<input type=radio name=r value=a><input type=radio name=r value=b checked></form>"
+               "<style id=st>.x{color:red}</style><div id=box class=b></div><x-comp id=c></x-comp><script>var ready = 1</script>");
+  CHECK_EQ(p.Eval("document.forms.login.user.value + document.getElementById('f').elements.user.value"), "adaada");
+  CHECK_EQ(p.Eval("document.login.id + ':' + document.forms[0].elements.r.value"), "f:b");
+  CHECK_EQ(p.Eval("typeof box === 'object' && window.box.id"), "box");
+  CHECK_EQ(p.Eval("(() => { try { notDefinedAnywhere; return 'no'; } catch (e) { return e.name; } })()"), "ReferenceError");
+  CHECK_EQ(p.Eval("(performance.mark('m1'), performance.getEntriesByName('m1').length + ':' + performance.getEntriesByType('navigation').length)"), "1:1");
+  CHECK_EQ(p.Eval("(performance.mark('m2'), performance.measure('d', 'm1', 'm2').entryType)"), "measure");
+  CHECK_EQ(p.Eval("document.styleSheets[0].cssRules[0].selectorText + document.styleSheets[0].cssRules[0].style.color"), ".xred");
+  CHECK_EQ(p.Eval("(() => { const c = document.getElementById('c'); const o = {}; c.target = o; c.value = 5; return (c.target === o) + ':' + c.value + ':' + c.hasAttribute('target'); })()"), "true:5:false");
+  p.Eval("(document.getElementById('st').sheet.insertRule('.b{width:55px}', 1), 1)");
+  if (p.page.script()->TakeDirty()) p.page.ScriptMutated();
+  CHECK_EQ(p.Eval("document.getElementById('box').getBoundingClientRect().width"), "55");
+  CHECK_EQ(p.Eval("[navigator.oscpu !== undefined, typeof document.lastModified, document.body.baseURI === location.href].join()"), "true,string,true");
+}
+
 void TestDns() {
   std::string q = BuildDnsQuery("www.Example.com", 0x1234);
   CHECK_EQ(q.size(), (size_t)(12 + 17 + 4));
@@ -1789,6 +1807,7 @@ int main() {
   TestGridLayout();
   TestModernCss();
   TestModernApis();
+  TestDomCompat();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

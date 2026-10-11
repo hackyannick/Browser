@@ -171,7 +171,7 @@ function invoke(node, ev, capture) {
 }
 
 function reportError(e) {
-  K.log('Fehler: ' + (e && e.stack ? e + '\n' + e.stack : String(e)));
+  K.log('Fehler: ' + (e && e.stack ? e + '\n' + String(e.stack).trim().split('\n').map(l => '    ' + l).join('\n') : String(e)));
 }
 
 // ------------------------------------------------------------------ Collections
@@ -179,11 +179,36 @@ function nodeList(arr) {
   arr.item = i => arr[i] || null;
   return arr;
 }
+// Named properties: collection.someId / collection.someName (first match).
+function addNamed(arr, group) {
+  const seen = new Map();
+  for (const e of arr) {
+    if (!e || e.nodeType !== 1) continue;
+    for (const key of [e.id, e.getAttribute('name')]) {
+      if (!key || /^\d+$/.test(key) || key in Array.prototype || key === 'item' || key === 'namedItem') continue;
+      if (!seen.has(key)) seen.set(key, []);
+      const l = seen.get(key);
+      if (l.indexOf(e) < 0) l.push(e);
+    }
+  }
+  for (const [key, l] of seen) {
+    if (Object.prototype.hasOwnProperty.call(arr, key)) continue;
+    Object.defineProperty(arr, key, { value: group && l.length > 1 ? radioNodeList(l) : l[0], configurable: true, enumerable: false, writable: true });
+  }
+  return arr;
+}
 function htmlCollection(arr) {
   arr.item = i => arr[i] || null;
   arr.namedItem = name => arr.find(e => e.id === name || e.getAttribute('name') === name) || null;
-  return arr;
+  return addNamed(arr, false);
 }
+// Several form controls with one name (radio groups).
+class RadioNodeList extends Array {
+  get value() { const c = this.find(e => e.checked); return c ? c.value : ''; }
+  set value(v) { for (const e of this) if (e.value === String(v)) { e.checked = true; break; } }
+  item(i) { return this[i] || null; }
+}
+function radioNodeList(list) { const r = new RadioNodeList(); r.push(...list); return r; }
 
 class DOMTokenList {
   constructor(el, attr) { this._el = el; this._attr = attr || 'class'; }
@@ -265,6 +290,7 @@ function dataset(el) {
 
 // ------------------------------------------------------------------ Nodes
 class Node extends EventTarget {
+  get baseURI() { return K.url(); }
   get nodeType() { return K.type(this._h); }
   get nodeName() {
     switch (this.nodeType) {
@@ -473,7 +499,7 @@ class ShadowRoot extends DocumentFragment {
     for (const h of K.parse(String(v), '')) K.insert(this._h, h, 0);
   }
   get activeElement() { return null; }
-  get styleSheets() { return []; }
+  get styleSheets() { return styleSheetList(this); }
   getSelection() { return G.getSelection(); }
   elementFromPoint() { return null; }
 }
@@ -712,6 +738,8 @@ class HTMLElement extends Element {
   get pathname() { return urlPart(this, 'href', 'pathname'); }
   get search() { return urlPart(this, 'href', 'search'); }
   get hash() { return urlPart(this, 'href', 'hash'); }
+  get username() { return urlPart(this, 'href', 'username'); }
+  get password() { return urlPart(this, 'href', 'password'); }
   get origin() { return urlPart(this, 'href', 'origin'); }
   get target() { return this.getAttribute('target') || ''; }
   set target(v) { this.setAttribute('target', v); }
@@ -758,7 +786,7 @@ class HTMLElement extends Element {
   }
   set type(v) { this.setAttribute('type', v); }
   get media() { return this.getAttribute('media') || ''; }
-  get sheet() { return null; }
+  get sheet() { return elementSheet(this); }
   get content() {
     if (this.localName === 'meta') return this.getAttribute('content') || '';
     if (this.localName !== 'template') return undefined;
@@ -823,9 +851,20 @@ class HTMLElement extends Element {
   }
   get labels() { return this.id ? G.document.querySelectorAll('label[for="' + this.id + '"]') : []; }
   get htmlFor() { return this.getAttribute('for') || ''; }
+  get event() { return this.getAttribute('event') || ''; }
+  get acceptCharset() { return this.getAttribute('accept-charset') || ''; }
   set htmlFor(v) { this.setAttribute('for', v); }
   get control() { const f = this.htmlFor; return f ? G.document.getElementById(f) : this.querySelector('input,select,textarea'); }
-  get elements() { return htmlCollection(this.querySelectorAll('input,select,textarea,button,fieldset,output').slice()); }
+  get elements() {
+    const own = this.querySelectorAll('input,select,textarea,button,fieldset,output,object').slice()
+      .filter(e => !e.getAttribute('form') || e.getAttribute('form') === this.id);
+    // Controls outside the form that name it with form="id".
+    if (this.id) for (const e of G.document.querySelectorAll('[form="' + this.id.replace(/"/g, '\\"') + '"]')) if (own.indexOf(e) < 0) own.push(e);
+    const arr = own.filter(e => !(e.localName === 'input' && e.type === 'image'));
+    arr.item = i => arr[i] || null;
+    arr.namedItem = name => { const v = arr[name]; return v === undefined ? null : v; };
+    return addNamed(arr, true);
+  }
   get length() { return this.localName === 'form' ? this.elements.length : this.localName === 'select' ? this.options.length : undefined; }
   get action() { const a = this.getAttribute('action'); return a ? K.resolve(a) : K.url(); }
   set action(v) { this.setAttribute('action', v); }
@@ -1110,6 +1149,44 @@ function protoFor(h) {
   return HTMLElement.prototype;
 }
 
+// form.someName / form[0] reach the form's controls.
+function formProxy(f) {
+  return new Proxy(f, {
+    get(t, k, r) {
+      if (typeof k !== 'string' || k in t) return Reflect.get(t, k, r);
+      const els = r.elements;
+      if (/^\d+$/.test(k)) return els[+k];
+      return Object.prototype.hasOwnProperty.call(els, k) ? els[k] : undefined;
+    },
+    has(t, k) {
+      if (k in t || typeof k !== 'string') return k in t;
+      const els = t.elements;
+      return /^\d+$/.test(k) ? +k < els.length : Object.prototype.hasOwnProperty.call(els, k);
+    },
+  });
+}
+
+// document.someFormName and window.someId (named access): resolved through
+// a proxy in the prototype chain, so real properties always win.
+function namedElement(k, forWindow) {
+  if (typeof k !== 'string' || !k || k.length > 200 || !G.document || !G.document.documentElement) return undefined;
+  const q = '[name="' + k.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"]';
+  const byName = G.document.querySelector('form' + q + ',img' + q + ',embed' + q + ',object' + q + ',iframe' + q);
+  if (byName) return byName;
+  if (forWindow) return G.document.getElementById(k) || undefined;
+  const obj = G.document.getElementById(k);
+  return obj && (obj.localName === 'object' || (obj.localName === 'img' && obj.getAttribute('name'))) ? obj : undefined;
+}
+function namedProto(proto, forWindow) {
+  return new Proxy(Object.create(proto), {
+    get(t, k, r) {
+      if (k in t || typeof k !== 'string') return Reflect.get(t, k, r);
+      return namedElement(k, forWindow);
+    },
+    has(t, k) { return k in t || (typeof k === 'string' && namedElement(k, forWindow) !== undefined); },
+  });
+}
+
 function W(h) {
   if (!h) return null;
   let w = wrappers.get(h);
@@ -1124,6 +1201,7 @@ function W(h) {
   else proto = Node.prototype;
   w = Object.create(proto);
   Object.defineProperty(w, '_h', { value: h });
+  if (t === 1 && K.name(h) === 'form') w = formProxy(w);
   wrappers.set(h, w);
   return w;
 }
@@ -1614,6 +1692,15 @@ class Document extends Node {
   get domain() { return G.location.hostname; }
   get characterSet() { return 'UTF-8'; }
   get charset() { return 'UTF-8'; }
+  get inputEncoding() { return 'UTF-8'; }
+  get lastModified() {
+    const d = new Date(), p = n => String(n).padStart(2, '0');
+    return p(d.getMonth() + 1) + '/' + p(d.getDate()) + '/' + d.getFullYear() + ' ' + p(d.getHours()) + ':' + p(d.getMinutes()) + ':' + p(d.getSeconds());
+  }
+  get dir() { const e = this.documentElement; return e ? e.getAttribute('dir') || '' : ''; }
+  set dir(v) { const e = this.documentElement; if (e) e.setAttribute('dir', v); }
+  get designMode() { return 'off'; }
+  set designMode(v) {}
   get contentType() { return 'text/html'; }
   get compatMode() { return 'CSS1Compat'; }
   get defaultView() { return G; }
@@ -1626,7 +1713,7 @@ class Document extends Node {
   get images() { return htmlCollection(this.querySelectorAll('img').slice()); }
   get links() { return htmlCollection(this.querySelectorAll('a[href],area[href]').slice()); }
   get scripts() { return htmlCollection(this.querySelectorAll('script').slice()); }
-  get styleSheets() { return []; }
+  get styleSheets() { return styleSheetList(this); }
   get fonts() { return fontFaceSet; }
   get implementation() { return { hasFeature: () => true, createHTMLDocument: () => G.document }; }
   hasFocus() { return true; }
@@ -1648,7 +1735,7 @@ mixin(Document, ChildMixin);
 class HTMLDocument extends Document {}
 
 let readyState = 'loading';
-const doc = Object.create(HTMLDocument.prototype);
+const doc = Object.create(namedProto(HTMLDocument.prototype, false));
 Object.defineProperty(doc, '_h', { value: K.doc() });
 wrappers.set(K.doc(), doc);
 
@@ -1764,14 +1851,89 @@ function makeTimer(repeat) {
 }
 
 const startTime = Date.now();
+// Performance timeline: marks, measures, the navigation entry and paint
+// entries, observable with PerformanceObserver.
+class PerformanceEntry {
+  constructor(name, type, start, duration) { this.name = name; this.entryType = type; this.startTime = start; this.duration = duration; }
+  toJSON() { return { name: this.name, entryType: this.entryType, startTime: this.startTime, duration: this.duration }; }
+}
+class PerformanceMark extends PerformanceEntry {
+  constructor(name, opts) {
+    opts = opts || {};
+    super(String(name), 'mark', opts.startTime !== undefined ? +opts.startTime : performance.now(), 0);
+    this.detail = opts.detail === undefined ? null : structuredClone(opts.detail);
+  }
+}
+class PerformanceMeasure extends PerformanceEntry {}
+class PerformancePaintTiming extends PerformanceEntry {}
+const timing = { navigationStart: startTime, unloadEventStart: 0, unloadEventEnd: 0, redirectStart: 0, redirectEnd: 0,
+  fetchStart: startTime, domainLookupStart: startTime, domainLookupEnd: startTime, connectStart: startTime,
+  connectEnd: startTime, secureConnectionStart: startTime, requestStart: startTime, responseStart: startTime,
+  responseEnd: startTime, domLoading: startTime, domInteractive: 0, domContentLoadedEventStart: 0,
+  domContentLoadedEventEnd: 0, domComplete: 0, loadEventStart: 0, loadEventEnd: 0, toJSON() { return Object.assign({}, this); } };
+class PerformanceNavigationTiming extends PerformanceEntry {
+  constructor() { super(K.url(), 'navigation', 0, 0); }
+  get duration() { return timing.loadEventEnd ? timing.loadEventEnd - startTime : 0; }
+  set duration(v) {}
+  get type() { return 'navigate'; }
+}
+for (const k of ['fetchStart', 'domainLookupStart', 'domainLookupEnd', 'connectStart', 'connectEnd', 'secureConnectionStart',
+  'requestStart', 'responseStart', 'responseEnd', 'domInteractive', 'domContentLoadedEventStart', 'domContentLoadedEventEnd',
+  'domComplete', 'loadEventStart', 'loadEventEnd'])
+  Object.defineProperty(PerformanceNavigationTiming.prototype, k, { get() { return timing[k] ? timing[k] - startTime : 0; } });
+Object.assign(PerformanceNavigationTiming.prototype, { redirectCount: 0, initiatorType: 'navigation', nextHopProtocol: 'h2',
+  workerStart: 0, redirectStart: 0, redirectEnd: 0, unloadEventStart: 0, unloadEventEnd: 0, transferSize: 0,
+  encodedBodySize: 0, decodedBodySize: 0, serverTiming: [], activationStart: 0, deliveryType: '', renderBlockingStatus: 'non-blocking' });
+const perfEntries = [new PerformanceNavigationTiming()];
+const perfObservers = new Set();
+function perfAdd(e) {
+  perfEntries.push(e);
+  for (const o of perfObservers) if (o._types.has(e.entryType)) o._queue(e);
+  return e;
+}
+function perfFilter(name, type) {
+  return perfEntries.filter(e => (name === undefined || e.name === name) && (type === undefined || e.entryType === type))
+    .sort((a, b) => a.startTime - b.startTime);
+}
+function markTime(v) {
+  if (v === undefined) return undefined;
+  if (typeof v === 'number') return v;
+  if (v in timing && typeof timing[v] === 'number') return timing[v] ? timing[v] - startTime : 0;
+  const m = perfFilter(String(v), 'mark');
+  if (!m.length) throw new DOMException("Failed to execute 'measure' on 'Performance': The mark '" + v + "' does not exist.", 'SyntaxError');
+  return m[m.length - 1].startTime;
+}
 const performance = {
   now: () => Date.now() - startTime,
   timeOrigin: startTime,
-  timing: { navigationStart: startTime, domContentLoadedEventEnd: 0, loadEventEnd: 0, responseStart: startTime },
-  navigation: { type: 0 },
-  mark() {}, measure() {}, clearMarks() {}, clearMeasures() {},
-  getEntriesByType() { return []; }, getEntriesByName() { return []; }, getEntries() { return []; },
-  memory: { usedJSHeapSize: 0, totalJSHeapSize: 0 },
+  timing,
+  navigation: { type: 0, redirectCount: 0, TYPE_NAVIGATE: 0, TYPE_RELOAD: 1, TYPE_BACK_FORWARD: 2 },
+  eventCounts: new Map(),
+  memory: { usedJSHeapSize: 0, totalJSHeapSize: 0, jsHeapSizeLimit: 0 },
+  mark(name, opts) { return perfAdd(new PerformanceMark(name, opts)); },
+  measure(name, a, b) {
+    let start = 0, end = performance.now(), detail = null;
+    if (a && typeof a === 'object') {
+      if (a.start !== undefined) start = markTime(a.start);
+      if (a.end !== undefined) end = markTime(a.end);
+      if (a.duration !== undefined) { if (a.start !== undefined) end = start + a.duration; else start = end - a.duration; }
+      if (a.detail !== undefined) detail = structuredClone(a.detail);
+    } else {
+      if (a !== undefined && a !== null) start = markTime(a);
+      if (b !== undefined) end = markTime(b);
+    }
+    const m = new PerformanceMeasure(String(name), 'measure', start, end - start);
+    m.detail = detail;
+    return perfAdd(m);
+  },
+  clearMarks(n) { for (let i = perfEntries.length - 1; i >= 0; i--) if (perfEntries[i].entryType === 'mark' && (n === undefined || perfEntries[i].name === n)) perfEntries.splice(i, 1); },
+  clearMeasures(n) { for (let i = perfEntries.length - 1; i >= 0; i--) if (perfEntries[i].entryType === 'measure' && (n === undefined || perfEntries[i].name === n)) perfEntries.splice(i, 1); },
+  clearResourceTimings() {}, setResourceTimingBufferSize() {},
+  getEntries() { return perfFilter(); },
+  getEntriesByType(t) { return perfFilter(undefined, String(t)); },
+  getEntriesByName(n, t) { return perfFilter(String(n), t === undefined ? undefined : String(t)); },
+  toJSON() { return { timeOrigin: startTime, timing }; },
+  addEventListener() {}, removeEventListener() {},
 };
 
 const pending = new Map();
@@ -1896,24 +2058,191 @@ XMLHttpRequest.prototype.dispatchEvent = function (ev) {
   return !ev.defaultPrevented;
 };
 
-// Constructable stylesheets (kept as CSS text) and adoptedStyleSheets on
-// documents and shadow roots.
+// CSS object model: style sheets with editable rules. Constructed sheets
+// feed adoptedStyleSheets; the sheet of a <style> element writes its rules
+// back into the element so the engine applies them.
+function splitCssRules(text) {
+  const out = [];
+  let i = 0, start = 0, depth = 0;
+  const n = text.length;
+  while (i < n) {
+    const c = text[i];
+    if (c === '/' && text[i + 1] === '*') { const e = text.indexOf('*/', i + 2); i = e < 0 ? n : e + 2; continue; }
+    if (c === '"' || c === "'") { i++; while (i < n && text[i] !== c) { if (text[i] === '\\') i++; i++; } i++; continue; }
+    if (c === '{') depth++;
+    else if (c === '}') { depth--; if (depth === 0) { out.push(text.slice(start, i + 1).trim()); start = i + 1; } }
+    else if (c === ';' && depth === 0) { const r = text.slice(start, i + 1).trim(); if (r.startsWith('@')) out.push(r); start = i + 1; }
+    i++;
+  }
+  return out.filter(r => r && !/^\/\*/.test(r));
+}
+function camelToKebab(k) { return k === 'cssFloat' ? 'float' : k.replace(/[A-Z]/g, m => '-' + m.toLowerCase()).replace(/^(webkit|moz|ms)-/, '-$1-'); }
+class CSSRuleStyleDeclaration {
+  constructor(rule, text) {
+    Object.defineProperty(this, '_rule', { value: rule });
+    Object.defineProperty(this, '_d', { value: new Map() });
+    this._parse(text || '');
+    return new Proxy(this, {
+      get(t, k, r) {
+        if (typeof k === 'string' && !(k in t) && /^[a-zA-Z]/.test(k) && !/^\d/.test(k)) return t.getPropertyValue(camelToKebab(k));
+        return Reflect.get(t, k, r);
+      },
+      set(t, k, v, r) {
+        if (typeof k === 'string' && !(k in t) && /^[a-zA-Z]/.test(k)) { t.setProperty(camelToKebab(k), v); return true; }
+        return Reflect.set(t, k, v, r);
+      },
+    });
+  }
+  _parse(t) {
+    this._d.clear();
+    for (const part of t.split(/;(?![^(]*\))/)) {
+      const c = part.indexOf(':');
+      if (c < 0) continue;
+      let name = part.slice(0, c).trim(), v = part.slice(c + 1).trim();
+      if (!name) continue;
+      if (!name.startsWith('--')) name = name.toLowerCase();
+      const imp = /!\s*important$/i.test(v);
+      if (imp) v = v.replace(/!\s*important$/i, '').trim();
+      this._d.set(name, [v, imp]);
+    }
+  }
+  get cssText() { return [...this._d].map(([n, [v, imp]]) => n + ': ' + v + (imp ? ' !important' : '') + ';').join(' '); }
+  set cssText(t) { this._parse(String(t)); this._rule._changed(); }
+  get length() { return this._d.size; }
+  item(i) { return [...this._d.keys()][i] || ''; }
+  getPropertyValue(n) { const e = this._d.get(String(n).startsWith('--') ? String(n) : String(n).toLowerCase()); return e ? e[0] : ''; }
+  getPropertyPriority(n) { const e = this._d.get(String(n)); return e && e[1] ? 'important' : ''; }
+  setProperty(n, v, prio) {
+    n = String(n);
+    if (!n.startsWith('--')) n = n.toLowerCase();
+    if (v === null || v === undefined || String(v) === '') { this.removeProperty(n); return; }
+    this._d.set(n, [String(v), String(prio || '').toLowerCase() === 'important']);
+    this._rule._changed();
+  }
+  removeProperty(n) { const old = this.getPropertyValue(n); if (this._d.delete(String(n))) this._rule._changed(); return old; }
+  get parentRule() { return this._rule; }
+}
+class CSSRule {
+  constructor(sheet, text) { this.parentStyleSheet = sheet; this.parentRule = null; this._text = text; }
+  get cssText() { return this._text; }
+  _changed() { if (this.parentStyleSheet) this.parentStyleSheet._changed(); }
+}
+Object.assign(CSSRule, { STYLE_RULE: 1, IMPORT_RULE: 3, MEDIA_RULE: 4, FONT_FACE_RULE: 5, PAGE_RULE: 6, KEYFRAMES_RULE: 7, KEYFRAME_RULE: 8, SUPPORTS_RULE: 12 });
+class CSSStyleRule extends CSSRule {
+  constructor(sheet, sel, body) { super(sheet, ''); this._sel = sel; this.style = new CSSRuleStyleDeclaration(this, body); }
+  get type() { return 1; }
+  get selectorText() { return this._sel; }
+  set selectorText(v) { this._sel = String(v); this._changed(); }
+  get cssText() { return this._sel + ' { ' + this.style.cssText + ' }'; }
+}
+class CSSGroupingRule extends CSSRule {
+  constructor(sheet, text) {
+    super(sheet, text);
+    const b = text.indexOf('{');
+    this._prelude = text.slice(0, b).trim();
+    this.cssRules = splitCssRules(text.slice(b + 1, text.lastIndexOf('}'))).map(r => parseCssRule(sheet, r, this));
+  }
+  get type() { return /^@media/i.test(this._prelude) ? 4 : /^@supports/i.test(this._prelude) ? 12 : 0; }
+  get conditionText() { return this._prelude.replace(/^@\S+\s*/, ''); }
+  get media() { const t = this.conditionText; return { mediaText: t, length: 1, item: () => t, toString: () => t }; }
+  get cssText() { return this._prelude + ' { ' + this.cssRules.map(r => r.cssText).join(' ') + ' }'; }
+  insertRule(r, i) { i = i === undefined ? 0 : i; this.cssRules.splice(i, 0, parseCssRule(this.parentStyleSheet, String(r), this)); this._changed(); return i; }
+  deleteRule(i) { this.cssRules.splice(i, 1); this._changed(); }
+}
+class CSSMediaRule extends CSSGroupingRule {}
+class CSSSupportsRule extends CSSGroupingRule {}
+function parseCssRule(sheet, text, parent) {
+  text = text.trim();
+  let r;
+  if (/^@(media|supports|layer|container|document|-moz-document)\b/i.test(text) && text.indexOf('{') > 0)
+    r = /^@media/i.test(text) ? new CSSMediaRule(sheet, text) : /^@supports/i.test(text) ? new CSSSupportsRule(sheet, text) : new CSSGroupingRule(sheet, text);
+  else if (text.startsWith('@')) {
+    r = new CSSRule(sheet, text);
+    const m = /^@(\S+)/.exec(text);
+    const type = { 'import': 3, 'font-face': 5, 'page': 6, 'keyframes': 7, '-webkit-keyframes': 7 }[m ? m[1].toLowerCase() : ''] || 0;
+    Object.defineProperty(r, 'type', { value: type });
+    if (type === 7) r.name = (/^@\S+\s+([^\s{]+)/.exec(text) || [])[1] || '';
+  } else {
+    const b = text.indexOf('{');
+    if (b < 0) throw new DOMException("Failed to parse the rule '" + text + "'.", 'SyntaxError');
+    r = new CSSStyleRule(sheet, text.slice(0, b).trim(), text.slice(b + 1, text.lastIndexOf('}')));
+  }
+  r.parentRule = parent || null;
+  return r;
+}
+class StyleSheetList extends Array { item(i) { return this[i] || null; } }
 class CSSStyleSheet {
   constructor(opts) {
-    this._text = '';
-    this._disabled = !!(opts && opts.disabled);
-    this.media = [];
     Object.defineProperty(this, '_roots', { value: new Set() });
+    Object.defineProperty(this, '_rules', { value: [], writable: true });
+    this._disabled = !!(opts && opts.disabled);
+    this.ownerNode = null;
+    this.ownerRule = null;
+    this.parentStyleSheet = null;
+    this.href = null;
+    this.title = null;
+    this.type = 'text/css';
+    const m = opts && opts.media ? String(opts.media) : '';
+    this.media = { mediaText: m, length: m ? 1 : 0, item: () => m || null, appendMedium() {}, deleteMedium() {}, toString: () => m };
   }
   get disabled() { return this._disabled; }
-  set disabled(v) { this._disabled = !!v; this._sync(); }
-  _sync() { for (const r of this._roots) adoptSync(r); }
-  replaceSync(t) { this._text = String(t); this._sync(); }
+  set disabled(v) { this._disabled = !!v; this._changed(); }
+  get _text() { return this._rules.map(r => r.cssText).join('\n'); }
+  get cssRules() { return this._rules; }
+  get rules() { return this._rules; }
+  _load(text) { this._rules = splitCssRules(String(text)).map(r => { try { return parseCssRule(this, r); } catch (e) { return null; } }).filter(Boolean); }
+  _changed() {
+    for (const r of this._roots) adoptSync(r);
+    if (this._owner) this._owner._writeBack(this);
+  }
+  replaceSync(t) { this._load(t); this._changed(); }
   replace(t) { this.replaceSync(t); return Promise.resolve(this); }
-  get cssRules() { return []; }
-  insertRule(r, i) { this._text = i === 0 ? r + '\n' + this._text : this._text + '\n' + r; this._sync(); return i || 0; }
-  deleteRule() {}
+  insertRule(r, i) {
+    i = i === undefined ? 0 : +i;
+    if (i < 0 || i > this._rules.length) throw new DOMException("Failed to execute 'insertRule' on 'CSSStyleSheet': The index provided (" + i + ') is larger than the maximum index (' + this._rules.length + ').', 'IndexSizeError');
+    this._rules.splice(i, 0, parseCssRule(this, String(r)));
+    this._changed();
+    return i;
+  }
+  deleteRule(i) {
+    if (i < 0 || i >= this._rules.length) throw new DOMException("Failed to execute 'deleteRule' on 'CSSStyleSheet': The index provided (" + i + ') is outside the range.', 'IndexSizeError');
+    this._rules.splice(i, 1);
+    this._changed();
+  }
+  addRule(sel, style, i) { this.insertRule(sel + ' { ' + (style || '') + ' }', i === undefined ? this._rules.length : i); return -1; }
+  removeRule(i) { this.deleteRule(i === undefined ? 0 : i); }
 }
+// <style>.sheet / <link>.sheet: one sheet object per element.
+const elementSheets = new WeakMap();
+function elementSheet(el) {
+  const tag = el.localName;
+  if (tag !== 'style' && !(tag === 'link' && /(^|\s)stylesheet(\s|$)/i.test(el.getAttribute('rel') || ''))) return null;
+  if (!el.isConnected) return null;
+  let s = elementSheets.get(el);
+  if (!s) {
+    s = new CSSStyleSheet({ media: el.getAttribute('media') || '' });
+    s.ownerNode = el;
+    if (tag === 'link') s.href = K.resolve(el.getAttribute('href') || '') || null;
+    else {
+      Object.defineProperty(s, '_owner', { value: {
+        _writeBack(sheet) { const t = sheet._text; sheet._synced = t; el.textContent = t; },
+      } });
+    }
+    elementSheets.set(el, s);
+  }
+  if (tag === 'style') {
+    // Script changes to the element's text replace the rules.
+    const t = el.textContent;
+    if (s._synced !== t) { s._load(t); s._synced = t; }
+  }
+  return s;
+}
+function styleSheetList(root) {
+  const l = new StyleSheetList();
+  for (const e of root.querySelectorAll('style,link[rel~="stylesheet"]')) { const s = elementSheet(e); if (s) l.push(s); }
+  return l;
+}
+
 function adoptSync(root) {
   const list = root._adoptedList || [];
   for (const s of list) s._roots.add(root);
@@ -1946,6 +2275,50 @@ for (const C of [Document, ShadowRoot]) {
     },
   });
 }
+
+// Autonomous custom elements (<my-widget>) do not have the properties of
+// specific built-in elements: there they are plain properties, so that a
+// component's own "this.target = obj" or "this.value" keeps the object.
+(function () {
+  const P = HTMLElement.prototype;
+  const SPECIFIC = ['value', 'name', 'type', 'checked', 'disabled', 'href', 'src', 'srcset', 'target', 'action', 'method',
+    'form', 'options', 'selectedIndex', 'selectedOptions', 'files', 'alt', 'width', 'height', 'placeholder', 'required',
+    'readOnly', 'selected', 'defaultValue', 'htmlFor', 'control', 'elements', 'length', 'content', 'media', 'sheet', 'text',
+    'label', 'rows', 'cols', 'enctype', 'encoding', 'min', 'max', 'step', 'autocomplete', 'pattern', 'accept', 'wrap',
+    'crossOrigin', 'referrerPolicy', 'integrity', 'sizes', 'scope', 'download', 'formAction', 'formMethod', 'formTarget',
+    'dirName', 'headers', 'abbr', 'httpEquiv', 'charset', 'hreflang', 'ping', 'useMap', 'kind', 'srclang', 'poster',
+    'preload', 'allow', 'sandbox', 'srcdoc', 'decoding', 'fetchPriority', 'shape', 'coords', 'datetime', 'dateTime', 'cite',
+    'defaultChecked', 'multiple', 'defaultSelected', 'noModule', 'noValidate', 'reversed', 'formNoValidate',
+    'allowFullscreen', 'playsInline', 'controls', 'loop', 'autoplay', 'default', 'isMap', 'noWrap', 'defaultMuted',
+    'compact', 'maxLength', 'minLength', 'size', 'rowSpan', 'colSpan', 'start', 'span', 'hspace', 'vspace',
+    'selectionStart', 'selectionEnd', 'selectionDirection', 'validity', 'validationMessage', 'willValidate', 'labels',
+    'async', 'defer', 'currentSrc', 'complete', 'naturalWidth', 'naturalHeight', 'protocol', 'host', 'hostname', 'port',
+    'pathname', 'search', 'hash', 'origin', 'username', 'password', 'rel', 'relList', 'event', 'acceptCharset',
+    'indeterminate', 'valueAsNumber', 'valueAsDate', 'list', 'muted', 'volume', 'paused', 'currentTime', 'duration',
+    'loading', 'open', 'returnValue', 'cells', 'rowIndex', 'cellIndex', 'tBodies', 'caption', 'tHead', 'tFoot',
+    'contentWindow', 'contentDocument', 'playbackRate', 'ended', 'readyState', 'networkState', 'buffered', 'seeking',
+    'videoWidth', 'videoHeight', 'textLength', 'defaultSelected', 'index', 'form'];
+  const isCustom = el => { const n = el.localName; return !!n && n.indexOf('-') > 0; };
+  for (const k of new Set(SPECIFIC)) {
+    const d = Object.getOwnPropertyDescriptor(P, k);
+    if (!d || !(d.get || d.set)) continue;
+    Object.defineProperty(P, k, {
+      configurable: true, enumerable: d.enumerable,
+      get() {
+        if (isCustom(this)) { const o = this._ceProps; return o && k in o ? o[k] : undefined; }
+        return d.get ? d.get.call(this) : undefined;
+      },
+      set(v) {
+        if (isCustom(this)) {
+          if (!this._ceProps) Object.defineProperty(this, '_ceProps', { value: Object.create(null) });
+          this._ceProps[k] = v;
+          return;
+        }
+        if (d.set) d.set.call(this, v);
+      },
+    });
+  }
+})();
 
 // ------------------------------------------------------------------ Modern APIs
 // Calls the on<type> property handler and the listeners of a plain EventTarget.
@@ -2028,10 +2401,37 @@ class BroadcastChannel extends EventTarget {
   close() { this._closed = true; const set = broadcastChannels.get(this.name); if (set) set.delete(this); }
 }
 
+class PerformanceObserverEntryList {
+  constructor(list) { this._l = list; }
+  getEntries() { return this._l.slice(); }
+  getEntriesByType(t) { return this._l.filter(e => e.entryType === t); }
+  getEntriesByName(n, t) { return this._l.filter(e => e.name === n && (t === undefined || e.entryType === t)); }
+}
 class PerformanceObserver {
-  constructor(cb) { this._cb = cb; }
-  observe() {} disconnect() {} takeRecords() { return []; }
-  static get supportedEntryTypes() { return []; }
+  constructor(cb) {
+    if (typeof cb !== 'function') throw new TypeError("Failed to construct 'PerformanceObserver': The callback provided as parameter 1 is not a function.");
+    this._cb = cb; this._types = new Set(); this._buf = []; this._scheduled = false;
+  }
+  _queue(e) {
+    this._buf.push(e);
+    if (this._scheduled) return;
+    this._scheduled = true;
+    setTimeout(() => {
+      this._scheduled = false;
+      const list = this._buf.splice(0);
+      if (list.length) try { this._cb(new PerformanceObserverEntryList(list), this); } catch (err) { reportError(err); }
+    }, 0);
+  }
+  observe(opts) {
+    opts = opts || {};
+    const types = opts.entryTypes ? opts.entryTypes : opts.type ? [opts.type] : [];
+    for (const t of types) if (PerformanceObserver.supportedEntryTypes.indexOf(t) >= 0) this._types.add(t);
+    perfObservers.add(this);
+    if (opts.buffered) for (const e of perfFilter()) if (this._types.has(e.entryType)) this._queue(e);
+  }
+  disconnect() { perfObservers.delete(this); this._buf = []; }
+  takeRecords() { return this._buf.splice(0); }
+  static get supportedEntryTypes() { return ['mark', 'measure', 'navigation', 'paint']; }
 }
 
 class Notification extends EventTarget {
@@ -2987,7 +3387,8 @@ const selection = { rangeCount: 0, isCollapsed: true, toString: () => '', remove
 const navigator = {
   get userAgent() { return K.ua(); },
   get appVersion() { return K.ua().replace(/^Mozilla\//, ''); },
-  appName: 'Netscape', appCodeName: 'Mozilla', product: 'Gecko',
+  appName: 'Netscape', appCodeName: 'Mozilla', product: 'Gecko', productSub: '20100101', vendorSub: '',
+  oscpu: 'Windows NT 10.0; Win64; x64', buildID: '20181001000000',
   platform: 'Win32', vendor: '', language: 'de-DE', languages: ['de-DE', 'de', 'en'],
   cookieEnabled: true, onLine: true, doNotTrack: '1', hardwareConcurrency: 1, maxTouchPoints: 0,
   webdriver: false, pdfViewerEnabled: false, plugins: [], mimeTypes: [],
@@ -3056,7 +3457,9 @@ Object.assign(G, {
   IDBRequest, IDBOpenDBRequest, IDBVersionChangeEvent,
   DOMRect, DOMRectReadOnly, DOMPoint, DOMPointReadOnly, MessageChannel, MessagePort, BroadcastChannel,
   PerformanceObserver, Notification, FontFace, FontFaceSet, visualViewport, CompressionStream, DecompressionStream,
-  ElementInternals, CustomStateSet,
+  ElementInternals, CustomStateSet, RadioNodeList, CSSRule, CSSStyleRule, CSSGroupingRule, CSSMediaRule,
+  CSSSupportsRule, StyleSheetList, StyleSheet: CSSStyleSheet, PerformanceEntry, PerformanceMark, PerformanceMeasure,
+  PerformanceNavigationTiming, PerformancePaintTiming, PerformanceObserverEntryList,
 });
 // ------------------------------------------------------------------ Frames
 // Other documents (parent, top, iframes) live in their own script engines;
@@ -3127,13 +3530,22 @@ Object.defineProperty(G, 'origin', { get: () => location.origin, configurable: t
 G.__kiteDocEvent = function (type) {
   if (type === 'DOMContentLoaded') {
     readyState = 'interactive';
+    timing.domInteractive = timing.responseEnd = Date.now();
     doc.dispatchEvent(new Event('readystatechange'));
+    timing.domContentLoadedEventStart = Date.now();
     doc.dispatchEvent(new Event('DOMContentLoaded', { bubbles: true }));
+    timing.domContentLoadedEventEnd = Date.now();
+    const t = performance.now();
+    perfAdd(new PerformancePaintTiming('first-paint', 'paint', t, 0));
+    perfAdd(new PerformancePaintTiming('first-contentful-paint', 'paint', t, 0));
   } else if (type === 'load') {
     readyState = 'complete';
+    timing.domComplete = Date.now();
     doc.dispatchEvent(new Event('readystatechange'));
     for (const img of doc.querySelectorAll('img')) img.dispatchEvent(new Event('load'));
+    timing.loadEventStart = Date.now();
     G.dispatchEvent(new Event('load'));
+    timing.loadEventEnd = Date.now();
     G.dispatchEvent(new Event('pageshow'));
   }
 };
@@ -3208,6 +3620,24 @@ G.__kiteDispatch = function (h, type) {
   ev.isTrusted = true;
   ev.composed = type !== 'load' && type !== 'error' && type !== 'scroll';
   return target.dispatchEvent(ev);
+};
+// window.someId: elements with an id (and named forms, images, frames)
+// become global names. Getters are added before each script runs for
+// names that are not real globals; a script assigning the name replaces it.
+const namedGlobals = new Set();
+G.__kiteSyncNames = function () {
+  if (!G.document || !G.document.documentElement) return;
+  const add = k => {
+    if (!k || namedGlobals.has(k) || k in G || !/^[A-Za-z_$][\w$]*$/.test(k)) return;
+    namedGlobals.add(k);
+    Object.defineProperty(G, k, {
+      configurable: true, enumerable: false,
+      get: () => namedElement(k, true),
+      set(v) { Object.defineProperty(G, k, { value: v, writable: true, configurable: true, enumerable: true }); },
+    });
+  };
+  for (const e of G.document.querySelectorAll('[id]')) add(e.id);
+  for (const e of G.document.querySelectorAll('form[name],img[name],embed[name],object[name],iframe[name]')) add(e.getAttribute('name'));
 };
 })();
 )KITEJS";

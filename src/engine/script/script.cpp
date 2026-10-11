@@ -1582,11 +1582,15 @@ void ScriptEngine::ForgetRejection(void* promise) {
     }
 }
 
+static void CallKiteHook(ScriptEngine* e, JSContext* ctx, const char* hook, int argc, JSValue* argv,
+                         JSValue* result);
+
 void ScriptEngine::Execute(const std::string& source, const std::string& fileName, Node* scriptElement) {
   JSContext* ctx = (JSContext*)ctx_;
   Node* prev = currentScript_;
   currentScript_ = scriptElement;
   deadline_ = NowMs() + timeLimit_;
+  if (scriptElement) CallKiteHook(this, ctx, "__kiteSyncNames", 0, 0, 0);
   JSValue r = JS_Eval(ctx, source.c_str(), source.size(), fileName.c_str(), JS_EVAL_TYPE_GLOBAL);
   if (JS_IsException(r)) ReportException();
   JS_FreeValue(ctx, r);

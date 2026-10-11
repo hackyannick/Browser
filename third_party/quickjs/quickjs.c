@@ -7572,8 +7572,10 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_obj,
         return; /* protection in the out of memory case */
     
     js_dbuf_init(ctx, &dbuf);
+    /* Kite: stack traces use the SpiderMonkey (Firefox) format
+       "name@file:line:column", matching the browser it presents itself as. */
     if (filename) {
-        dbuf_printf(&dbuf, "    at %s", filename);
+        dbuf_printf(&dbuf, "@%s", filename);
         if (line_num != -1)
             dbuf_printf(&dbuf, ":%d:%d", line_num, col_num);
         dbuf_putc(&dbuf, '\n');
@@ -7597,15 +7599,17 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_obj,
             backtrace_flags &= ~JS_BACKTRACE_FLAG_SKIP_FIRST_LEVEL;
             continue;
         }
+        p = JS_VALUE_GET_OBJ(sf->cur_func);
+        if (!js_class_has_bytecode(p->class_id))
+            continue;  /* SpiderMonkey omits native frames */
         func_name_str = get_prop_string(ctx, sf->cur_func, JS_ATOM_name);
-        if (!func_name_str || func_name_str[0] == '\0')
-            str1 = "<anonymous>";
+        if (!func_name_str || func_name_str[0] == '\0' || func_name_str[0] == '<')
+            str1 = "";
         else
             str1 = func_name_str;
-        dbuf_printf(&dbuf, "    at %s", str1);
+        dbuf_printf(&dbuf, "%s@", str1);
         JS_FreeCString(ctx, func_name_str);
 
-        p = JS_VALUE_GET_OBJ(sf->cur_func);
         if (js_class_has_bytecode(p->class_id)) {
             JSFunctionBytecode *b;
             const char *atom_str;
@@ -7616,15 +7620,12 @@ static void build_backtrace(JSContext *ctx, JSValueConst error_obj,
                 line_num1 = find_line_num(ctx, b,
                                           sf->cur_pc - b->byte_code_buf - 1, &col_num1);
                 atom_str = JS_AtomToCString(ctx, b->debug.filename);
-                dbuf_printf(&dbuf, " (%s",
+                dbuf_printf(&dbuf, "%s",
                             atom_str ? atom_str : "<null>");
                 JS_FreeCString(ctx, atom_str);
                 if (line_num1 != 0)
                     dbuf_printf(&dbuf, ":%d:%d", line_num1, col_num1);
-                dbuf_putc(&dbuf, ')');
             }
-        } else {
-            dbuf_printf(&dbuf, " (native)");
         }
         dbuf_putc(&dbuf, '\n');
     }
