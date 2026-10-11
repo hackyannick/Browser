@@ -18,6 +18,7 @@
 #include <map>
 
 #include "base/mutex.h"
+#include "base/thread.h"
 #include "base/strings.h"
 #include "net/socket.h"
 
@@ -32,6 +33,8 @@ struct CacheEntry {
 
 Mutex g_mu;
 std::map<std::string, CacheEntry>* g_cache = 0;
+const char* g_testServer = 0;
+int g_testDelayMs = 0;
 
 long long NowSeconds() {
 #ifdef _WIN32
@@ -43,11 +46,13 @@ long long NowSeconds() {
 #endif
 }
 
-void SleepMs(int ms) {
+long long NowMs() {
 #ifdef _WIN32
-  Sleep(ms);
+  return (long long)GetTickCount();
 #else
-  usleep(ms * 1000);
+  struct timespec ts;
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 #endif
 }
 
@@ -103,18 +108,14 @@ bool SystemResolve(const std::string& host, unsigned long& ip, int& code) {
 #endif
 }
 
-bool TransientError(int code) {
-#ifdef _WIN32
-  return code == WSATRY_AGAIN || code == WSANO_RECOVERY || code == WSAENETDOWN || code == 0;
-#else
-  return code == EAI_AGAIN;
-#endif
-}
-
-// One UDP query to |server| (dotted IPv4); |rcode| 3 means the name does not exist.
-bool UdpQuery(const std::string& host, const char* server, unsigned long& ip, long& ttl, int& rcode) {
-  unsigned short id = (unsigned short)((NowSeconds() * 7919 + (long long)(size_t)&host) & 0xffff);
+// Asks several public DNS servers at once and takes the first answer.
+// |nxdomain| is set when a server says the name does not exist.
+bool DirectResolve(const std::string& host, unsigned long& ip, long& ttl, bool& nxdomain) {
+  static const char* const kServers[] = {"1.1.1.1", "8.8.8.8", "9.9.9.9"};
+  static volatile long counter = 0;
+  unsigned short id = (unsigned short)((NowSeconds() * 7919 + (++counter) * 40503 + (long long)(size_t)&host) & 0xffff);
   std::string q = BuildDnsQuery(host, id);
+  nxdomain = false;
   if (q.empty()) return false;
 #ifdef _WIN32
   SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -123,33 +124,48 @@ bool UdpQuery(const std::string& host, const char* server, unsigned long& ip, lo
   int s = socket(AF_INET, SOCK_DGRAM, 0);
   if (s < 0) return false;
 #endif
-  struct sockaddr_in to;
-  memset(&to, 0, sizeof to);
-  to.sin_family = AF_INET;
-  to.sin_port = htons(53);
-  to.sin_addr.s_addr = inet_addr(server);
   bool ok = false;
-  for (int attempt = 0; attempt < 1 && !ok; ++attempt) {
-    if (sendto(s, q.data(), (int)q.size(), 0, (struct sockaddr*)&to, sizeof to) != (int)q.size()) break;
+  // Two rounds of 1.5 s; each round sends the query to every server.
+  for (int round = 0; round < 2 && !ok && !nxdomain; ++round) {
+    int sent = 0;
+    for (size_t i = 0; i < sizeof kServers / sizeof kServers[0]; ++i) {
+      if (g_testServer && i > 0) break;
+      struct sockaddr_in to;
+      memset(&to, 0, sizeof to);
+      to.sin_family = AF_INET;
+      to.sin_port = htons(53);
+      to.sin_addr.s_addr = inet_addr(g_testServer ? g_testServer : kServers[i]);
+      if (sendto(s, q.data(), (int)q.size(), 0, (struct sockaddr*)&to, sizeof to) == (int)q.size()) ++sent;
+    }
+    if (!sent) break;
+    long long until = NowMs() + 1500;
     for (;;) {
+      long long left = until - NowMs();
+      if (left <= 0) break;
       fd_set rs;
       FD_ZERO(&rs);
       FD_SET(s, &rs);
       struct timeval tv;
-      tv.tv_sec = 2;
-      tv.tv_usec = 0;
+      tv.tv_sec = (long)(left / 1000);
+      tv.tv_usec = (long)(left % 1000) * 1000;
       if (select((int)s + 1, &rs, 0, 0, &tv) <= 0) break;
       char buf[1500];
       int n = (int)recv(s, buf, sizeof buf, 0);
-      if (n <= 0) break;
+      if (n <= 0) {
+#ifdef _WIN32
+        // ICMP "port unreachable" from one server shows up as an error
+        // (WSAECONNRESET); the others may still answer.
+        if (WSAGetLastError() == WSAECONNRESET) continue;
+#endif
+        break;
+      }
       int rc = 0;
       if (ParseDnsResponse(std::string(buf, n), id, ip, ttl, rc)) {
         ok = true;
         break;
       }
-      if (rc != 0) {
-        rcode = rc;
-        attempt = 2;
+      if (rc == 3) {
+        nxdomain = true;
         break;
       }
     }
@@ -161,6 +177,67 @@ bool UdpQuery(const std::string& host, const char* server, unsigned long& ip, lo
 #endif
   return ok;
 }
+
+// The system resolver runs on its own thread so a slow DNS client (the
+// Windows 2000 resolver can take well over ten seconds when a configured
+// server does not answer) never holds up the direct lookup.
+struct SystemLookup {
+  Mutex mu;
+  int refs = 2;
+  bool done = false, ok = false;
+  unsigned long ip = 0;
+  int code = 0;
+  std::string host;
+  WakeEvent event;
+
+  void Release() {
+    bool last;
+    {
+      MutexLock l(mu);
+      last = --refs == 0;
+    }
+    if (last) delete this;
+  }
+  static void Run(void* p) {
+    SystemLookup* s = (SystemLookup*)p;
+    unsigned long ip = 0;
+    int code = 0;
+    if (g_testDelayMs > 0) {
+#ifdef _WIN32
+      Sleep(g_testDelayMs);
+#else
+      usleep(g_testDelayMs * 1000);
+#endif
+    }
+    bool ok = SystemResolve(s->host, ip, code);
+    {
+      MutexLock l(s->mu);
+      s->done = true;
+      s->ok = ok;
+      s->ip = ip;
+      s->code = code;
+    }
+    s->event.Signal();
+    s->Release();
+  }
+  // True once finished (within |ms|).
+  bool Wait(int ms) {
+    long long until = NowMs() + ms;
+    for (;;) {
+      {
+        MutexLock l(mu);
+        if (done) return true;
+      }
+      long long left = until - NowMs();
+      if (left <= 0) return false;
+      event.Wait((int)left);
+    }
+  }
+};
+
+// Set when the system resolver turned out slow or broken while the direct
+// lookup worked; later names are then looked up directly first.
+volatile bool g_preferDirect = false;
 
 unsigned short Get16(const std::string& p, size_t at) {
   return (unsigned short)(((unsigned char)p[at] << 8) | (unsigned char)p[at + 1]);
@@ -232,6 +309,12 @@ bool ParseDnsResponse(const std::string& p, unsigned short id, unsigned long& ip
 void ClearDnsCache() {
   MutexLock l(g_mu);
   if (g_cache) g_cache->clear();
+  g_preferDirect = false;
+}
+
+void SetDnsTestHooks(const char* server, int systemDelayMs) {
+  g_testServer = server;
+  g_testDelayMs = systemDelayMs;
 }
 
 bool ResolveHost(const std::string& hostIn, unsigned long& ip, std::string& error) {
@@ -239,30 +322,65 @@ bool ResolveHost(const std::string& hostIn, unsigned long& ip, std::string& erro
   std::string host = AsciiLower(hostIn);
   if (!host.empty() && host[host.size() - 1] == '.') host.erase(host.size() - 1);
   if (CacheGet(host, ip)) return true;
-  int code = 0;
-  for (int attempt = 0; attempt < 3; ++attempt) {
-    if (SystemResolve(host, ip, code)) {
-      CachePut(host, ip, 300);
-      return true;
-    }
-    if (!TransientError(code)) break;
-    SleepMs(300 * (attempt + 1));
+  if (host == "localhost" || EndsWith(host, ".localhost")) {
+    ip = htonl(0x7f000001);
+    return true;
   }
   // Names without a dot are local (WINS, hosts file); only the system knows them.
-  if (host.find('.') != std::string::npos && host != "localhost") {
-    static const char* const kServers[] = {"1.1.1.1", "8.8.8.8", "9.9.9.9"};
-    for (size_t i = 0; i < sizeof kServers / sizeof kServers[0]; ++i) {
-      long ttl = 300;
-      int rcode = 0;
-      if (UdpQuery(host, kServers[i], ip, ttl, rcode)) {
-        CachePut(host, ip, ttl);
-        return true;
-      }
-      if (rcode == 3) break;  // the name really does not exist
+  bool direct = host.find('.') != std::string::npos && host != "localhost" && !EndsWith(host, ".localhost") &&
+                !EndsWith(host, ".local");
+  long ttl = 300;
+  bool nxdomain = false, triedDirect = false;
+  if (direct && g_preferDirect) {
+    triedDirect = true;
+    if (DirectResolve(host, ip, ttl, nxdomain)) {
+      CachePut(host, ip, ttl);
+      return true;
     }
   }
+  SystemLookup* sys = new SystemLookup;
+  sys->host = host;
+  if (!StartThread(&SystemLookup::Run, sys)) SystemLookup::Run(sys);  // releases its reference
+  // A name the public DNS does not know may still be an internal one, but
+  // a resolver that already proved slow gets only a few seconds for it.
+  bool finished = sys->Wait(direct && !triedDirect ? 1500 : nxdomain ? 5000 : 30000);
+  if (!finished && direct && !triedDirect) {
+    // The system is slow: ask directly meanwhile.
+    triedDirect = true;
+    if (DirectResolve(host, ip, ttl, nxdomain)) {
+      g_preferDirect = true;
+      CachePut(host, ip, ttl);
+      sys->Release();
+      return true;
+    }
+    finished = sys->Wait(nxdomain ? 5000 : 25000);
+  }
+  bool ok = false;
+  int code = 0;
+  {
+    MutexLock l(sys->mu);
+    if (sys->done) {
+      ok = sys->ok;
+      ip = sys->ip;
+      code = sys->code;
+    }
+  }
+  sys->Release();
+  if (ok) {
+    CachePut(host, ip, 300);
+    return true;
+  }
+  // The system failed (the Windows 2000 resolver also keeps failures in a
+  // negative cache): try directly if not done yet.
+  if (direct && !triedDirect && DirectResolve(host, ip, ttl, nxdomain)) {
+    g_preferDirect = true;
+    CachePut(host, ip, ttl);
+    return true;
+  }
   error = "Host nicht gefunden: " + host;
-  if (code) error += " (Fehler " + IntToString(code) + ")";
+  if (nxdomain) error += " (Name existiert nicht)";
+  else if (!finished) error += " (DNS antwortet nicht)";
+  else if (code) error += " (Fehler " + IntToString(code) + ")";
   return false;
 }
 

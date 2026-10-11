@@ -1,11 +1,13 @@
 // Kite Engine - host name resolution.
 //
-// Uses the system resolver first (gethostbyname on Windows 2000, which has
-// no getaddrinfo). Results are cached for a few minutes, so a page with many
-// resources on the same hosts does not flood the old Windows DNS client.
-// When the system resolver fails, the name is looked up directly over UDP
-// at public DNS servers; this also covers the Windows 2000 resolver keeping
-// a failed lookup in its negative cache.
+// The system resolver (gethostbyname on Windows 2000, which has no
+// getaddrinfo) runs on its own thread. If it has not answered after 1.5 s,
+// the name is also looked up directly over UDP at public DNS servers and
+// the first answer wins; once the system resolver proved slow or broken,
+// later names are looked up directly first. This also covers the Windows
+// 2000 resolver keeping a failed lookup in its negative cache. Results are
+// cached for a few minutes, so a page with many resources on the same
+// hosts does not flood the old Windows DNS client.
 #ifndef KITE_NET_DNS_H
 #define KITE_NET_DNS_H
 
@@ -25,6 +27,10 @@ bool ParseDnsResponse(const std::string& packet, unsigned short id, unsigned lon
                       int& rcode);
 
 void ClearDnsCache();
+
+// Tests: replaces the public servers with |server| (dotted IPv4, port 53)
+// and delays the system resolver by |systemDelayMs|.
+void SetDnsTestHooks(const char* server, int systemDelayMs);
 
 }  // namespace kite
 
