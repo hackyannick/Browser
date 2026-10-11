@@ -14,7 +14,13 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
 
 **Browser**
 
-- Tabs (Strg+T, Strg+W, Strg+Tab), Adressleiste mit Suche, Zurück/Vor, Startseite
+- Klassische Oberfläche im Stil von Netscape Navigator 4: große Symbolleiste
+  mit Beschriftung (Zurück, Vor, Neu laden, Anfang, Suchen, Neuer Tab,
+  Sicherheit, Stopp), Adressleiste mit „Lesezeichen“-Knopf, persönliche
+  Symbolleiste mit den ersten Lesezeichen, animiertes Kite-Logo während des
+  Ladens, Statusleiste mit Schloss-Symbol und **Ladebalken**
+- Tabs (Strg+T, Strg+W, Strg+Tab; die Tab-Leiste erscheint ab dem zweiten
+  Tab), Adressleiste mit Suche, Zurück/Vor, Startseite
 - Lesezeichen (Strg+D), Verlauf, Zoom (Strg +/−/0, Strg+Mausrad)
 - Suchen auf der Seite mit Hervorhebung (Strg+F, F3)
 - Formulare: Textfelder, Passwörter, Textbereiche, Checkboxen, Radiobuttons,

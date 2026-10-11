@@ -33,6 +33,8 @@ namespace {
 
 const wchar_t kMainClass[] = L"KiteBrowserWindow";
 const wchar_t kViewClass[] = L"KitePageView";
+const wchar_t kThrobberClass[] = L"KiteThrobber";
+const UINT_PTR kTimerThrobber = 7;  // logo animation while a page loads
 const UINT_PTR kTimerRelayout = 1;
 const UINT_PTR kTimerResize = 2;
 const UINT_PTR kTimerImageAnim = 3;  // animated GIF/WebP/AVIF frames
@@ -155,6 +157,7 @@ class Tab {
   std::string jsNavUrl;
   FormSubmission jsNavForm;
   int blocked = 0;  // requests refused by the content blocker (this page and its frames)
+  int loadTotal = 0, loadDone = 0;  // requests of the current load (progress bar)
   bool scrollEventPending = false;
   bool hoverStylePending = false;
   // <iframe> documents are tabs without a tab strip entry.
@@ -184,6 +187,7 @@ class Browser {
   int Run();
 
   static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l);
+  static LRESULT CALLBACK ThrobberProc(HWND h, UINT m, WPARAM w, LPARAM l);
   static void FrameNodeGone(int id);
   static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM w, LPARAM l);
   static LRESULT CALLBACK AddressProc(HWND h, UINT m, WPARAM w, LPARAM l);
@@ -323,6 +327,17 @@ class Browser {
   std::vector<FetchJob*> deferredJobs_;
 
   HWND hwnd_, tabs_, toolbar_, toolbar2_, address_, view_, status_;
+  // Netscape-style chrome: location row, personal toolbar, logo, padlock and
+  // progress bar in the status bar.
+  HWND bmButton_ = 0, addrLabel_ = 0, personal_ = 0, throbber_ = 0, progress_ = 0;
+  HIMAGELIST imageListOff_ = 0, smallImages_ = 0;
+  HICON lockClosed_ = 0, lockOpen_ = 0;
+  int throbberFrame_ = 0;
+  bool throbberActive_ = false;
+  std::vector<RECT> grips_;  // toolbar grips painted on the main window
+  void UpdateThrobber();
+  void RebuildPersonalToolbar();
+  void PaintChrome(HDC dc);
   HWND findBar_, findEdit_;
   bool findVisible_;
   std::vector<Tab*> tabList_;
@@ -412,6 +427,14 @@ bool Browser::Create(HINSTANCE inst, const std::wstring& startUrl) {
   vc.hCursor = LoadCursorW(0, IDC_ARROW);
   vc.lpszClassName = kViewClass;
   RegisterClassExW(&vc);
+  WNDCLASSEXW tc;
+  ZeroMemory(&tc, sizeof tc);
+  tc.cbSize = sizeof tc;
+  tc.lpfnWndProc = ThrobberProc;
+  tc.hInstance = inst;
+  tc.hCursor = LoadCursorW(0, IDC_HAND);
+  tc.lpszClassName = kThrobberClass;
+  RegisterClassExW(&tc);
 
   RECT work;
   SystemParametersInfoW(SPI_GETWORKAREA, 0, &work, 0);
@@ -539,6 +562,7 @@ void Browser::RebuildBookmarkMenu() {
     std::string t = list[i].first.empty() ? list[i].second : list[i].first;
     AppendMenuW(bm, MF_STRING, ID_BOOKMARK_BASE + i, Widen(ShortTitle(t, 60)).c_str());
   }
+  RebuildPersonalToolbar();
   // History submenu items (global history) live in the "Verlauf" menu.
   HMENU go = GetSubMenu(bar, 3);
   while (GetMenuItemCount(go) > 3) DeleteMenu(go, 3, MF_BYPOSITION);
@@ -567,46 +591,97 @@ void Browser::CreateChildren() {
                           0, 0, 100, 24, hwnd_, 0, inst, 0);
   SendMessageW(tabs_, WM_SETFONT, (WPARAM)uiFont_, TRUE);
 
-  imageList_ = CreateToolbarImageList(20);
+  // Navigation toolbar: large icons with captions below (Netscape 4 style).
+  imageList_ = CreateToolbarImageList(24);
+  imageListOff_ = CreateToolbarImageList(24, true);
+  smallImages_ = CreateToolbarImageList(16);
   toolbar_ = CreateWindowExW(0, TOOLBARCLASSNAMEW, L"",
                              WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS |
                                  CCS_NORESIZE | CCS_NODIVIDER | CCS_NOPARENTALIGN,
-                             0, 0, 100, 32, hwnd_, 0, inst, 0);
+                             0, 0, 100, 48, hwnd_, 0, inst, 0);
   SendMessageW(toolbar_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+  SendMessageW(toolbar_, WM_SETFONT, (WPARAM)uiFont_, TRUE);
   SendMessageW(toolbar_, TB_SETIMAGELIST, 0, (LPARAM)imageList_);
-  SendMessageW(toolbar_, TB_SETBITMAPSIZE, 0, MAKELONG(20, 20));
-  TBBUTTON b[4];
+  SendMessageW(toolbar_, TB_SETDISABLEDIMAGELIST, 0, (LPARAM)imageListOff_);
+  SendMessageW(toolbar_, TB_SETBITMAPSIZE, 0, MAKELONG(24, 24));
+  struct NavButton {
+    int id, icon;
+    const wchar_t* label;
+  };
+  static const NavButton nav[] = {
+      {ID_GO_BACK, kIconBack, L"Zur\x00fc" L"ck"}, {ID_GO_FORWARD, kIconForward, L"Vor"},
+      {ID_VIEW_RELOAD, kIconReload, L"Neu laden"}, {ID_GO_HOME, kIconHome, L"Anfang"},
+      {ID_GO_SEARCH, kIconSearch, L"Suchen"}, {ID_FILE_NEWTAB, kIconNewTab, L"Neuer Tab"},
+      {ID_VIEW_SECURITY, kIconSecurity, L"Sicherheit"}, {ID_VIEW_STOP, kIconStop, L"Stopp"}};
+  const int navCount = sizeof nav / sizeof nav[0];
+  TBBUTTON b[16];
   ZeroMemory(b, sizeof b);
-  int ids[4] = {ID_GO_BACK, ID_GO_FORWARD, ID_VIEW_RELOAD, ID_GO_HOME};
-  int icons[4] = {kIconBack, kIconForward, kIconReload, kIconHome};
-  for (int i = 0; i < 4; ++i) {
-    b[i].iBitmap = icons[i];
-    b[i].idCommand = ids[i];
+  for (int i = 0; i < navCount; ++i) {
+    b[i].iBitmap = nav[i].icon;
+    b[i].idCommand = nav[i].id;
     b[i].fsState = TBSTATE_ENABLED;
     b[i].fsStyle = TBSTYLE_BUTTON;
+    b[i].iString = (INT_PTR)nav[i].label;
   }
-  SendMessageW(toolbar_, TB_ADDBUTTONSW, 4, (LPARAM)b);
+  SendMessageW(toolbar_, TB_ADDBUTTONSW, navCount, (LPARAM)b);
+  SendMessageW(toolbar_, TB_SETBUTTONWIDTH, 0, MAKELONG(64, 90));
+  SendMessageW(toolbar_, TB_AUTOSIZE, 0, 0);
+
+  // The animated logo at the right end of the navigation toolbar.
+  throbber_ = CreateWindowExW(0, kThrobberClass, L"", WS_CHILD | WS_VISIBLE, 0, 0, 44, 44, hwnd_, 0, inst, this);
+
+  // Location toolbar: "Lesezeichen" drop-down, "Adresse:" and the address field.
+  bmButton_ = CreateWindowExW(0, TOOLBARCLASSNAMEW, L"",
+                              WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_LIST | CCS_NORESIZE |
+                                  CCS_NODIVIDER | CCS_NOPARENTALIGN,
+                              0, 0, 100, 26, hwnd_, 0, inst, 0);
+  SendMessageW(bmButton_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+  SendMessageW(bmButton_, WM_SETFONT, (WPARAM)uiFont_, TRUE);
+  SendMessageW(bmButton_, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_DRAWDDARROWS);
+  SendMessageW(bmButton_, TB_SETIMAGELIST, 0, (LPARAM)smallImages_);
+  SendMessageW(bmButton_, TB_SETBITMAPSIZE, 0, MAKELONG(16, 16));
+  ZeroMemory(b, sizeof b);
+  b[0].iBitmap = kIconBookmark;
+  b[0].idCommand = ID_BM_MENU;
+  b[0].fsState = TBSTATE_ENABLED;
+  b[0].fsStyle = TBSTYLE_BUTTON | BTNS_WHOLEDROPDOWN;
+  b[0].iString = (INT_PTR)L"Lesezeichen";
+  SendMessageW(bmButton_, TB_ADDBUTTONSW, 1, (LPARAM)b);
+  addrLabel_ = CreateWindowExW(0, L"STATIC", L"Adresse:", WS_CHILD | WS_VISIBLE | SS_RIGHT, 0, 0, 60, 16, hwnd_, 0,
+                               inst, 0);
+  SendMessageW(addrLabel_, WM_SETFONT, (WPARAM)uiFont_, TRUE);
 
   toolbar2_ = CreateWindowExW(0, TOOLBARCLASSNAMEW, L"",
                               WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS |
                                   CCS_NORESIZE | CCS_NODIVIDER | CCS_NOPARENTALIGN,
-                              0, 0, 100, 32, hwnd_, 0, inst, 0);
+                              0, 0, 100, 26, hwnd_, 0, inst, 0);
   SendMessageW(toolbar2_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
-  SendMessageW(toolbar2_, TB_SETIMAGELIST, 0, (LPARAM)imageList_);
-  SendMessageW(toolbar2_, TB_SETBITMAPSIZE, 0, MAKELONG(20, 20));
-  int ids2[3] = {ID_GO, ID_BM_ADD, ID_FILE_NEWTAB};
-  int icons2[3] = {kIconGo, kIconBookmark, kIconNewTab};
-  for (int i = 0; i < 3; ++i) {
+  SendMessageW(toolbar2_, TB_SETIMAGELIST, 0, (LPARAM)smallImages_);
+  SendMessageW(toolbar2_, TB_SETBITMAPSIZE, 0, MAKELONG(16, 16));
+  int ids2[2] = {ID_GO, ID_BM_ADD};
+  int icons2[2] = {kIconGo, kIconBookmark};
+  ZeroMemory(b, sizeof b);
+  for (int i = 0; i < 2; ++i) {
     b[i].iBitmap = icons2[i];
     b[i].idCommand = ids2[i];
     b[i].fsState = TBSTATE_ENABLED;
     b[i].fsStyle = TBSTYLE_BUTTON;
   }
-  SendMessageW(toolbar2_, TB_ADDBUTTONSW, 3, (LPARAM)b);
+  SendMessageW(toolbar2_, TB_ADDBUTTONSW, 2, (LPARAM)b);
+
+  // Personal toolbar: the first bookmarks as buttons.
+  personal_ = CreateWindowExW(0, TOOLBARCLASSNAMEW, L"",
+                              WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_LIST | TBSTYLE_TOOLTIPS |
+                                  CCS_NORESIZE | CCS_NODIVIDER | CCS_NOPARENTALIGN,
+                              0, 0, 100, 24, hwnd_, 0, inst, 0);
+  SendMessageW(personal_, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+  SendMessageW(personal_, WM_SETFONT, (WPARAM)uiFont_, TRUE);
+  SendMessageW(personal_, TB_SETIMAGELIST, 0, (LPARAM)smallImages_);
+  SendMessageW(personal_, TB_SETBITMAPSIZE, 0, MAKELONG(16, 16));
 
   address_ = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                              WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, 0, 0, 100, 24, hwnd_, 0, inst, 0);
-  SendMessageW(address_, WM_SETFONT, (WPARAM)addressFont_, TRUE);
+  SendMessageW(address_, WM_SETFONT, (WPARAM)uiFont_, TRUE);
   SetWindowLongPtrW(address_, GWLP_USERDATA, (LONG_PTR)this);
   oldAddressProc_ = (WNDPROC)SetWindowLongPtrW(address_, GWLP_WNDPROC, (LONG_PTR)AddressProc);
 
@@ -627,13 +702,21 @@ void Browser::CreateChildren() {
                               WS_CHILD | WS_VISIBLE, 290, 7, 400, 16, findBar_, 0, inst, 0);
   SendMessageW(hint, WM_SETFONT, (WPARAM)uiFont_, TRUE);
 
-  status_ = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP, 0, 0, 0, 0,
-                            hwnd_, 0, inst, 0);
+  status_ = CreateWindowExW(0, STATUSCLASSNAMEW, L"", WS_CHILD | WS_VISIBLE | SBARS_SIZEGRIP | SBARS_TOOLTIPS, 0, 0,
+                            0, 0, hwnd_, 0, inst, 0);
   SendMessageW(status_, WM_SETFONT, (WPARAM)uiFont_, TRUE);
+  progress_ = CreateWindowExW(0, PROGRESS_CLASSW, L"", WS_CHILD | WS_VISIBLE | PBS_SMOOTH, 0, 0, 10, 10, status_, 0,
+                              inst, 0);
+  SendMessageW(progress_, PBM_SETRANGE, 0, MAKELPARAM(0, 100));
+  lockClosed_ = CreateLockIcon(true);
+  lockOpen_ = CreateLockIcon(false);
   RebuildBookmarkMenu();
   LayoutChildren();
 }
 
+// Rows from top to bottom: navigation toolbar (with the logo on the right),
+// location toolbar, personal toolbar, tab strip (only with several tabs),
+// page, find bar, status bar. Each toolbar row has a Netscape-style grip.
 void Browser::LayoutChildren() {
   if (!hwnd_ || !status_) return;
   RECT rc;
@@ -643,30 +726,137 @@ void Browser::LayoutChildren() {
   RECT sr;
   GetWindowRect(status_, &sr);
   int statusH = sr.bottom - sr.top;
-  int parts[4] = {std::max(100, w - 330), std::max(150, w - 190), std::max(200, w - 130), -1};
-  SendMessageW(status_, SB_SETPARTS, 4, (LPARAM)parts);
+  // Status bar: padlock | text | progress | blocked | zoom | security.
+  int parts[6] = {26, std::max(120, w - 470), std::max(250, w - 330), std::max(350, w - 230),
+                  std::max(410, w - 170), -1};
+  SendMessageW(status_, SB_SETPARTS, 6, (LPARAM)parts);
+  RECT pr;
+  if (SendMessageW(status_, SB_GETRECT, 2, (LPARAM)&pr))
+    MoveWindow(progress_, pr.left + 3, pr.top + 3, pr.right - pr.left - 6, pr.bottom - pr.top - 6, TRUE);
 
+  const int grip = 12;
+  grips_.clear();
   int y = 2;
-  // Tab strip: only the tab row is visible; the page view covers the body.
-  RECT tr = {0, 0, w, 100};
-  TabCtrl_AdjustRect(tabs_, FALSE, &tr);
-  int tabRow = std::max(20, (int)tr.top - 2);
-  MoveWindow(tabs_, 2, y, w - 4, tabRow + 4, TRUE);
-  y += tabRow + 2;
-  int tbH = 32;
+  // Navigation toolbar + logo.
+  int navH = 46;
+  RECT grip1 = {2, y, 2 + grip, y + navH};
+  grips_.push_back(grip1);
+  MoveWindow(throbber_, w - navH - 4, y, navH, navH, TRUE);
+  MoveWindow(toolbar_, grip + 6, y + 1, std::max(50, w - navH - grip - 14), navH - 2, TRUE);
+  y += navH + 4;
+  // Location toolbar.
+  int locH = 28;
+  RECT grip2 = {2, y, 2 + grip, y + locH};
+  grips_.push_back(grip2);
   SIZE sz;
-  SendMessageW(toolbar_, TB_GETMAXSIZE, 0, (LPARAM)&sz);
-  int tb1W = sz.cx > 0 ? sz.cx : 120;
+  SendMessageW(bmButton_, TB_GETMAXSIZE, 0, (LPARAM)&sz);
+  int bmW = sz.cx > 0 ? sz.cx : 110;
+  MoveWindow(bmButton_, grip + 6, y + 1, bmW, locH - 2, TRUE);
+  int lx = grip + 10 + bmW;
+  MoveWindow(addrLabel_, lx, y + 7, 54, 16, TRUE);
+  lx += 58;
   SendMessageW(toolbar2_, TB_GETMAXSIZE, 0, (LPARAM)&sz);
-  int tb2W = sz.cx > 0 ? sz.cx : 90;
-  MoveWindow(toolbar_, 2, y, tb1W, tbH, TRUE);
-  MoveWindow(toolbar2_, w - tb2W - 4, y, tb2W, tbH, TRUE);
-  MoveWindow(address_, tb1W + 8, y + 4, std::max(50, w - tb1W - tb2W - 16), tbH - 8, TRUE);
-  y += tbH + 2;
+  int tb2W = sz.cx > 0 ? sz.cx : 50;
+  MoveWindow(address_, lx, y + 3, std::max(60, w - lx - tb2W - 8), locH - 5, TRUE);
+  MoveWindow(toolbar2_, w - tb2W - 4, y + 1, tb2W, locH - 2, TRUE);
+  y += locH + 4;
+  // Personal toolbar.
+  int perH = 24;
+  RECT grip3 = {2, y, 2 + grip, y + perH};
+  grips_.push_back(grip3);
+  MoveWindow(personal_, grip + 6, y, std::max(50, w - grip - 10), perH, TRUE);
+  y += perH + 3;
+  // Tabs (hidden while there is only one, like the classic single window).
+  bool showTabs = tabList_.size() > 1;
+  ShowWindow(tabs_, showTabs ? SW_SHOW : SW_HIDE);
+  if (showTabs) {
+    RECT tr = {0, 0, w, 100};
+    TabCtrl_AdjustRect(tabs_, FALSE, &tr);
+    int tabRow = std::max(20, (int)tr.top - 2);
+    MoveWindow(tabs_, 2, y, w - 4, tabRow + 4, TRUE);
+    y += tabRow + 2;
+  }
   int findH = findVisible_ ? 28 : 0;
   MoveWindow(view_, 0, y, w, std::max(10, h - y - statusH - findH), TRUE);
   if (findVisible_) MoveWindow(findBar_, 0, h - statusH - findH, w, findH, TRUE);
   SetWindowPos(tabs_, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE);
+  InvalidateRect(hwnd_, 0, TRUE);
+}
+
+// Grips at the left of each toolbar row and etched separators between rows.
+void Browser::PaintChrome(HDC dc) {
+  RECT rc;
+  GetClientRect(hwnd_, &rc);
+  for (size_t i = 0; i < grips_.size(); ++i) {
+    RECT g = grips_[i];
+    DrawEdge(dc, &g, BDR_RAISEDINNER, BF_RECT);
+    // Two ridges like the classic toolbar tabs.
+    for (int k = 0; k < 2; ++k) {
+      RECT ridge = {g.left + 3 + k * 4, g.top + 3, g.left + 6 + k * 4, g.bottom - 3};
+      DrawEdge(dc, &ridge, BDR_RAISEDINNER, BF_RECT);
+    }
+    RECT sep = {0, g.bottom + 1, rc.right, g.bottom + 3};
+    DrawEdge(dc, &sep, EDGE_ETCHED, BF_TOP);
+  }
+}
+
+void Browser::RebuildPersonalToolbar() {
+  if (!personal_) return;
+  while (SendMessageW(personal_, TB_BUTTONCOUNT, 0, 0) > 0) SendMessageW(personal_, TB_DELETEBUTTON, 0, 0);
+  const std::vector<std::pair<std::string, std::string> >& list = App::Get().bookmarks;
+  static std::vector<std::wstring> labels;  // the toolbar keeps the pointers
+  labels.clear();
+  size_t n = std::min<size_t>(list.size(), 12);
+  for (size_t i = 0; i < n; ++i)
+    labels.push_back(Widen(ShortTitle(list[i].first.empty() ? list[i].second : list[i].first, 22)));
+  for (size_t i = 0; i < n; ++i) {
+    TBBUTTON b;
+    ZeroMemory(&b, sizeof b);
+    b.iBitmap = kIconPage;
+    b.idCommand = ID_PERSONAL_BASE + (int)i;
+    b.fsState = TBSTATE_ENABLED;
+    b.fsStyle = TBSTYLE_BUTTON | BTNS_AUTOSIZE;
+    b.iString = (INT_PTR)labels[i].c_str();
+    SendMessageW(personal_, TB_ADDBUTTONSW, 1, (LPARAM)&b);
+  }
+  InvalidateRect(personal_, 0, TRUE);
+}
+
+void Browser::UpdateThrobber() {
+  bool active = false;
+  for (size_t i = 0; i < tabList_.size(); ++i)
+    if (tabList_[i] == current_ && tabList_[i]->loading) active = true;
+  if (active == throbberActive_) return;
+  throbberActive_ = active;
+  if (active) SetTimer(hwnd_, kTimerThrobber, 90, 0);
+  else KillTimer(hwnd_, kTimerThrobber);
+  InvalidateRect(throbber_, 0, FALSE);
+}
+
+LRESULT CALLBACK Browser::ThrobberProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+  Browser* b = g_browser;
+  switch (m) {
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC dc = BeginPaint(h, &ps);
+      RECT rc;
+      GetClientRect(h, &rc);
+      DrawEdge(dc, &rc, EDGE_SUNKEN, BF_RECT | BF_ADJUST);
+      HRGN clip = CreateRectRgnIndirect(&rc);
+      SelectClipRgn(dc, clip);
+      SetViewportOrgEx(dc, rc.left, rc.top, 0);
+      DrawThrobber(dc, rc.right - rc.left, rc.bottom - rc.top, b ? b->throbberFrame_ : 0, b && b->throbberActive_);
+      SetViewportOrgEx(dc, 0, 0, 0);
+      SelectClipRgn(dc, 0);
+      DeleteObject(clip);
+      EndPaint(h, &ps);
+      return 0;
+    }
+    case WM_LBUTTONUP:
+      if (b) b->OnCommand(ID_THROBBER);
+      return 0;
+  }
+  return DefWindowProcW(h, m, w, l);
 }
 
 int Browser::Run() {
@@ -703,7 +893,7 @@ Tab* Browser::NewTab(const std::string& url, bool activate) {
   TabCtrl_InsertItem(tabs_, (int)tabList_.size() - 1, &item);
   if (activate) ActivateTab(t);
   Navigate(t, url.empty() ? "about:home" : url);
-  if (tabList_.size() == 1) LayoutChildren();
+  if (tabList_.size() <= 2) LayoutChildren();  // the tab strip appears with the second tab
   return t;
 }
 
@@ -905,6 +1095,7 @@ void Browser::CloseTab(Tab* t) {
   tabList_.erase(tabList_.begin() + idx);
   TabCtrl_DeleteItem(tabs_, idx);
   if (!tabList_.empty()) SaveSession();
+  if (tabList_.size() == 1) LayoutChildren();  // single tab: no tab strip
   if (tabList_.empty()) {
     current_ = 0;
     delete t;
@@ -1051,6 +1242,8 @@ void Browser::StartLoad(Tab* t, const PendingNav& nav, const std::string& referr
   job->request.referrer = referrer;
   job->request.topLevel = !t->parentTab;
   job->request.revalidate = nav.reload;
+  if (!t->parentTab) t->loadTotal = t->loadDone = 0;
+  ++Root(t)->loadTotal;
   if (nav.isPost) {
     job->request.method = "POST";
     job->request.body = nav.post.body;
@@ -1229,6 +1422,15 @@ void Browser::Stop(Tab* t) {
 void Browser::OnFetched(FetchJob* job) {
   FetchFinished();
   std::unique_ptr<FetchJob> owned(job);
+  if (job->kind == FetchJob::kDocument || job->kind == FetchJob::kStylesheet || job->kind == FetchJob::kScript ||
+      (job->kind == FetchJob::kImage && job->scriptRequestId != -1)) {
+    Tab* pt = Root(TabById(job->tabId));
+    if (pt && pt->loadDone < pt->loadTotal) {
+      ++pt->loadDone;
+      if (pt == current_ && pt->loading) SendMessageW(progress_, PBM_SETPOS,
+          std::max(5, std::min(95, pt->loadDone * 100 / std::max(1, pt->loadTotal))), 0);
+    }
+  }
   if (job->response.blocked) {
     Tab* bt = Root(TabById(job->tabId));
     if (bt) {
@@ -1355,6 +1557,7 @@ void Browser::OnDocument(Tab* t, FetchJob* job) {
     t->rawSource.clear();
     CommitNavigation(t, nav.url, false);
     t->title = "Fehler";
+    t->status = "Dokument konnte nicht geladen werden: " + r.error;
     RenderTab(t, true);
     UpdateTabLabel(t);
     if (t == current_) UpdateUi();
@@ -1469,6 +1672,7 @@ void Browser::RequestStylesheets(Tab* t) {
     job->request.referrer = t->url;
     job->request.accept = "text/css,*/*;q=0.1";
     ++t->pendingSheets;
+    ++Root(t)->loadTotal;
     StartFetch(job);
   }
 }
@@ -1539,6 +1743,7 @@ void Browser::RequestImages(Tab* t) {
     job->request.accept = "image/avif,image/webp,image/png,image/jpeg,image/gif,image/bmp,*/*;q=0.5";
     job->request.maxBytes = 16 * 1024 * 1024;
     ++t->pendingImages;
+    ++Root(t)->loadTotal;
     StartFetch(job);
   }
 }
@@ -1566,7 +1771,7 @@ void Browser::FinishLoadingIfDone(Tab* t) {
   if (t->pendingSheets <= 0 && t->pendingImages <= 0 && t->pendingScripts <= 0 && t->rendered &&
       t->loading) {
     t->loading = false;
-    t->status = "Fertig";
+    t->status = "Dokument: \xC3\x9C" "bermittelt";
     UpdateTabLabel(t);
     if (t->parentTab && t->frameNode) {
       // iframe.onload in the embedding page (outside of any running code).
@@ -1726,7 +1931,7 @@ Node* Browser::NodeAt(int x, int y, Tab** tab, float* docX, float* docY) {
 }
 
 void Browser::SetStatus(const std::string& s) {
-  SendMessageW(status_, SB_SETTEXTW, 0, (LPARAM)Widen(s).c_str());
+  SendMessageW(status_, SB_SETTEXTW, 1, (LPARAM)Widen(s).c_str());
 }
 
 void Browser::UpdateUi() {
@@ -1739,21 +1944,36 @@ void Browser::UpdateUi() {
   SendMessageW(toolbar_, TB_ENABLEBUTTON, ID_GO_BACK, MAKELONG(t->historyIndex > 0, 0));
   SendMessageW(toolbar_, TB_ENABLEBUTTON, ID_GO_FORWARD,
                MAKELONG(t->historyIndex + 1 < (int)t->history.size(), 0));
-  // Reload button doubles as stop button while loading.
-  TBBUTTONINFOW bi;
-  ZeroMemory(&bi, sizeof bi);
-  bi.cbSize = sizeof bi;
-  bi.dwMask = TBIF_IMAGE;
-  bi.iImage = t->loading ? kIconStop : kIconReload;
-  SendMessageW(toolbar_, TB_SETBUTTONINFOW, ID_VIEW_RELOAD, (LPARAM)&bi);
+  SendMessageW(toolbar_, TB_ENABLEBUTTON, ID_VIEW_STOP, MAKELONG(t->loading, 0));
+  bool https = StartsWith(t->url, "https:") && t->secure;
+  SendMessageW(toolbar_, TB_ENABLEBUTTON, ID_VIEW_SECURITY, MAKELONG(StartsWith(t->url, "http"), 0));
+  TBBUTTONINFOW sbi;
+  ZeroMemory(&sbi, sizeof sbi);
+  sbi.cbSize = sizeof sbi;
+  sbi.dwMask = TBIF_IMAGE;
+  sbi.iImage = https ? kIconSecurity : kIconLockOpen;  // the padlock shows the page's state
+  SendMessageW(toolbar_, TB_SETBUTTONINFOW, ID_VIEW_SECURITY, (LPARAM)&sbi);
   SetStatus(t->status);
+  // Padlock: closed for secure pages.
+  SendMessageW(status_, SB_SETICON, 0, (LPARAM)(https ? lockClosed_ : lockOpen_));
+  SendMessageW(status_, SB_SETTIPTEXTW, 0,
+               (LPARAM)(https ? L"Verschl\x00fc" L"sselte Verbindung" : L"Unverschl\x00fc" L"sselte Verbindung"));
+  // Progress bar: finished requests of the current load.
+  int pos = 0;
+  if (t->loading) {
+    int total = std::max(1, t->loadTotal);
+    pos = std::max(5, std::min(95, t->loadDone * 100 / total));
+    if (!t->rendered) pos = std::min(pos, 30);
+  }
+  SendMessageW(progress_, PBM_SETPOS, pos, 0);
   std::wstring zoomText = Widen(IntToString(zoom_) + " %");
-  SendMessageW(status_, SB_SETTEXTW, 2, (LPARAM)zoomText.c_str());
+  SendMessageW(status_, SB_SETTEXTW, 4, (LPARAM)zoomText.c_str());
   std::string sec = StartsWith(t->url, "https:") ? (t->secure ? "Sicher (" + (t->tlsVersion.empty() ? std::string("TLS") : t->tlsVersion) + (t->protocol == "h2" ? ", HTTP/2)" : ")") : "") :
                     StartsWith(t->url, "http:") ? "Nicht sicher" : "";
-  SendMessageW(status_, SB_SETTEXTW, 3, (LPARAM)Widen(sec).c_str());
-  std::string prog = t->loading ? "Laden ..." : t->blocked ? IntToString(t->blocked) + " blockiert" : "";
-  SendMessageW(status_, SB_SETTEXTW, 1, (LPARAM)Widen(prog).c_str());
+  SendMessageW(status_, SB_SETTEXTW, 5, (LPARAM)Widen(sec).c_str());
+  std::string info = t->blocked ? IntToString(t->blocked) + " blockiert" : "";
+  SendMessageW(status_, SB_SETTEXTW, 3, (LPARAM)Widen(info).c_str());
+  UpdateThrobber();
 }
 
 void Browser::SetZoom(int z) {
@@ -2350,6 +2570,37 @@ void Browser::AddBookmark() {
 
 void Browser::OnCommand(int id) {
   Tab* t = current_;
+  if (id >= ID_PERSONAL_BASE && id < ID_PERSONAL_BASE + 100) {
+    size_t i = id - ID_PERSONAL_BASE;
+    if (t && i < App::Get().bookmarks.size()) Navigate(t, App::Get().bookmarks[i].second);
+    return;
+  }
+  if (id == ID_GO_SEARCH) {
+    // The search engine's start page (scheme and host of the search URL).
+    Url u = Url::Parse(App::Get().settings.searchUrl);
+    if (t && u.valid()) Navigate(t, u.scheme() + "://" + u.HostPort() + "/");
+    return;
+  }
+  if (id == ID_THROBBER) {
+    if (t) Navigate(t, "about:kite");
+    return;
+  }
+  if (id == ID_VIEW_SECURITY) {
+    if (!t) return;
+    std::string msg = "Adresse: " + t->url + "\n\n";
+    if (StartsWith(t->url, "https:") && t->secure) {
+      msg += "Die Verbindung zu dieser Seite ist verschl\xC3\xBCsselt (" +
+             (t->tlsVersion.empty() ? std::string("TLS") : t->tlsVersion) + ").\n";
+      msg += "Das Zertifikat wurde anhand der Stammzertifikate in cacert.pem gepr\xC3\xBC" "ft.\n";
+      msg += "Protokoll: " + std::string(t->protocol == "h2" ? "HTTP/2" : "HTTP/1.1") + "\n";
+    } else {
+      msg += "Diese Seite wird unverschl\xC3\xBCsselt \xC3\xBC" "bertragen. Geben Sie hier keine Passw\xC3\xB6rter "
+             "oder pers\xC3\xB6nlichen Daten ein.\n";
+    }
+    msg += "\nWerbe- und Trackeranfragen blockiert: " + IntToString(t->blocked);
+    MessageBoxW(hwnd_, Widen(msg).c_str(), L"Sicherheitsinformationen", MB_ICONINFORMATION);
+    return;
+  }
   if (id >= ID_BOOKMARK_BASE && id < ID_BOOKMARK_BASE + 1000) {
     size_t i = id - ID_BOOKMARK_BASE;
     if (t && i < App::Get().bookmarks.size()) Navigate(t, App::Get().bookmarks[i].second);
@@ -2578,6 +2829,13 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
     case WM_SETFOCUS:
       if (current_ && view_) SetFocus(view_);
       return 0;
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC dc = BeginPaint(hwnd_, &ps);
+      PaintChrome(dc);
+      EndPaint(hwnd_, &ps);
+      return 0;
+    }
     case WM_COMMAND: {
       if ((HWND)l == address_ || (HWND)l == findEdit_) return 0;
       OnCommand(LOWORD(w));
@@ -2585,6 +2843,17 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
     }
     case WM_NOTIFY: {
       NMHDR* nm = (NMHDR*)l;
+      if (nm->hwndFrom == bmButton_ && nm->code == TBN_DROPDOWN) {
+        // "Lesezeichen" button: the bookmarks menu below it.
+        RECT br;
+        SendMessageW(bmButton_, TB_GETRECT, ID_BM_MENU, (LPARAM)&br);
+        POINT pt = {br.left, br.bottom};
+        ClientToScreen(bmButton_, &pt);
+        HMENU bm = GetSubMenu(GetMenu(hwnd_), 4);
+        int cmd = TrackPopupMenu(bm, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, hwnd_, 0);
+        if (cmd) OnCommand(cmd);
+        return TBDDRET_DEFAULT;
+      }
       if (nm->hwndFrom == tabs_) {
         if (nm->code == TCN_SELCHANGE) {
           int idx = TabCtrl_GetCurSel(tabs_);
@@ -2616,12 +2885,22 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         switch (di->hdr.idFrom) {
           case ID_GO_BACK: di->lpszText = (LPWSTR)L"Zur\x00fc" L"ck (Alt+Links)"; break;
           case ID_GO_FORWARD: di->lpszText = (LPWSTR)L"Vor (Alt+Rechts)"; break;
-          case ID_VIEW_RELOAD: di->lpszText = (LPWSTR)L"Neu laden / Abbrechen (F5)"; break;
+          case ID_VIEW_RELOAD: di->lpszText = (LPWSTR)L"Neu laden (F5)"; break;
           case ID_GO_HOME: di->lpszText = (LPWSTR)L"Startseite"; break;
+          case ID_GO_SEARCH: di->lpszText = (LPWSTR)L"Suchmaschine \x00f6" L"ffnen"; break;
+          case ID_VIEW_SECURITY: di->lpszText = (LPWSTR)L"Informationen zur Verbindung"; break;
+          case ID_VIEW_STOP: di->lpszText = (LPWSTR)L"Laden abbrechen (Esc)"; break;
           case ID_GO: di->lpszText = (LPWSTR)L"Gehe zu"; break;
           case ID_BM_ADD: di->lpszText = (LPWSTR)L"Lesezeichen hinzuf\x00fcgen (Strg+D)"; break;
           case ID_FILE_NEWTAB: di->lpszText = (LPWSTR)L"Neuer Tab (Strg+T)"; break;
           default: {
+            if (di->hdr.idFrom >= ID_PERSONAL_BASE && di->hdr.idFrom < ID_PERSONAL_BASE + 100 &&
+                di->hdr.idFrom - ID_PERSONAL_BASE < App::Get().bookmarks.size()) {
+              static std::wstring ptip;
+              ptip = Widen(App::Get().bookmarks[di->hdr.idFrom - ID_PERSONAL_BASE].second);
+              di->lpszText = &ptip[0];
+              break;
+            }
             // Tab tooltips: full title.
             if (di->hdr.hwndFrom == TabCtrl_GetToolTips(tabs_) && di->hdr.idFrom < tabList_.size()) {
               static std::wstring tip;
@@ -2691,6 +2970,11 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       if (id == kTimerWake) {
         KillTimer(hwnd_, kTimerWake);
         PostMessageW(hwnd_, WM_KITE_WAKE, 0, 0);
+        return 0;
+      }
+      if (id == kTimerThrobber) {
+        ++throbberFrame_;
+        InvalidateRect(throbber_, 0, FALSE);
         return 0;
       }
       if (id == kTimerHoverStyle) {
@@ -3365,6 +3649,7 @@ void Browser::FetchPendingScripts(Tab* t) {
     job->request.referrer = t->url;
     job->request.accept = "*/*";
     ++t->pendingScripts;
+    ++Root(t)->loadTotal;
     StartFetch(job);
   }
 }

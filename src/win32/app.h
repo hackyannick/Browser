@@ -240,11 +240,16 @@ std::string BookmarksPageHtml();
 int RunBrowser(HINSTANCE inst, const std::wstring& startUrl);
 
 // Toolbar icons drawn at runtime (no bitmap resources needed).
-HIMAGELIST CreateToolbarImageList(int size);
+// |disabled| = grayed variant for TB_SETDISABLEDIMAGELIST.
+HIMAGELIST CreateToolbarImageList(int size, bool disabled = false);
 enum ToolbarIcon {
   kIconBack, kIconForward, kIconReload, kIconStop, kIconHome, kIconGo, kIconNewTab,
-  kIconBookmark, kIconCount
+  kIconBookmark, kIconSearch, kIconSecurity, kIconPage, kIconLockOpen, kIconCount
 };
+// Status bar padlock (closed = secure connection).
+HICON CreateLockIcon(bool closed);
+// The animated logo at the right end of the navigation toolbar ("throbber").
+void DrawThrobber(HDC dc, int w, int h, int frame, bool active);
 
 }  // namespace kite
 
