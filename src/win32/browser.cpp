@@ -33,14 +33,20 @@ const wchar_t kViewClass[] = L"KitePageView";
 const UINT_PTR kTimerRelayout = 1;
 const UINT_PTR kTimerResize = 2;
 const UINT_PTR kTimerImageAnim = 3;  // animated GIF/WebP/AVIF frames
-const UINT_PTR kTimerStyleFallbackBase = 0x1000;
-const UINT_PTR kTimerRefreshBase = 0x2000;
-const UINT_PTR kTimerScriptBase = 0x3000;
-const UINT_PTR kTimerAnimBase = 0x4000;  // CSS animation frames (~30 fps)
+// Per-tab timers: base + tab id (iframes are tabs too, so ids grow).
+const UINT_PTR kTimerStyleFallbackBase = 0x100000;
+const UINT_PTR kTimerRefreshBase = 0x200000;
+const UINT_PTR kTimerScriptBase = 0x300000;
+const UINT_PTR kTimerAnimBase = 0x400000;  // CSS animation frames (~30 fps)
 // Deferred navigation requested by a script (location.href = ..., form.submit()).
 const UINT WM_KITE_JSNAV = WM_APP + 3;
 const UINT WM_KITE_HISTGO = WM_APP + 4;  // history.go(delta) from a script
 const UINT WM_KITE_WAKE = WM_APP + 5;    // worker/WebSocket events are waiting
+const UINT WM_KITE_FRAMEGONE = WM_APP + 6;  // an <iframe> element was destroyed
+const UINT WM_KITE_FRAMEMSG = WM_APP + 7;   // postMessage between frames is waiting
+const UINT WM_KITE_FRAMELOAD = WM_APP + 8;  // an iframe finished loading (fires its load event)
+const int kMaxFrameDepth = 3;
+const int kMaxFramesPerPage = 24;
 const UINT_PTR kTimerWake = 4;
 const int kZoomLevels[] = {30, 50, 67, 75, 80, 90, 100, 110, 125, 150, 175, 200, 250, 300};
 
@@ -88,6 +94,10 @@ class TabScriptHost : public ScriptHost {
   void HistoryGo(int delta);
   WebStorage session;
   bool FetchSync(const std::string& url, std::string& body);
+  int FrameDepth();
+  void PostFrameMessage(int target, const std::string& data, const std::string& targetOrigin);
+  std::string FrameUrl(int target);
+  void NavigateFrame(int target, const std::string& url);
 };
 
 class Tab {
@@ -136,6 +146,18 @@ class Tab {
   bool jsNavIsForm = false;
   std::string jsNavUrl;
   FormSubmission jsNavForm;
+  // <iframe> documents are tabs without a tab strip entry.
+  Tab* parentTab = nullptr;
+  Node* frameNode = nullptr;   // the <iframe> element in the parent (null once destroyed)
+  std::vector<Tab*> frames;    // child frames
+  float frameW = 300, frameH = 150;  // viewport in CSS px
+  std::string frameSrc;        // URL taken from the element's src/srcdoc
+};
+
+struct FrameMessage {
+  int targetTab;
+  int source;  // as seen by the receiver: -1 parent, > 0 child frame id
+  std::string data, origin;
 };
 
 class Browser {
@@ -151,6 +173,7 @@ class Browser {
   int Run();
 
   static LRESULT CALLBACK MainProc(HWND h, UINT m, WPARAM w, LPARAM l);
+  static void FrameNodeGone(int id);
   static LRESULT CALLBACK ViewProc(HWND h, UINT m, WPARAM w, LPARAM l);
   static LRESULT CALLBACK AddressProc(HWND h, UINT m, WPARAM w, LPARAM l);
   static LRESULT CALLBACK EditCtlProc(HWND h, UINT m, WPARAM w, LPARAM l);
@@ -173,7 +196,40 @@ class Browser {
   void CloseTab(Tab* t);
   void ActivateTab(Tab* t);
   int TabIndex(Tab* t) const;
+
+ public:
   Tab* TabById(int id) const;
+  // iframes.
+  bool IsAlive(Tab* t) const { return t && (TabIndex(t) >= 0 || FrameById(t->id) == t); }
+  Tab* FrameById(int id) const {
+    std::map<int, Tab*>::const_iterator it = frameTabs_.find(id);
+    return it == frameTabs_.end() ? 0 : it->second;
+  }
+  static Tab* Root(Tab* t) {
+    while (t && t->parentTab) t = t->parentTab;
+    return t;
+  }
+  bool Shown(Tab* t) const { return t && Root(t) == current_; }
+  float VW(Tab* t) const { return t->parentTab ? t->frameW : ViewportWidth(); }
+  float VH(Tab* t) const { return t->parentTab ? t->frameH : ViewportHeight(); }
+  std::vector<Tab*> AllTabs() const;
+  void CollectFrames(Tab* t, std::vector<Tab*>& out) const;
+  void SyncFrames(Tab* t);
+  void DestroyFrames(Tab* t);
+  void DestroyFrame(Tab* f);
+  bool FrameContentRect(Tab* f, Rect& r) const;  // in the parent document (CSS px)
+  bool FrameOrigin(Tab* t, float& dx, float& dy) const;  // document origin in view pixels
+  void Invalidate(Tab* t) {
+    if (Shown(t)) InvalidateRect(view_, 0, FALSE);
+  }
+  static const DisplayList* ResolveFrame(void* ctx, int id, float& sx, float& sy);
+  void DeliverFrameMessages();
+  std::map<int, Tab*> frameTabs_;
+  std::vector<FrameMessage> frameMessages_;
+  std::vector<int> frameLoads_;
+
+ private:
+  Tab* editTab_ = 0;
   void UpdateTabLabel(Tab* t);
 
   // Navigation.
@@ -204,14 +260,14 @@ class Browser {
   void UpdateScrollBars();
   void ScrollTo(float x, float y);
   void ScrollBy(float dx, float dy);
-  Node* NodeAt(int x, int y);
+  Node* NodeAt(int x, int y, Tab** tab = 0, float* docX = 0, float* docY = 0);
   void UpdateUi();
   void SetStatus(const std::string& s);
   void OnClick(int x, int y, bool newTab);
-  void BeginEdit(Node* n);
+  void BeginEdit(Tab* t, Node* n);
   void CommitEdit(bool submit);
-  void ShowSelectPopup(Node* select);
-  void ToggleControl(Node* n);
+  void ShowSelectPopup(Tab* t, Node* select);
+  void ToggleControl(Tab* t, Node* n);
   void ShowContextMenu(int x, int y);
   void UpdateSelection(int x0, int y0, int x1, int y1);
   void CopyText(const std::string& text);
@@ -300,6 +356,8 @@ bool IsImageMime(const std::string& m) {
 // Window creation
 
 bool Browser::Create(HINSTANCE inst, const std::wstring& startUrl) {
+  renderer_.SetFrameResolver(ResolveFrame, this);
+  SetFrameNodeGoneHandler(FrameNodeGone);
   WNDCLASSEXW wc;
   ZeroMemory(&wc, sizeof wc);
   wc.cbSize = sizeof wc;
@@ -618,7 +676,176 @@ int Browser::TabIndex(Tab* t) const {
 Tab* Browser::TabById(int id) const {
   for (size_t i = 0; i < tabList_.size(); ++i)
     if (tabList_[i]->id == id) return tabList_[i];
-  return 0;
+  return FrameById(id);
+}
+
+// ---------------------------------------------------------------------------
+// iframes: every frame is a Tab without a tab strip entry, loaded by the same
+// code as tabs. The parent's display list refers to it with a kFrame item
+// that the renderer resolves at paint time.
+
+std::vector<Tab*> Browser::AllTabs() const {
+  std::vector<Tab*> out;
+  for (size_t i = 0; i < tabList_.size(); ++i) {
+    out.push_back(tabList_[i]);
+    CollectFrames(tabList_[i], out);
+  }
+  return out;
+}
+
+void Browser::CollectFrames(Tab* t, std::vector<Tab*>& out) const {
+  for (size_t i = 0; i < t->frames.size(); ++i) {
+    out.push_back(t->frames[i]);
+    CollectFrames(t->frames[i], out);
+  }
+}
+
+void Browser::FrameNodeGone(int id) {
+  if (!g_browser) return;
+  Tab* f = g_browser->FrameById(id);
+  if (!f) return;
+  f->frameNode = 0;  // the element is being destroyed right now
+  PostMessageW(g_browser->hwnd_, WM_KITE_FRAMEGONE, (WPARAM)id, 0);
+}
+
+const DisplayList* Browser::ResolveFrame(void* ctx, int id, float& sx, float& sy) {
+  Browser* b = (Browser*)ctx;
+  Tab* f = b->FrameById(id);
+  if (!f || !f->rendered || !f->frameNode) return 0;
+  float z = b->ZoomF();
+  sx = f->scrollX / z;
+  sy = f->scrollY / z;
+  return &f->page->display();
+}
+
+bool Browser::FrameContentRect(Tab* f, Rect& r) const {
+  if (!f->parentTab || !f->frameNode || !f->frameNode->layoutBox) return false;
+  if (!f->parentTab->page->BoxRect(f->frameNode, r)) return false;
+  LayoutBox* b = f->frameNode->layoutBox;
+  r = Rect(r.x + b->border.left + b->padding.left, r.y + b->border.top + b->padding.top, b->ContentW(),
+           b->ContentH());
+  return true;
+}
+
+bool Browser::FrameOrigin(Tab* t, float& dx, float& dy) const {
+  if (!t->parentTab) {
+    dx = -t->scrollX;
+    dy = -t->scrollY;
+    return true;
+  }
+  float pdx, pdy;
+  Rect r;
+  if (!FrameOrigin(t->parentTab, pdx, pdy) || !FrameContentRect(t, r)) return false;
+  float z = ZoomF();
+  dx = pdx + r.x * z - t->scrollX;
+  dy = pdy + r.y * z - t->scrollY;
+  return true;
+}
+
+void Browser::SyncFrames(Tab* t) {
+  if (!t->page->document() || !t->rendered) return;
+  int depth = 0;
+  for (Tab* p = t; p->parentTab; p = p->parentTab) ++depth;
+  std::vector<Node*> els, stack(1, t->page->document()->root.get());
+  while (!stack.empty()) {
+    Node* n = stack.back();
+    stack.pop_back();
+    for (size_t i = 0; i < n->children.size(); ++i) stack.push_back(n->children[i].get());
+    if (n->shadowRoot) stack.push_back(n->shadowRoot.get());
+    if (n->Is("iframe")) els.push_back(n);
+  }
+  int alive = t->id;
+  for (size_t i = 0; i < els.size(); ++i) {
+    Node* el = els[i];
+    Tab* f = el->frameId ? FrameById(el->frameId) : 0;
+    if (f && f->parentTab != t) f = 0;
+    LayoutBox* b = el->layoutBox;
+    if (!f) {
+      if (!b || depth >= kMaxFrameDepth || (int)t->frames.size() >= kMaxFramesPerPage) continue;
+      f = new Tab(nextTabId_++);
+      f->parentTab = t;
+      f->frameNode = el;
+      el->frameId = f->id;
+      frameTabs_[f->id] = f;
+      t->frames.push_back(f);
+      f->frameSrc = "\x01";  // nothing loaded yet
+    }
+    if (b) {
+      float w = std::max(1.0f, b->ContentW()), h = std::max(1.0f, b->ContentH());
+      if (w != f->frameW || h != f->frameH) {
+        f->frameW = w;
+        f->frameH = h;
+        if (f->rendered) RenderTab(f, true);
+      }
+    }
+    std::string src;
+    if (el->HasAttr("srcdoc")) {
+      src = "srcdoc:" + el->Attr("srcdoc");
+    } else {
+      std::string a = Trim(el->Attr("src"));
+      Url u = t->page->ResolveUrl(a);
+      src = a.empty() || !u.valid() ? std::string("about:blank") : u.Spec();
+    }
+    if (src == f->frameSrc) continue;
+    f->frameSrc = src;
+    PendingNav nav;
+    if (StartsWith(src, "srcdoc:")) {
+      nav.url = t->url;
+      LoadInternal(f, src.substr(7), t->url, nav);
+    } else if (StartsWith(src, "http:") || StartsWith(src, "https:") || StartsWith(src, "data:") ||
+               StartsWith(src, "file:")) {
+      nav.url = src;
+      StartLoad(f, nav, t->url);
+    } else {
+      nav.url = "about:blank";
+      LoadInternal(f, "<html><head></head><body></body></html>", "about:blank", nav);
+    }
+    if (!IsAlive(TabById(alive))) return;  // loading ran scripts that replaced this document
+  }
+}
+
+void Browser::DestroyFrames(Tab* t) {
+  std::vector<Tab*> list = t->frames;
+  for (size_t i = 0; i < list.size(); ++i) DestroyFrame(list[i]);
+}
+
+void Browser::DestroyFrame(Tab* f) {
+  DestroyFrames(f);
+  if (f->cancel) f->cancel->Cancel();
+  KillTimer(hwnd_, kTimerStyleFallbackBase + f->id);
+  KillTimer(hwnd_, kTimerRefreshBase + f->id);
+  KillTimer(hwnd_, kTimerScriptBase + f->id);
+  KillTimer(hwnd_, kTimerAnimBase + f->id);
+  if (editTab_ == f && editCtl_) {
+    DestroyWindow(editCtl_);
+    editCtl_ = 0;
+    editNode_ = 0;
+  }
+  if (editTab_ == f) editTab_ = 0;
+  if (f->parentTab) {
+    std::vector<Tab*>& v = f->parentTab->frames;
+    v.erase(std::remove(v.begin(), v.end(), f), v.end());
+  }
+  frameTabs_.erase(f->id);
+  if (f->frameNode) f->frameNode->frameId = 0;
+  delete f;
+}
+
+void Browser::DeliverFrameMessages() {
+  if (scriptDepth_ > 0) {
+    SetTimer(hwnd_, kTimerWake, 50, 0);
+    return;
+  }
+  std::vector<FrameMessage> list;
+  list.swap(frameMessages_);
+  for (size_t i = 0; i < list.size(); ++i) {
+    Tab* t = TabById(list[i].targetTab);
+    ScriptEngine* js = t ? t->page->script() : 0;
+    if (!js) continue;
+    BeginScript();
+    js->DeliverFrameMessage(list[i].data, list[i].origin, list[i].source);
+    EndScript(t);
+  }
 }
 
 void Browser::CloseTab(Tab* t) {
@@ -630,6 +857,7 @@ void Browser::CloseTab(Tab* t) {
   KillTimer(hwnd_, kTimerRefreshBase + t->id);
   KillTimer(hwnd_, kTimerScriptBase + t->id);
   KillTimer(hwnd_, kTimerAnimBase + t->id);
+  DestroyFrames(t);
   tabList_.erase(tabList_.begin() + idx);
   TabCtrl_DeleteItem(tabs_, idx);
   if (tabList_.empty()) {
@@ -796,7 +1024,13 @@ void Browser::LoadInternal(Tab* t, const std::string& html, const std::string& u
   t->page->LoadHtml(html, url);
   CommitNavigation(t, url, false);
   t->loading = false;
+  int id = t->id;
   RenderTab(t, true);
+  if (!IsAlive(TabById(id))) return;
+  if (t->parentTab && t->frameNode) {
+    PostMessageW(hwnd_, WM_KITE_FRAMELOAD, (WPARAM)t->id, 0);
+    return;
+  }
   UpdateTabLabel(t);
   if (t == current_) {
     UpdateUi();
@@ -808,6 +1042,7 @@ void Browser::LoadInternal(Tab* t, const std::string& html, const std::string& u
 }
 
 void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure) {
+  DestroyFrames(t);  // the frames of the document just replaced
   PendingNav& nav = t->pending;
   if (t->historyIndex >= 0 && t->historyIndex < (int)t->history.size())
     t->history[t->historyIndex].scrollY = t->scrollY;
@@ -849,10 +1084,11 @@ void Browser::CommitNavigation(Tab* t, const std::string& finalUrl, bool secure)
   Url u = Url::Parse(finalUrl);
   t->fragment = u.valid() && u.HasFragment() ? u.fragment() : std::string();
   t->title = t->page->Title();
-  if (t == current_ && editCtl_) {
+  if (editCtl_ && editTab_ == t) {
     DestroyWindow(editCtl_);
     editCtl_ = 0;
     editNode_ = 0;
+    editTab_ = 0;
   }
 }
 
@@ -875,7 +1111,7 @@ void Browser::GoHistory(Tab* t, int delta) {
       t->page->script()->PopState(e.stateId, hashChanged, oldUrl);
       EndScript(t);
     }
-    if (TabIndex(t) < 0) return;
+    if (!IsAlive(t)) return;
     float y = t->history[t->historyIndex].scrollY;
     if (hashChanged && y == 0 && b.HasFragment()) {
       float a2 = t->page->AnchorPosition(b.fragment());
@@ -940,9 +1176,10 @@ void Browser::OnFetched(FetchJob* job) {
     if (!job->fontName.empty() &&
         Fonts().RegisterWebFont(job->fontFamily, job->fontWeight, job->fontItalic, job->fontData,
                                 job->fontName)) {
-      for (size_t i = 0; i < tabList_.size(); ++i) {
-        tabList_[i]->page->FontsChanged();
-        if (tabList_[i]->rendered) tabList_[i]->needsRelayout = true;
+      std::vector<Tab*> all = AllTabs();
+      for (size_t i = 0; i < all.size(); ++i) {
+        all[i]->page->FontsChanged();
+        if (all[i]->rendered) all[i]->needsRelayout = true;
       }
       renderer_.ClearSvgCache();
       ScheduleRelayout();
@@ -955,8 +1192,11 @@ void Browser::OnFetched(FetchJob* job) {
     else if (job->response.ok && job->response.MimeType().find("svg") != std::string::npos)
       Images().SetUnsupported(url);
     else Images().SetFailed(url);
-    for (size_t i = 0; i < tabList_.size(); ++i) {
-      Tab* t = tabList_[i];
+    std::vector<Tab*> all = AllTabs();
+    std::vector<int> ids;
+    for (size_t i = 0; i < all.size(); ++i) {
+      Tab* t = all[i];
+      ids.push_back(t->id);
       if (t->id == job->tabId && t->generation == job->generation && t->pendingImages > 0 &&
           job->scriptRequestId != -1)
         --t->pendingImages;
@@ -964,9 +1204,9 @@ void Browser::OnFetched(FetchJob* job) {
     }
     // Scripts waiting for this image (img.onload).
     bool loaded = Images().Find(url) != 0;
-    for (size_t i = 0; i < tabList_.size(); ++i) {
-      Tab* t = tabList_[i];
-      if (!t->page->script()) continue;
+    for (size_t i = 0; i < ids.size(); ++i) {
+      Tab* t = TabById(ids[i]);
+      if (!t || !t->page->script()) continue;
       BeginScript();
       t->page->script()->ImageLoaded(url, loaded);
       EndScript(t);
@@ -1041,6 +1281,30 @@ void Browser::OnDocument(Tab* t, FetchJob* job) {
   std::string mime = r.MimeType();
   std::string disposition = AsciiLower(r.Header("content-disposition"));
   bool attachment = StartsWith(disposition, "attachment");
+  if (t->parentTab) {
+    // Pages may forbid being framed (clickjacking protection).
+    std::string xfo = AsciiLower(Trim(r.Header("x-frame-options")));
+    std::string csp = AsciiLower(r.Header("content-security-policy"));
+    size_t fa = csp.find("frame-ancestors");
+    std::string ancestors;
+    if (fa != std::string::npos) ancestors = Trim(csp.substr(fa + 15, csp.find(';', fa) == std::string::npos ? std::string::npos : csp.find(';', fa) - fa - 15));
+    Url self = Url::Parse(r.finalUrl.empty() ? nav.url : r.finalUrl);
+    bool sameAsAncestors = true;
+    for (Tab* p = t->parentTab; p; p = p->parentTab)
+      if (Url::Parse(p->url).Origin() != self.Origin()) sameAsAncestors = false;
+    bool blocked = xfo == "deny" || (xfo == "sameorigin" && !sameAsAncestors) ||
+                   (fa != std::string::npos &&
+                    (ancestors.find("'none'") != std::string::npos ||
+                     (ancestors == "'self'" && !sameAsAncestors)));
+    if (blocked || attachment || (!IsHtmlMime(mime) && !IsTextMime(mime) && !IsImageMime(mime))) {
+      t->loading = false;
+      t->page->LoadHtml(blocked ? FrameBlockedHtml(self.Spec()) : std::string("<html><body></body></html>"),
+                        "about:blank");
+      CommitNavigation(t, "about:blank", false);
+      RenderTab(t, true);
+      return;
+    }
+  }
   if (!nav.viewSource && (attachment || (!IsHtmlMime(mime) && !IsTextMime(mime) && !IsImageMime(mime)))) {
     // Not displayable: offer to save the file.
     t->loading = false;
@@ -1129,7 +1393,7 @@ void Browser::RequestStylesheets(Tab* t) {
 
 void Browser::RenderTab(Tab* t, bool restyle) {
   if (!t->page->document()) return;
-  float vw = ViewportWidth(), vh = ViewportHeight();
+  float vw = VW(t), vh = VH(t);
   if (restyle) t->page->Restyle(vw, vh);
   t->page->Relayout(vw, vh);
   t->renderedW = vw;
@@ -1161,9 +1425,13 @@ void Browser::RenderTab(Tab* t, bool restyle) {
     UpdateScrollBars();
     InvalidateRect(view_, 0, FALSE);
     UpdateUi();
+  } else {
+    Invalidate(t);
   }
   ScheduleAnimation(t);
+  int id = t->id;
   if (first) PumpScripts(t);
+  if (IsAlive(TabById(id))) SyncFrames(t);
 }
 
 void Browser::RequestImages(Tab* t) {
@@ -1217,6 +1485,11 @@ void Browser::FinishLoadingIfDone(Tab* t) {
     t->loading = false;
     t->status = "Fertig";
     UpdateTabLabel(t);
+    if (t->parentTab && t->frameNode) {
+      // iframe.onload in the embedding page (outside of any running code).
+      PostMessageW(hwnd_, WM_KITE_FRAMELOAD, (WPARAM)t->id, 0);
+      return;
+    }
   } else if (t->loading && t->rendered) {
     t->status = "Lade Bilder ... (" + IntToString(t->pendingImages) + " ausstehend)";
   }
@@ -1339,11 +1612,31 @@ void Browser::ScrollBy(float dx, float dy) {
   ScrollTo(current_->scrollX + dx, current_->scrollY + dy);
 }
 
-Node* Browser::NodeAt(int x, int y) {
-  if (!current_ || !current_->rendered) return 0;
+// Hit testing descends into iframes: |tab| receives the document that was hit
+// and |docX|/|docY| the position in it (CSS px).
+Node* Browser::NodeAt(int x, int y, Tab** tab, float* docX, float* docY) {
+  Tab* t = current_;
+  if (!t || !t->rendered) return 0;
   float z = ZoomF();
-  return current_->page->HitTest((x + current_->scrollX) / z, (y + current_->scrollY) / z,
-                                 current_->scrollX / z, current_->scrollY / z);
+  float ox = -t->scrollX, oy = -t->scrollY;
+  for (int depth = 0;; ++depth) {
+    float dx = (x - ox) / z, dy = (y - oy) / z;
+    Node* n = t->page->HitTest(dx, dy, t->scrollX / z, t->scrollY / z);
+    if (n && n->Is("iframe") && n->frameId && depth <= kMaxFrameDepth) {
+      Tab* f = FrameById(n->frameId);
+      Rect r;
+      if (f && f->rendered && FrameContentRect(f, r) && r.contains(dx, dy)) {
+        ox += r.x * z - f->scrollX;
+        oy += r.y * z - f->scrollY;
+        t = f;
+        continue;
+      }
+    }
+    if (tab) *tab = t;
+    if (docX) *docX = dx;
+    if (docY) *docY = dy;
+    return n;
+  }
 }
 
 void Browser::SetStatus(const std::string& s) {
@@ -1389,13 +1682,13 @@ void Browser::SetZoom(int z) {
   UpdateUi();
 }
 
-void Browser::ToggleControl(Node* n) {
+void Browser::ToggleControl(Tab* t, Node* n) {
   std::string type = AsciiLower(n->Attr("type"));
   bool checked = n->checkedSet ? n->checked : n->HasAttr("checked");
   if (type == "radio") {
     if (checked) return;
     Node* form = Page::FormFor(n);
-    Node* scope = form ? form : current_->page->document()->root.get();
+    Node* scope = form ? form : t->page->document()->root.get();
     std::vector<Node*> inputs;
     scope->FindAll("input", inputs);
     for (size_t i = 0; i < inputs.size(); ++i)
@@ -1408,24 +1701,26 @@ void Browser::ToggleControl(Node* n) {
     n->checked = !checked;
   }
   n->checkedSet = true;
-  current_->page->Repaint();
-  InvalidateRect(view_, 0, FALSE);
-  DispatchJs(current_, n, "input");
-  DispatchJs(current_, n, "change");
+  t->page->Repaint();
+  Invalidate(t);
+  DispatchJs(t, n, "input");
+  DispatchJs(t, n, "change");
 }
 
 void Browser::OnClick(int x, int y, bool newTab) {
-  Tab* t = current_;
-  Node* n = NodeAt(x, y);
+  Tab* t = 0;
+  float docX = 0, docY = 0;
+  Node* n = NodeAt(x, y, &t, &docX, &docY);
   if (!n) return;
+  int tabId = t->id;
   // Scripts see the click first and may cancel the default action.
   if (!DispatchJs(t, n, "click")) return;
+  if (!IsAlive(TabById(tabId))) return;
   bool scripted = t->page->script() != 0;
   // Built-in <video>/<audio> controls.
-  float z = ZoomF();
-  if (t->page->MediaClick(n, (x + t->scrollX) / z, (y + t->scrollY) / z)) {
+  if (t->page->MediaClick(n, docX, docY)) {
     t->page->Repaint();
-    InvalidateRect(view_, 0, FALSE);
+    Invalidate(t);
     return;
   }
   // Form controls.
@@ -1437,7 +1732,7 @@ void Browser::OnClick(int x, int y, bool newTab) {
     if (tag == "input") {
       std::string type = AsciiLower(p->Attr("type"));
       if (type == "checkbox" || type == "radio") {
-        ToggleControl(p);
+        ToggleControl(t, p);
       } else if (type == "submit" || type == "image") {
         SubmitForm(t, Page::FormFor(p), p, newTab);
       } else if (type == "reset") {
@@ -1460,16 +1755,16 @@ void Browser::OnClick(int x, int y, bool newTab) {
       } else if (type == "button" || type == "file" || type == "range" || type == "color") {
         SetStatus("Diese Funktion ben\xC3\xB6tigt JavaScript bzw. wird nicht unterst\xC3\xBCtzt.");
       } else {
-        BeginEdit(p);
+        BeginEdit(t, p);
       }
       return;
     }
     if (tag == "textarea") {
-      BeginEdit(p);
+      BeginEdit(t, p);
       return;
     }
     if (tag == "select") {
-      ShowSelectPopup(p);
+      ShowSelectPopup(t, p);
       return;
     }
     if (tag == "button") {
@@ -1495,8 +1790,8 @@ void Browser::OnClick(int x, int y, bool newTab) {
       if (!target) target = p->FindFirst("input");
       if (target && target != n) {
         std::string type = AsciiLower(target->Attr("type"));
-        if (type == "checkbox" || type == "radio") ToggleControl(target);
-        else if (target->tag == "input" || target->tag == "textarea") BeginEdit(target);
+        if (type == "checkbox" || type == "radio") ToggleControl(t, target);
+        else if (target->tag == "input" || target->tag == "textarea") BeginEdit(t, target);
         return;
       }
     }
@@ -1524,18 +1819,31 @@ void Browser::OnClick(int x, int y, bool newTab) {
       Download(url, link->Attr("download"), t->url);
       return;
     }
-    std::string target = AsciiLower(link->Attr("target"));
-    if (newTab || target == "_blank") {
+    std::string target = AsciiLower(Trim(link->Attr("target")));
+    Tab* dest = t;
+    if (target == "_top") {
+      dest = Root(t);
+    } else if (target == "_parent") {
+      if (t->parentTab) dest = t->parentTab;
+    } else if (!target.empty() && target != "_self" && target != "_blank") {
+      // A named frame of this page, else a new tab.
+      std::vector<Tab*> frames;
+      CollectFrames(Root(t), frames);
+      dest = 0;
+      for (size_t i = 0; i < frames.size() && !dest; ++i)
+        if (frames[i]->frameNode && AsciiLower(frames[i]->frameNode->Attr("name")) == target) dest = frames[i];
+    }
+    if (newTab || target == "_blank" || !dest) {
       Tab* created = NewTab("about:blank", !newTab);
       Navigate(created, url, t->url);
-      if (newTab) ActivateTab(t);
+      if (newTab) ActivateTab(Root(t));
     } else {
-      Navigate(t, url, t->url);
+      Navigate(dest, url, t->url);
     }
     return;
   }
   for (Node* p = n; p; p = p->parent) {
-    if (p->Is("iframe") && p->HasAttr("src")) {
+    if (p->Is("iframe") && p->HasAttr("src") && !p->frameId) {
       Url u = t->page->ResolveUrl(p->Attr("src"));
       if (u.valid()) Navigate(t, u.Spec(), t->url);
       return;
@@ -1574,10 +1882,12 @@ LRESULT CALLBACK Browser::EditCtlProc(HWND h, UINT m, WPARAM w, LPARAM l) {
   return CallWindowProcW(b->oldEditProc_, h, m, w, l);
 }
 
-void Browser::BeginEdit(Node* n) {
+void Browser::BeginEdit(Tab* t, Node* n) {
   if (editCtl_) CommitEdit(false);
+  if (!IsAlive(t)) return;
   Rect r;
-  if (!current_->page->BoxRect(n, r)) return;
+  float ox = 0, oy = 0;
+  if (!t->page->BoxRect(n, r) || !FrameOrigin(t, ox, oy)) return;
   LayoutBox* box = n->layoutBox;
   float z = ZoomF();
   float cx = r.x, cy = r.y, cw = r.w, ch = r.h;
@@ -1587,7 +1897,7 @@ void Browser::BeginEdit(Node* n) {
     cw = box->ContentW();
     ch = box->ContentH();
   }
-  int x = (int)(cx * z - current_->scrollX), y = (int)(cy * z - current_->scrollY);
+  int x = (int)(cx * z + ox), y = (int)(cy * z + oy);
   int w = std::max(20, (int)(cw * z)), h = std::max(14, (int)(ch * z));
   bool multi = n->tag == "textarea";
   std::string type = AsciiLower(n->Attr("type"));
@@ -1598,6 +1908,7 @@ void Browser::BeginEdit(Node* n) {
   editCtl_ = CreateWindowExW(0, L"EDIT", L"", style, x, y, w, h, view_, 0, App::Get().instance, 0);
   if (!editCtl_) return;
   editNode_ = n;
+  editTab_ = t;
   FontDesc fd = n->style ? FontDesc::FromStyle(*n->style) : FontDesc();
   SendMessageW(editCtl_, WM_SETFONT, (WPARAM)Fonts().Get(fd, z), FALSE);
   std::string value = n->formValueSet ? n->formValue : (multi ? n->TextContent() : n->Attr("value"));
@@ -1617,10 +1928,12 @@ void Browser::CommitEdit(bool submit) {
   if (!editCtl_) return;
   HWND ctl = editCtl_;
   Node* n = editNode_;
+  Tab* t = IsAlive(editTab_) ? editTab_ : 0;
   editCtl_ = 0;
   editNode_ = 0;
+  editTab_ = 0;
   bool changed = false;
-  if (n && current_) {
+  if (n && t) {
     std::string v = Narrow(WindowTextW(ctl));
     if (n->tag == "textarea") v = ReplaceAll(v, "\r\n", "\n");
     std::string old = n->formValueSet ? n->formValue : (n->tag == "textarea" ? n->TextContent() : n->Attr("value"));
@@ -1629,20 +1942,21 @@ void Browser::CommitEdit(bool submit) {
     n->formValueSet = true;
   }
   DestroyWindow(ctl);
-  if (!current_) return;
-  current_->page->Repaint();
-  InvalidateRect(view_, 0, FALSE);
+  if (!t) return;
+  int id = t->id;
+  t->page->Repaint();
+  Invalidate(t);
   if (changed) {
-    DispatchJs(current_, n, "input");
-    DispatchJs(current_, n, "change");
+    DispatchJs(t, n, "input");
+    if (IsAlive(TabById(id))) DispatchJs(t, n, "change");
   }
-  if (submit && n) {
+  if (submit && n && IsAlive(TabById(id))) {
     Node* form = Page::FormFor(n);
-    if (form) SubmitForm(current_, form, Page::DefaultSubmitButton(form), false);
+    if (form) SubmitForm(t, form, Page::DefaultSubmitButton(form), false);
   }
 }
 
-void Browser::ShowSelectPopup(Node* sel) {
+void Browser::ShowSelectPopup(Tab* t, Node* sel) {
   std::vector<Node*> opts;
   sel->FindAll("option", opts);
   if (opts.empty()) return;
@@ -1661,9 +1975,10 @@ void Browser::ShowSelectPopup(Node* sel) {
   }
   Rect r;
   POINT pt = {0, 0};
-  if (current_->page->BoxRect(sel, r)) {
-    pt.x = (LONG)(r.x * ZoomF() - current_->scrollX);
-    pt.y = (LONG)(r.bottom() * ZoomF() - current_->scrollY);
+  float ox = 0, oy = 0;
+  if (t->page->BoxRect(sel, r) && FrameOrigin(t, ox, oy)) {
+    pt.x = (LONG)(r.x * ZoomF() + ox);
+    pt.y = (LONG)(r.bottom() * ZoomF() + oy);
   }
   ClientToScreen(view_, &pt);
   int cmd = TrackPopupMenu(menu, TPM_RETURNCMD | TPM_LEFTALIGN | TPM_TOPALIGN, pt.x, pt.y, 0, hwnd_, 0);
@@ -1671,11 +1986,13 @@ void Browser::ShowSelectPopup(Node* sel) {
   if (cmd >= ID_SELECT_BASE && cmd < ID_SELECT_BASE + (int)opts.size()) {
     bool changed = sel->selectedIndex != cmd - ID_SELECT_BASE;
     sel->selectedIndex = cmd - ID_SELECT_BASE;
-    current_->page->Repaint();
-    InvalidateRect(view_, 0, FALSE);
+    if (!IsAlive(t)) return;
+    t->page->Repaint();
+    Invalidate(t);
     if (changed) {
-      DispatchJs(current_, sel, "input");
-      DispatchJs(current_, sel, "change");
+      int id = t->id;
+      DispatchJs(t, sel, "input");
+      if (IsAlive(TabById(id))) DispatchJs(t, sel, "change");
     }
   }
 }
@@ -1791,11 +2108,13 @@ void Browser::ShowFindBar(bool show) {
 
 void Browser::ShowContextMenu(int x, int y) {
   Tab* t = current_;
-  Node* n = NodeAt(x, y);
+  Tab* hit = 0;
+  Node* n = NodeAt(x, y, &hit);
+  Tab* ht = hit ? hit : t;
   ctxLink_.clear();
   ctxImage_.clear();
   Node* link = Page::LinkFor(n);
-  if (link) ctxLink_ = t->page->LinkUrl(link);
+  if (link) ctxLink_ = ht->page->LinkUrl(link);
   if (n && n->Is("img") && n->layoutBox && !n->layoutBox->imageUrl.empty()) ctxImage_ = n->layoutBox->imageUrl;
   HMENU menu = CreatePopupMenu();
   if (!ctxLink_.empty()) {
@@ -2147,22 +2466,23 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       if (id >= kTimerAnimBase) {
         KillTimer(hwnd_, id);
         Tab* t = TabById((int)(id - kTimerAnimBase));
-        if (!t || t != current_ || !t->rendered) return 0;
+        if (!t || !Shown(t) || !t->rendered) return 0;
         if (scriptDepth_ > 0) {
           SetTimer(hwnd_, id, 50, 0);
           return 0;
         }
         BeginScript();
+        int tid = t->id;
         int r = t->page->TickAnimations();
         EndScript(t);  // event listeners may have changed the page
-        if (TabIndex(t) < 0) return 0;
+        if (!IsAlive(TabById(tid))) return 0;
         if (r == 2) {
-          t->page->Relayout(ViewportWidth(), ViewportHeight());
-          UpdateScrollBars();
+          t->page->Relayout(VW(t), VH(t));
+          if (t == current_) UpdateScrollBars();
         } else if (r == 1) {
           t->page->Repaint();
         }
-        if (r && t == current_) InvalidateRect(view_, 0, FALSE);
+        if (r) Invalidate(t);
         ScheduleAnimation(t);
         return 0;
       }
@@ -2197,9 +2517,18 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
       if (id == kTimerRelayout) {
         KillTimer(hwnd_, kTimerRelayout);
         relayoutPending_ = false;
-        if (current_ && current_->needsRelayout && current_->rendered) {
-          current_->needsRelayout = false;
-          RenderTab(current_, false);
+        if (current_) {
+          std::vector<Tab*> list(1, current_);
+          CollectFrames(current_, list);
+          std::vector<int> ids;
+          for (size_t i = 0; i < list.size(); ++i) ids.push_back(list[i]->id);
+          for (size_t i = 0; i < ids.size(); ++i) {
+            Tab* x = TabById(ids[i]);
+            if (x && x->needsRelayout && x->rendered) {
+              x->needsRelayout = false;
+              RenderTab(x, false);
+            }
+          }
         }
       } else if (id == kTimerResize) {
         KillTimer(hwnd_, kTimerResize);
@@ -2243,26 +2572,62 @@ LRESULT Browser::HandleMain(UINT m, WPARAM w, LPARAM l) {
         SetTimer(hwnd_, kTimerWake, 50, 0);  // a script dialog is open: later
         return 0;
       }
-      for (size_t i = 0; i < tabList_.size(); ++i) {
-        Tab* t = tabList_[i];
-        ScriptEngine* js = t->page->script();
-        if (!js || !js->HasAsync()) continue;
-        BeginScript();
-        js->PumpAsync();
-        EndScript(t);
+      {
+        std::vector<Tab*> all = AllTabs();
+        std::vector<int> ids;
+        for (size_t i = 0; i < all.size(); ++i) ids.push_back(all[i]->id);
+        for (size_t i = 0; i < ids.size(); ++i) {
+          Tab* t = TabById(ids[i]);
+          ScriptEngine* js = t ? t->page->script() : 0;
+          if (!js || !js->HasAsync()) continue;
+          BeginScript();
+          js->PumpAsync();
+          EndScript(t);
+        }
+      }
+      DeliverFrameMessages();
+      if (scriptDepth_ == 0 && !frameLoads_.empty()) {
+        std::vector<int> loads;
+        loads.swap(frameLoads_);
+        for (size_t i = 0; i < loads.size(); ++i) PostMessageW(hwnd_, WM_KITE_FRAMELOAD, loads[i], 0);
       }
       // New video frames, player state changes or a video size to lay out.
       if (current_ && current_->rendered && TabIndex(current_) >= 0) {
-        int r = current_->page->TickMedia();
-        if (r == 2) {
-          current_->page->Relayout(ViewportWidth(), ViewportHeight());
-          UpdateScrollBars();
-        } else if (r == 1) {
-          current_->page->Repaint();
+        std::vector<Tab*> list(1, current_);
+        CollectFrames(current_, list);
+        for (size_t i = 0; i < list.size(); ++i) {
+          Tab* t = list[i];
+          if (!t->rendered) continue;
+          int r = t->page->TickMedia();
+          if (r == 2) {
+            t->page->Relayout(VW(t), VH(t));
+            if (t == current_) UpdateScrollBars();
+          } else if (r == 1) {
+            t->page->Repaint();
+          }
+          if (r) InvalidateRect(view_, 0, FALSE);
         }
-        if (r) InvalidateRect(view_, 0, FALSE);
       }
       return 0;
+    case WM_KITE_FRAMEMSG:
+      DeliverFrameMessages();
+      return 0;
+    case WM_KITE_FRAMELOAD: {
+      Tab* f = FrameById((int)w);
+      if (!f || !f->frameNode || !f->parentTab) return 0;
+      if (scriptDepth_ > 0) {
+        frameLoads_.push_back((int)w);  // a script dialog is open: later
+        SetTimer(hwnd_, kTimerWake, 50, 0);
+        return 0;
+      }
+      DispatchJs(f->parentTab, f->frameNode, "load");
+      return 0;
+    }
+    case WM_KITE_FRAMEGONE: {
+      Tab* f = FrameById((int)w);
+      if (f && !f->frameNode) DestroyFrame(f);
+      return 0;
+    }
     case WM_KITE_HISTGO: {
       Tab* t = TabById((int)w);
       if (!t) return 0;
@@ -2436,6 +2801,7 @@ void TabScriptHost::SetTitle(const std::string& title) {
   Tab* t = g_browser->TabById(tabId);
   if (!t) return;
   t->title = title;
+  if (t->parentTab) return;  // frames do not name the tab
   g_browser->UpdateTabLabel(t);
   if (t == g_browser->current_) g_browser->UpdateUi();
 }
@@ -2451,6 +2817,7 @@ void TabScriptHost::ScrollTo(float x, float y) {
   } else {
     t->scrollX = x * z;
     t->scrollY = y * z;
+    g_browser->Invalidate(t);
   }
 }
 
@@ -2512,9 +2879,79 @@ bool TabScriptHost::FetchSync(const std::string& url, std::string& body) {
   return true;
 }
 
+int TabScriptHost::FrameDepth() {
+  int d = 0;
+  for (Tab* t = g_browser->TabById(tabId); t && t->parentTab; t = t->parentTab) ++d;
+  return d;
+}
+
+namespace {
+
+std::string OriginOf(Tab* t) {
+  Url u = Url::Parse(t->url);
+  return u.valid() ? u.Origin() : std::string("null");
+}
+
+}  // namespace
+
+// target: -1 parent, -2 top, > 0 a frame of the same tab.
+static Tab* FrameTarget(Browser* b, Tab* from, int target) {
+  if (!from) return 0;
+  if (target == -1) return from->parentTab;
+  if (target == -2) return Browser::Root(from);
+  Tab* f = b->TabById(target);
+  return f && f->parentTab && Browser::Root(f) == Browser::Root(from) ? f : 0;
+}
+
+void TabScriptHost::PostFrameMessage(int target, const std::string& data, const std::string& targetOrigin) {
+  Browser* b = g_browser;
+  Tab* from = b->TabById(tabId);
+  Tab* to = FrameTarget(b, from, target);
+  if (!to) return;
+  std::string origin = OriginOf(from);
+  if (targetOrigin != "*") {
+    std::string want = targetOrigin == "/" ? origin : Url::Parse(targetOrigin).Origin();
+    if (want != OriginOf(to)) return;  // silently dropped, like other browsers
+  }
+  FrameMessage m;
+  m.targetTab = to->id;
+  m.data = data;
+  m.origin = origin;
+  bool fromAncestor = false;
+  for (Tab* p = to->parentTab; p; p = p->parentTab)
+    if (p == from) fromAncestor = true;
+  m.source = fromAncestor ? -1 : from->id;
+  b->frameMessages_.push_back(m);
+  PostMessageW(b->hwnd_, WM_KITE_FRAMEMSG, 0, 0);
+}
+
+std::string TabScriptHost::FrameUrl(int target) {
+  Tab* from = g_browser->TabById(tabId);
+  Tab* to = FrameTarget(g_browser, from, target);
+  return to && OriginOf(to) == OriginOf(from) ? to->url : std::string();
+}
+
+void TabScriptHost::NavigateFrame(int target, const std::string& url) {
+  Tab* from = g_browser->TabById(tabId);
+  Tab* to = FrameTarget(g_browser, from, target);
+  if (!to) return;
+  // Frames may not redirect the page that embeds them unless same-origin.
+  if (target < 0 && OriginOf(to) != OriginOf(from)) {
+    from->page->script()->Log("Fehler: Navigation des einbettenden Fensters blockiert: " + url);
+    return;
+  }
+  Url u = from->page->ResolveUrl(url);
+  if (!u.valid()) return;
+  to->jsNavPending = true;
+  to->jsNavIsForm = false;
+  to->jsNavReplace = false;
+  to->jsNavUrl = u.Spec();
+  PostMessageW(g_browser->hwnd_, WM_KITE_JSNAV, to->id, 0);
+}
+
 void Browser::EndScript(Tab* t) {
   if (--scriptDepth_ > 0) return;
-  if (t && TabIndex(t) >= 0) AfterScript(t);
+  if (IsAlive(t)) AfterScript(t);
   // Network results that arrived while a script dialog was open.
   std::vector<FetchJob*> jobs;
   jobs.swap(deferredJobs_);
@@ -2605,7 +3042,7 @@ void Browser::AfterScript(Tab* t) {
     PostMessageW(hwnd_, WM_KITE_JSNAV, t->id, 0);
   }
   // Canvas drawing only needs a repaint.
-  if (js->TakeCanvasDirty() && t == current_) InvalidateRect(view_, 0, FALSE);
+  if (js->TakeCanvasDirty()) Invalidate(t);
   // DOM changes: restyle and relayout.
   if (js->TakeDirty() && t->rendered) {
     page->ScriptMutated();
@@ -2614,18 +3051,19 @@ void Browser::AfterScript(Tab* t) {
     RequestImages(t);
     RequestFonts(t);
     UpdateTabLabel(t);
-    if (t == current_) {
-      if (editCtl_ && editNode_ && !editNode_->layoutBox) CommitEdit(false);
-      UpdateScrollBars();
-      InvalidateRect(view_, 0, FALSE);
-    }
+    if (editCtl_ && editTab_ == t && editNode_ && !editNode_->layoutBox) CommitEdit(false);
+    if (t == current_) UpdateScrollBars();
+    Invalidate(t);
+    int id = t->id;
+    SyncFrames(t);
+    if (!IsAlive(TabById(id))) return;
   }
   ScheduleScriptTimer(t);
   ScheduleAnimation(t);
 }
 
 void Browser::ScheduleAnimation(Tab* t) {
-  if (t == current_ && t->rendered && t->page->AnimationsActive())
+  if (Shown(t) && t->rendered && t->page->AnimationsActive())
     SetTimer(hwnd_, kTimerAnimBase + t->id, 33, 0);
   else
     KillTimer(hwnd_, kTimerAnimBase + t->id);
@@ -2660,7 +3098,7 @@ void Browser::ScheduleScriptTimer(Tab* t) {
     return;
   }
   // Background tabs are throttled like in other browsers.
-  int minDelay = t == current_ ? 10 : 1000;
+  int minDelay = Shown(t) ? 10 : 1000;
   SetTimer(hwnd_, kTimerScriptBase + t->id, std::max(delay, minDelay), 0);
 }
 
@@ -2847,7 +3285,24 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       }
       UINT lines = 3;
       SystemParametersInfoW(SPI_GETWHEELSCROLLLINES, 0, &lines, 0);
-      ScrollBy(0, -(float)delta / WHEEL_DELTA * (float)lines * 40.0f);
+      float dy = -(float)delta / WHEEL_DELTA * (float)lines * 40.0f;
+      // Scroll the innermost frame under the mouse that can still scroll.
+      POINT pt = {GET_X_LPARAM(l), GET_Y_LPARAM(l)};
+      ScreenToClient(h, &pt);
+      Tab* ht = 0;
+      NodeAt(pt.x, pt.y, &ht);
+      float z = ZoomF();
+      for (Tab* f = ht; f && f->parentTab; f = f->parentTab) {
+        if (f->frameNode && AsciiLower(f->frameNode->Attr("scrolling")) == "no") continue;
+        float maxY = std::max(0.0f, f->page->ContentHeight() * z - f->frameH * z);
+        float ny = std::max(0.0f, std::min(maxY, f->scrollY + dy));
+        if (ny != f->scrollY) {
+          f->scrollY = ny;
+          Invalidate(f);
+          return 0;
+        }
+      }
+      ScrollBy(0, dy);
       return 0;
     }
     case WM_KEYDOWN: {
@@ -2911,7 +3366,9 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
         }
         return 0;
       }
-      Node* n = NodeAt(x, y);
+      Tab* ht = 0;
+      Node* n = NodeAt(x, y, &ht);
+      if (!ht) ht = t;
       Node* link = Page::LinkFor(n);
       bool pointer = link != 0;
       bool text = false;
@@ -2936,7 +3393,7 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
       }
       SetCursor(LoadCursorW(0, pointer ? IDC_HAND : text ? IDC_IBEAM : IDC_ARROW));
       static std::string lastLink;
-      std::string href = link ? t->page->LinkUrl(link) : std::string();
+      std::string href = link ? ht->page->LinkUrl(link) : std::string();
       if (href != lastLink) {
         lastLink = href;
         SetStatus(href.empty() ? t->status : href);
@@ -2956,9 +3413,10 @@ LRESULT Browser::HandleView(HWND h, UINT m, WPARAM w, LPARAM l) {
     }
     case WM_MBUTTONUP: {
       if (!t) return 0;
-      Node* link = Page::LinkFor(NodeAt(GET_X_LPARAM(l), GET_Y_LPARAM(l)));
-      if (link) {
-        std::string url = t->page->LinkUrl(link);
+      Tab* ht = 0;
+      Node* link = Page::LinkFor(NodeAt(GET_X_LPARAM(l), GET_Y_LPARAM(l), &ht));
+      if (link && ht) {
+        std::string url = ht->page->LinkUrl(link);
         if (!url.empty()) {
           Tab* nt = NewTab("about:blank", false);
           Navigate(nt, url, t->url);

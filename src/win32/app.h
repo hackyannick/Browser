@@ -188,6 +188,13 @@ class Renderer {
  public:
   // Rasterized inline SVGs reference DOM nodes; drop them when documents change.
   void ClearSvgCache() { svgCache_.clear(); }
+  // <iframe> documents (kFrame items): display list and scroll position
+  // (CSS px) of a frame, or null.
+  typedef const DisplayList* (*FrameResolver)(void* ctx, int frameId, float& scrollX, float& scrollY);
+  void SetFrameResolver(FrameResolver r, void* ctx) {
+    frameResolver_ = r;
+    frameCtx_ = ctx;
+  }
 
  private:
   void ApplyClip();
@@ -197,7 +204,10 @@ class Renderer {
     float layerX = 0, layerY = 0;  // offset of the current layer in parent device space
     int width = 0, height = 0;
     int fixedDepth = 0;
+    int frameDepth = 0;
   };
+  FrameResolver frameResolver_ = 0;
+  void* frameCtx_ = 0;
   void PaintRange(PaintCtx& pc, size_t begin, size_t end);
   void DrawTransformed(PaintCtx& pc, size_t begin, size_t end, float ox, float oy);
 
@@ -214,6 +224,7 @@ class Renderer {
 // Built-in pages.
 std::string StartPageHtml();
 std::string ErrorPageHtml(const std::string& url, const std::string& message);
+std::string FrameBlockedHtml(const std::string& url);
 std::string AboutPageHtml();
 std::string BookmarksPageHtml();
 

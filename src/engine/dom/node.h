@@ -17,6 +17,11 @@ struct Attribute {
   std::string value;
 };
 
+// Called when an <iframe> element with a frame is destroyed (the platform
+// then discards the frame's document).
+typedef void (*FrameNodeGoneFunc)(int frameId);
+void SetFrameNodeGoneHandler(FrameNodeGoneFunc fn);
+
 class Node {
  public:
   enum Type { kDocument, kElement, kText, kComment, kDoctype, kShadowRoot };
@@ -39,6 +44,7 @@ class Node {
   int scriptHandle = 0;            // JavaScript wrapper id (0 = none)
   int canvasId = 0;                // <canvas> bitmap (see canvas/canvas.h)
   int mediaId = 0;                 // <audio>/<video> player (see media/media.h)
+  int frameId = 0;                 // <iframe> document shown by the platform (kFrame items)
   bool scriptDone = false;         // <script> already executed
   // Shadow DOM: the shadow tree attached to this element (a kShadowRoot
   // node whose |host| points back here).

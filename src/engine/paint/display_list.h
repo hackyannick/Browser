@@ -15,7 +15,7 @@ namespace kite {
 
 struct DisplayItem {
   enum Type { kRect, kText, kImage, kPushClip, kPopClip, kEllipse, kSvg, kRoundRect, kShadow,
-              kBeginFixed, kEndFixed, kBeginTransform, kEndTransform };
+              kBeginFixed, kEndFixed, kBeginTransform, kEndTransform, kFrame };
   Type type;
   Rect rect;        // rect / ellipse bounds / image destination area / clip
   Color color;
@@ -50,6 +50,9 @@ struct DisplayItem {
   // kRoundRect ring: only the part belonging to this border side (0 top,
   // 1 right, 2 bottom, 3 left; split along the diagonals), -1 = whole ring.
   int side = -1;
+  // kFrame: an <iframe>'s document, drawn by the platform into |rect| (the
+  // content box) from its own display list, looked up by this id.
+  int frameId = 0;
   bool HasRadii() const { return radii[0] > 0 || radii[1] > 0 || radii[2] > 0 || radii[3] > 0; }
 
   DisplayItem()
@@ -74,6 +77,7 @@ struct DisplayList {
   std::vector<DisplayItem> items;
   std::vector<HitRegion> hits;
   Color background;
+  bool transparentCanvas = true;  // no root/body background (iframes show through)
   float width, height;
   DisplayList() : background(255, 255, 255), width(0), height(0) {}
   void Clear() {

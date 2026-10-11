@@ -513,6 +513,8 @@ void TestWebPAndWoff2() {
   CHECK(!FontToSfnt(broken, sfnt));
 }
 
+int g_testFrameDepth = 0;
+
 class TestHost : public ScriptHost {
  public:
   std::string cookies, title, navigated, alerted;
@@ -529,6 +531,14 @@ class TestHost : public ScriptHost {
   void SetTitle(const std::string& t) { title = t; }
   void ScrollTo(float x, float y) { sx = x; sy = y; }
   void GetScroll(float& x, float& y) { x = sx; y = sy; }
+  // Frames: messages posted to other documents.
+  int depth = g_testFrameDepth;
+  std::vector<std::string> posted;
+  int FrameDepth() { return depth; }
+  void PostFrameMessage(int target, const std::string& data, const std::string& origin) {
+    posted.push_back(IntToString(target) + "|" + origin + "|" + data);
+  }
+  std::string FrameUrl(int target) { return target == -1 ? "http://test.local/top.html" : ""; }
   std::map<std::string, std::string> files;  // for FetchSync
   bool FetchSync(const std::string& url, std::string& body) {
     if (!files.count(url)) return false;
@@ -1447,6 +1457,55 @@ void TestMedia() {
   }
 }
 
+void TestFrames() {
+  // The painter refers to the frame's document by id.
+  {
+    ScriptPage p("<div id=out></div><iframe id=f src=a.html width=200 height=100 style='border:0'></iframe>");
+    Node* f = p.ById("f");
+    CHECK(f != 0);
+    if (!f) return;
+    f->frameId = 7;
+    p.page.Repaint();
+    const DisplayList& dl = p.page.display();
+    int found = 0;
+    for (size_t i = 0; i < dl.items.size(); ++i)
+      if (dl.items[i].type == DisplayItem::kFrame) {
+        ++found;
+        CHECK_EQ(dl.items[i].frameId, 7);
+        CHECK_NEAR(dl.items[i].rect.w, 200, 0.5);
+        CHECK_NEAR(dl.items[i].rect.h, 100, 0.5);
+      }
+    CHECK_EQ(found, 1);
+    // contentWindow talks to the platform.
+    CHECK_EQ(p.Eval("typeof document.getElementById('f').contentWindow.postMessage"), "function");
+    CHECK_EQ(p.Eval("document.getElementById('f').contentDocument"), "null");
+    p.Eval("(document.getElementById('f').contentWindow.postMessage({ a: [1, 2] }, '*'), 1)");
+    CHECK_EQ(p.host.posted.size(), 1u);
+    if (!p.host.posted.empty()) CHECK(StartsWith(p.host.posted[0], "7|*|"));
+    CHECK_EQ(p.Eval("window.parent === window && window.top === window"), "true");
+    CHECK_EQ(p.Eval("window.length"), "1");
+    // Messages from the frame (source 7) arrive as MessageEvents.
+    p.page.script()->Execute("window.got = ''; addEventListener('message', function (e) {"
+                             "  got = e.data.x + '@' + e.origin + ':' + (e.source === document.getElementById('f').contentWindow); });",
+                             "test", 0);
+    p.page.script()->DeliverFrameMessage(p.Eval("__kiteSerialize({ x: 'hi' })"), "http://other.example", 7);
+    CHECK_EQ(p.Eval("got"), "hi@http://other.example:true");
+  }
+  // Inside a frame: parent and top are stand-ins.
+  {
+    g_testFrameDepth = 1;
+    ScriptPage p("<div id=out></div>");
+    g_testFrameDepth = 0;
+    CHECK_EQ(p.Eval("window.parent !== window && window.top === window.parent"), "true");
+    p.Eval("(parent.postMessage('x', '/'), 1)");
+    CHECK_EQ(p.host.posted.size(), 1u);
+    if (!p.host.posted.empty()) CHECK(StartsWith(p.host.posted[0], "-1|/|"));
+    CHECK_EQ(p.Eval("parent.location.href"), "http://test.local/top.html");
+    CHECK_EQ(p.Eval("(function () { try { parent.document; return 'no'; } catch (e) { return e.name; } })()"),
+             "SecurityError");
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1485,6 +1544,7 @@ int main() {
   TestAsyncApis();
   TestTls13();
   TestMedia();
+  TestFrames();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

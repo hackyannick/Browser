@@ -649,6 +649,34 @@ KITE_FN(MdStatus) {
   return arr;
 }
 
+// ---------------------------------------------------------------------------
+// Frames
+
+KITE_FN(FrameDepth) { return JS_NewInt32(ctx, Engine(ctx)->host()->FrameDepth()); }
+
+KITE_FN(FrameIdOf) {
+  ARGS_AT_LEAST(1);
+  Node* n = Arg(ctx, argv[0]);
+  return JS_NewInt32(ctx, n ? n->frameId : 0);
+}
+
+KITE_FN(PostFrame) {
+  ARGS_AT_LEAST(3);
+  Engine(ctx)->host()->PostFrameMessage(Int(ctx, argv[0]), Str(ctx, argv[1]), Str(ctx, argv[2]));
+  return JS_UNDEFINED;
+}
+
+KITE_FN(FrameUrl) {
+  ARGS_AT_LEAST(1);
+  return NewStr(ctx, Engine(ctx)->host()->FrameUrl(Int(ctx, argv[0])));
+}
+
+KITE_FN(FrameNav) {
+  ARGS_AT_LEAST(2);
+  Engine(ctx)->host()->NavigateFrame(Int(ctx, argv[0]), Str(ctx, argv[1]));
+  return JS_UNDEFINED;
+}
+
 KITE_FN(MdCanPlay) {
   ARGS_AT_LEAST(1);
   return NewStr(ctx, MediaCanPlayType(Str(ctx, argv[0])));
@@ -1337,6 +1365,8 @@ ScriptEngine::ScriptEngine(Page* page, ScriptHost* host)
       {"wsOpen", WsOpen, 2}, {"wsSend", WsSend, 3}, {"wsClose", WsClose, 3}, {"wsBuffered", WsBuffered, 1},
       {"attachShadow", AttachShadow, 1}, {"shadow", ShadowOf, 1}, {"host", HostOf, 1},
       {"setDefined", SetDefined, 1}, {"customs", Customs, 1}, {"connected", Connected, 1}, {"histLen", HistLen, 0}, {"histGo", HistGo, 1},
+      {"frameDepth", FrameDepth, 0}, {"frameId", FrameIdOf, 1}, {"postFrame", PostFrame, 3},
+      {"frameUrl", FrameUrl, 1}, {"frameNav", FrameNav, 2},
       {"mdLoad", MdLoad, 1}, {"mdCmd", MdCmd, 3}, {"mdStatus", MdStatus, 1}, {"mdCanPlay", MdCanPlay, 1},
   };
   for (size_t i = 0; i < sizeof fns / sizeof fns[0]; ++i)
@@ -2016,6 +2046,17 @@ bool ScriptEngine::PumpAsync() {
     }
   }
   return ran;
+}
+
+void ScriptEngine::DeliverFrameMessage(const std::string& data, const std::string& origin, int source) {
+  JSContext* ctx = (JSContext*)ctx_;
+  deadline_ = NowMs() + timeLimit_;
+  JSValue args[3] = {NewStr(ctx, data), NewStr(ctx, origin), JS_NewInt32(ctx, source)};
+  CallKiteHook(this, ctx, "__kiteFrameMessage", 3, args, 0);
+  JS_FreeValue(ctx, args[0]);
+  JS_FreeValue(ctx, args[1]);
+  RunJobs();
+  deadline_ = 0;
 }
 
 bool ScriptEngine::HasAsync() const {

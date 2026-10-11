@@ -316,6 +316,37 @@ void Renderer::PaintRange(PaintCtx& pc, size_t begin, size_t end) {
       continue;
     }
     if (it.type == DisplayItem::kEndTransform) continue;
+    if (it.type == DisplayItem::kFrame) {
+      float fsx = 0, fsy = 0;
+      const DisplayList* sub = frameResolver_ && pc.frameDepth < 4 ? frameResolver_(frameCtx_, it.frameId, fsx, fsy) : 0;
+      if (!sub || clip_.left >= clip_.right || clip_.top >= clip_.bottom) continue;
+      if (gdiDirty) {
+        GdiFlush();
+        gdiDirty = false;
+      }
+      // The frame's canvas, then its items: document (x, y) maps to
+      // (rect.x + x - scroll) in this document; fixed items ignore the scroll.
+      if (!sub->transparentCanvas && sub->background.a > 0) {
+        Color bg = sub->background;
+        bg.a = (uint8_t)(bg.a * std::max(0.0f, std::min(1.0f, it.alpha)));
+        FillRect((int)std::floor(it.rect.x * zoom - ox), (int)std::floor(it.rect.y * zoom - oy),
+                 (int)std::ceil(it.rect.right() * zoom - ox), (int)std::ceil(it.rect.bottom() * zoom - oy), bg);
+      }
+      PaintCtx inner = pc;
+      inner.dl = sub;
+      inner.fixedDepth = 0;
+      inner.frameDepth = pc.frameDepth + 1;
+      inner.layerX = ox - it.rect.x * zoom;
+      inner.layerY = oy - it.rect.y * zoom;
+      inner.scrollX = fsx * zoom;
+      inner.scrollY = fsy * zoom;
+      RECT keep = clip_;
+      PaintRange(inner, 0, sub->items.size());
+      GdiFlush();
+      clip_ = keep;
+      ApplyClip();
+      continue;
+    }
     if (it.type == DisplayItem::kPopClip) {
       if (!clipStack_.empty()) {
         clip_ = clipStack_.back();

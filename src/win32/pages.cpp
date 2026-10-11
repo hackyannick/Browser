@@ -89,6 +89,14 @@ std::string ErrorPageHtml(const std::string& url, const std::string& message) {
   return html;
 }
 
+// Shown inside an <iframe> whose page does not allow being embedded.
+std::string FrameBlockedHtml(const std::string& url) {
+  return "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><style>body{margin:0;font:13px Tahoma,sans-serif;"
+         "background:#f4f4f4;color:#444}div{padding:12px}a{color:#0645ad}</style></head><body><div>"
+         "Diese Seite erlaubt keine Einbettung.<br><a href=\"" + HtmlEscape(url) +
+         "\" target=\"_blank\">In neuem Tab &ouml;ffnen</a></div></body></html>";
+}
+
 std::string AboutPageHtml() {
   std::string html = "<!DOCTYPE html><html><head><meta charset=\"utf-8\"><title>&Uuml;ber Kite</title><style>";
   html += kCommonStyle;

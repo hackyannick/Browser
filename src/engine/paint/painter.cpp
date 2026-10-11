@@ -98,6 +98,7 @@ void Painter::Paint(LayoutBox* root, float viewportW, float viewportH, DisplayLi
     }
   }
   out.background = bg.transparent() ? Color(255, 255, 255) : Color(bg.r, bg.g, bg.b);
+  out.transparentCanvas = bg.transparent();
   PaintBox(root, 0, 0, 1);
 }
 
@@ -769,6 +770,22 @@ void Painter::PaintReplaced(LayoutBox* b, float ax, float ay, float alpha) {
     it.color = s->color;
     it.alpha = alpha;
     out_->items.push_back(it);
+    return;
+  }
+  if (tag == "iframe" && el->frameId) {
+    DisplayItem clip;
+    clip.type = DisplayItem::kPushClip;
+    clip.rect = content;
+    out_->items.push_back(clip);
+    DisplayItem it;
+    it.type = DisplayItem::kFrame;
+    it.rect = content;
+    it.frameId = el->frameId;
+    it.alpha = alpha;
+    out_->items.push_back(it);
+    DisplayItem pop;
+    pop.type = DisplayItem::kPopClip;
+    out_->items.push_back(pop);
     return;
   }
   if (tag == "iframe") {

@@ -46,6 +46,15 @@ class ScriptHost {
   virtual bool PushState(const std::string& url, bool replace, int stateId) { return true; }
   virtual int HistoryLength() { return 1; }
   virtual void HistoryGo(int delta) {}
+  // <iframe> documents: nesting depth (0 = top-level page) and the
+  // cross-document operations of window.parent/top and iframe.contentWindow.
+  // |target| is -1 for the parent, -2 for the top-level page and the frame
+  // id (iframe element's frameId) for embedded documents. |data| is a
+  // structured-clone serialization.
+  virtual int FrameDepth() { return 0; }
+  virtual void PostFrameMessage(int target, const std::string& data, const std::string& targetOrigin) {}
+  virtual std::string FrameUrl(int target) { return std::string(); }  // empty when cross-origin
+  virtual void NavigateFrame(int target, const std::string& url) {}
 };
 
 // A network request started by fetch()/XMLHttpRequest.
@@ -102,6 +111,9 @@ class ScriptEngine {
   // delivers their events (call it when WakeUi() fired). Returns true if
   // any script ran.
   bool PumpAsync();
+  // window.postMessage from another frame; |source| is -1 for the parent
+  // or the sender's frame id.
+  void DeliverFrameMessage(const std::string& data, const std::string& origin, int source);
   bool HasAsync() const;
   int StartWorker(const std::string& url, bool module, const std::string& name);
   void PostToWorker(int id, const std::string& data);

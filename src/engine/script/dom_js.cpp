@@ -2244,7 +2244,7 @@ Object.assign(G, {
   prompt: (m, d) => K.prompt(m === undefined ? '' : String(m), d === undefined ? '' : String(d)),
   print() {}, focus() {}, blur() {}, close() {}, stop() {},
   open: (url) => { if (url) K.navigate(String(url), false); return null; },
-  postMessage(data) { setTimeout(() => G.dispatchEvent(new MessageEvent('message', { data, origin: location.origin, source: G })), 0); },
+  postMessage(data) { const c = __kiteDeserialize(__kiteSerialize(data)); setTimeout(() => G.dispatchEvent(new MessageEvent('message', { data: c, origin: location.origin, source: G })), 0); },
   getComputedStyle, matchMedia: q => new MediaQueryList(String(q)), getSelection: () => selection,
   scrollTo(x, y) { if (x && typeof x === 'object') { y = x.top; x = x.left; } K.scrollTo(+x || 0, +y || 0); },
   scroll(x, y) { G.scrollTo(x, y); },
@@ -2266,6 +2266,61 @@ Object.assign(G, {
   devicePixelRatio: 1, isSecureContext: true, origin: '', name: '', closed: false, opener: null, frameElement: null,
   speechSynthesis: undefined, indexedDB: undefined, caches: undefined,
 });
+// ------------------------------------------------------------------ Frames
+// Other documents (parent, top, iframes) live in their own script engines;
+// scripts reach them through these stand-ins (like cross-origin windows).
+const frameProxies = new Map();
+function frameProxy(target) {
+  let p = frameProxies.get(target);
+  if (p) return p;
+  const loc = {
+    get href() { return K.frameUrl(target); },
+    set href(u) { K.frameNav(target, String(u)); },
+    assign(u) { K.frameNav(target, String(u)); },
+    replace(u) { K.frameNav(target, String(u)); },
+    reload() {},
+    toString() { return K.frameUrl(target); },
+  };
+  p = {
+    postMessage(data, targetOrigin) {
+      if (targetOrigin && typeof targetOrigin === 'object') targetOrigin = targetOrigin.targetOrigin;
+      K.postFrame(target, __kiteSerialize(data), targetOrigin === undefined ? '/' : String(targetOrigin));
+    },
+    get location() { return loc; },
+    set location(u) { K.frameNav(target, String(u)); },
+    get closed() { return false; },
+    get document() { throw new DOMException('Blocked a frame from accessing a cross-origin frame.', 'SecurityError'); },
+    get top() { return G.top; },
+    get parent() { return target === -2 ? p : G.top; },
+    get frames() { return p; },
+    get length() { return 0; },
+    focus() {}, blur() {}, close() {},
+    addEventListener() {}, removeEventListener() {},
+  };
+  p.window = p;
+  p.self = p;
+  frameProxies.set(target, p);
+  return p;
+}
+(function () {
+  const depth = K.frameDepth();
+  if (depth > 0) {
+    Object.defineProperty(G, 'parent', { get: () => frameProxy(-1), configurable: true });
+    Object.defineProperty(G, 'top', { get: () => depth === 1 ? frameProxy(-1) : frameProxy(-2), configurable: true });
+  }
+  Object.defineProperty(G, 'length', { get: () => doc.querySelectorAll('iframe').length, configurable: true });
+  const P = HTMLElement.prototype;
+  Object.defineProperty(P, 'contentWindow', { get() { if (this.localName !== 'iframe') return undefined; const id = K.frameId(this._h); return id ? frameProxy(id) : null; }, configurable: true });
+  Object.defineProperty(P, 'contentDocument', { get() { return this.localName === 'iframe' ? null : undefined; }, configurable: true });
+  Object.defineProperty(P, 'srcdoc', { get() { return this.getAttribute('srcdoc') || ''; }, set(v) { this.setAttribute('srcdoc', String(v)); }, configurable: true });
+})();
+G.__kiteFrameMessage = function (data, origin, source) {
+  let d;
+  try { d = __kiteDeserialize(data); } catch (e) { return; }
+  const ev = new MessageEvent('message', { data: d, origin, source: source === -1 ? G.parent : frameProxy(source) });
+  ev.isTrusted = true;
+  G.dispatchEvent(ev);
+};
 Object.defineProperty(G, 'innerWidth', { get: () => K.viewport()[0], configurable: true });
 Object.defineProperty(G, 'innerHeight', { get: () => K.viewport()[1], configurable: true });
 Object.defineProperty(G, 'outerWidth', { get: () => K.viewport()[0], configurable: true });

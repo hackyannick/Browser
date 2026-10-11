@@ -6,9 +6,16 @@
 
 namespace kite {
 
+namespace {
+FrameNodeGoneFunc g_frameNodeGone = 0;
+}  // namespace
+
+void SetFrameNodeGoneHandler(FrameNodeGoneFunc fn) { g_frameNodeGone = fn; }
+
 Node::~Node() {
   delete style;
   if (mediaId) DestroyMediaPlayer(mediaId);
+  if (frameId && g_frameNodeGone) g_frameNodeGone(frameId);
 }
 
 const Node* Node::TreeRoot() const {
