@@ -1,5 +1,6 @@
 #include "css/resolver.h"
 
+#include <cstring>
 #include <algorithm>
 #include <set>
 
@@ -586,8 +587,32 @@ void StyleResolver::AddAuthorSheet(std::shared_ptr<Stylesheet> sheet, const std:
 
 void StyleResolver::ClearAuthorSheets() { sheets_.resize(1); }
 
+bool StyleResolver::ContainerMatches(const StyleRule& rule, const Node* el, float viewportW, float viewportH) {
+  size_t plen = strlen(kContainerPrefix);
+  for (size_t m = 0; m < rule.media.size(); ++m) {
+    const std::string& q = rule.media[m];
+    if (!StartsWith(q, kContainerPrefix)) continue;
+    size_t sep = q.find('\x01', plen);
+    std::string name = q.substr(plen, sep - plen), cond = q.substr(sep + 1);
+    const Node* c = el->parent;
+    for (; c; c = c->parent) {
+      if (!c->IsElement() || !c->style || c->style->containerType == 0) continue;
+      if (name.empty()) break;
+      std::vector<std::string> names = SplitWhitespace(c->style->containerName);
+      if (std::find(names.begin(), names.end(), name) != names.end()) break;
+    }
+    if (!c) return false;
+    // Before the first layout the container is assumed as wide as the viewport.
+    float w = c->containerW >= 0 ? c->containerW : viewportW;
+    float h = c->containerH >= 0 ? c->containerH : viewportH;
+    if (!EvaluateContainerCondition(cond, w, c->style->containerType == 2 ? h : -1)) return false;
+  }
+  return true;
+}
+
 void StyleResolver::BuildIndex(const MediaContext& media) {
   index_ = RuleIndex();
+  hasContainerRules_ = false;
   std::map<std::string, bool> mediaCache;
   for (size_t si = 0; si < sheets_.size(); ++si) {
     const Stylesheet& sheet = *sheets_[si].sheet;
@@ -595,6 +620,10 @@ void StyleResolver::BuildIndex(const MediaContext& media) {
       const StyleRule& rule = sheet.rules[ri];
       bool ok = true;
       for (size_t m = 0; m < rule.media.size() && ok; ++m) {
+        if (StartsWith(rule.media[m], kContainerPrefix)) {
+          hasContainerRules_ = true;
+          continue;  // checked per element (ContainerMatches)
+        }
         std::map<std::string, bool>::iterator it = mediaCache.find(rule.media[m]);
         if (it == mediaCache.end()) {
           bool r = EvaluateMediaQueryList(rule.media[m], media);
@@ -763,6 +792,7 @@ void StyleResolver::ResolveElement(Node* el, const ComputedStyle& parent,
     const IndexedRule& ir = matched[i];
     std::vector<MatchedDecl>* target = &decls;
     if (ir.selector->pseudo == kPseudoUnsupported) continue;
+    if (hasContainerRules_ && !ContainerMatches(*ir.rule, el, media.width, media.height)) continue;
     if (ir.selector->pseudo == kPseudoBefore) target = &before;
     else if (ir.selector->pseudo == kPseudoAfter) target = &after;
     for (size_t k = 0; k < ir.rule->declarations.size(); ++k) {

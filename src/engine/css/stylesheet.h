@@ -109,6 +109,11 @@ struct MediaContext {
 };
 bool EvaluateMediaQueryList(const std::string& query, const MediaContext& ctx);
 
+// @container rules carry their condition among StyleRule::media, marked
+// with this prefix: prefix + container name + '\x01' + size condition.
+const char* const kContainerPrefix = "\x01container:";
+bool EvaluateContainerCondition(const std::string& cond, float width, float height);
+
 std::string StripCssComments(const std::string& css);
 
 }  // namespace kite

@@ -1670,6 +1670,31 @@ void TestGridLayout() {
   CHECK_NEAR(l1.x, 100 + (700 - 50) / 2.0f, 0.5);
 }
 
+void TestModernCss() {
+  TestPage p("<style>body{margin:0}.w{container:card / inline-size;width:400px}.t{height:5px;width:10px}"
+             "@container card (min-width: 500px){#a{width:99px}}@container card (width > 300px){#b{width:77px}}"
+             "#m{width:min(50%, 250px)}#x{width:max(10%, 300px)}#cl{width:clamp(100px, 50%, 350px)}"
+             "</style><div class=w><div id=a class=t></div><div id=b class=t></div></div>"
+             "<div id=m class=t></div><div id=x class=t></div><div id=cl class=t></div>",
+             800);
+  CHECK_NEAR(p.RectOf("a").w, 10, 0.5);
+  CHECK_NEAR(p.RectOf("b").w, 77, 0.5);
+  CHECK_NEAR(p.RectOf("m").w, 250, 0.5);
+  CHECK_NEAR(p.RectOf("x").w, 300, 0.5);
+  CHECK_NEAR(p.RectOf("cl").w, 350, 0.5);
+  Color c;
+  CHECK(ParseColor("oklch(62.8% 0.2577 29.23)", c, Color()));
+  CHECK(c.r >= 250 && c.g <= 5 && c.b <= 5);
+  CHECK(ParseColor("color-mix(in srgb, red 25%, blue)", c, Color()));
+  CHECK(c.r == 64 && c.g == 0 && c.b == 191);
+  CHECK(ParseColor("lab(50% 0 0)", c, Color()));
+  CHECK(c.r == c.g && c.g == c.b && c.r > 110 && c.r < 125);
+  CHECK(ParseColor("hwb(120 0% 0%)", c, Color()));
+  CHECK(c.r == 0 && c.g == 255 && c.b == 0);
+  CHECK(IsCssPropertySupported("display", "grid"));
+  CHECK(IsCssPropertySupported("color", "oklch(50% 0.1 20)"));
+}
+
 void TestMaskImage() {
   TestPage p("<style>.i{display:inline-block;width:20px;height:20px;background-color:#123456;"
              "-webkit-mask:url(icons/menu.svg) no-repeat center / 16px}</style><span class=i></span>");
@@ -1748,6 +1773,7 @@ int main() {
   TestDns();
   TestMaskImage();
   TestGridLayout();
+  TestModernCss();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

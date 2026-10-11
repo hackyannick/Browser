@@ -142,7 +142,9 @@ namespace kite {
   X(MaskRepeat, "mask-repeat", false)                      \
   X(MaskPositionX, "mask-position-x", false)               \
   X(MaskPositionY, "mask-position-y", false)               \
-  X(MaskSize, "mask-size", false)
+  X(MaskSize, "mask-size", false)                          \
+  X(ContainerType, "container-type", false)                \
+  X(ContainerName, "container-name", false)
 
 enum PropertyId {
 #define KITE_PROP_ENUM(id, name, inh) kProp##id,

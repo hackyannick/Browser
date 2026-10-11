@@ -843,6 +843,19 @@ void AddRule(const std::string& selectorText, const std::vector<Declaration>& de
   st.sheet->rules.push_back(rule);
 }
 
+// "@container card (min-width: 300px)" is kept with the rule's media
+// conditions as kContainerPrefix + name + '\x01' + condition.
+std::string ContainerCondition(const std::string& prelude) {
+  std::string p = Trim(prelude);
+  std::string name;
+  if (!p.empty() && p[0] != '(' && !StartsWithIgnoreCase(p, "not ") && !StartsWithIgnoreCase(p, "style(")) {
+    size_t sp = p.find_first_of(" (");
+    name = p.substr(0, sp);
+    p = sp == std::string::npos ? std::string() : Trim(p.substr(sp));
+  }
+  return std::string(kContainerPrefix) + name + '\x01' + p;
+}
+
 void ParseRules(const std::string& css, const std::vector<std::string>& media,
                 ParseState& st, bool topLevel) {
   size_t i = 0;
@@ -892,6 +905,10 @@ void ParseRules(const std::string& css, const std::vector<std::string>& media,
         ParseRules(body, m, st, false);
       } else if (name == "supports") {
         if (EvaluateSupports(prelude)) ParseRules(body, media, st, false);
+      } else if (name == "container") {
+        std::vector<std::string> m(media);
+        m.push_back(ContainerCondition(prelude));
+        ParseRules(body, m, st, false);
       } else if (name == "font-face") {
         std::vector<Declaration> decls = ParseDeclarations(body);
         FontFace face;
@@ -1039,6 +1056,10 @@ void ParseBlockContents(const std::string& block, const std::string& selectorTex
     } else if (StartsWithIgnoreCase(prelude, "@supports")) {
       if (EvaluateSupports(prelude.substr(9)))
         ParseBlockContents(nested[k].second, selectorText, media, st);
+    } else if (StartsWithIgnoreCase(prelude, "@container")) {
+      std::vector<std::string> m(media);
+      m.push_back(ContainerCondition(prelude.substr(10)));
+      ParseBlockContents(nested[k].second, selectorText, m, st);
     } else if (!prelude.empty() && prelude[0] != '@') {
       ParseBlockContents(nested[k].second, ResolveNestedSelector(selectorText, prelude),
                          media, st);
@@ -1094,6 +1115,18 @@ void ParseStylesheet(const std::string& rawCss, Stylesheet& out) {
   st.order = out.rules.size();
   std::vector<std::string> media;
   ParseRules(css, media, st, true);
+}
+
+bool EvaluateContainerCondition(const std::string& cond, float w, float h) {
+  // Size features of the container map onto the media features.
+  std::string c = AsciiLower(cond);
+  c = ReplaceAll(c, "inline-size", "width");
+  c = ReplaceAll(c, "block-size", "height");
+  if (c.find("style(") != std::string::npos || c.find("scroll-state(") != std::string::npos) return false;
+  MediaContext mc;
+  mc.width = w;
+  mc.height = h >= 0 ? h : 0;
+  return EvaluateMediaQueryList(c, mc);
 }
 
 bool EvaluateMediaQueryList(const std::string& query, const MediaContext& ctx) {

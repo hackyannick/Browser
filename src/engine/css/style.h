@@ -3,6 +3,7 @@
 #define KITE_CSS_STYLE_H
 
 #include <map>
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -18,6 +19,10 @@ struct Length {
   Kind kind;
   float px;
   float pct;
+  // min()/max()/clamp() mixing percentages and fixed units: bounds applied
+  // when the value is resolved (min(a, b) = a with upper bound b).
+  bool hasLo = false, hasHi = false;
+  float loPx = 0, loPct = 0, hiPx = 0, hiPct = 0;
   Length() : kind(kAuto), px(0), pct(0) {}
   static Length Px(float v) { Length l; l.kind = kFixed; l.px = v; return l; }
   static Length Pct(float v) { Length l; l.kind = kFixed; l.pct = v; return l; }
@@ -25,12 +30,18 @@ struct Length {
   static Length None() { Length l; l.kind = kNone; return l; }
   bool IsAuto() const { return kind == kAuto; }
   bool IsFixed() const { return kind == kFixed; }
-  bool HasPercent() const { return kind == kFixed && pct != 0; }
+  bool HasPercent() const {
+    return kind == kFixed && (pct != 0 || (hasLo && loPct != 0) || (hasHi && hiPct != 0));
+  }
   bool IsZero() const { return kind == kFixed && px == 0 && pct == 0; }
   // Resolves against |base|; if base is unknown (< 0) percentages count as 0.
   float Resolve(float base) const {
     if (kind != kFixed) return 0;
-    return px + (base >= 0 ? pct * base / 100.0f : 0);
+    float b = base >= 0 ? base / 100.0f : 0;
+    float v = px + pct * b;
+    if (hasLo) v = std::max(v, loPx + loPct * b);
+    if (hasHi) v = std::min(v, hiPx + hiPct * b);
+    return v;
   }
 };
 
@@ -248,6 +259,8 @@ struct ComputedStyle {
   std::string animName, animDuration, animDelay, animIterations, animDirection, animFillMode,
       animTiming, animPlayState;
   std::string transProperty, transDuration, transDelay, transTiming;
+  int containerType = 0;  // container-type: 0 normal, 1 inline-size, 2 size
+  std::string containerName;
   float aspectRatio;  // 0 = none
   ObjectFit objectFit;
 

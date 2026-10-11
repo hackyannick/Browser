@@ -46,6 +46,8 @@ class Node {
   int mediaId = 0;                 // <audio>/<video> player (see media/media.h)
   int frameId = 0;                 // <iframe> document shown by the platform (kFrame items)
   float scrollX = 0, scrollY = 0;  // scroll position of an overflow container (CSS px)
+  // Query containers: content box size from the last layout (-1 = unknown).
+  float containerW = -1, containerH = -1;
   bool scriptDone = false;         // <script> already executed
   // Shadow DOM: the shadow tree attached to this element (a kShadowRoot
   // node whose |host| points back here).

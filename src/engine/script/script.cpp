@@ -445,7 +445,14 @@ KITE_FN(Computed) {
   if (prop == "color" || prop == "background-color") {
     Color c = prop == "color" ? s->color : s->backgroundColor;
     if (c.a == 255) snprintf(buf, sizeof buf, "rgb(%d, %d, %d)", c.r, c.g, c.b);
-    else snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %g)", c.r, c.g, c.b, c.a / 255.0);
+    else {
+      // Shortest alpha that maps back to the same byte (0.5 rather than 0.501961).
+      double a = c.a / 255.0;
+      double r2 = std::floor(a * 100 + 0.5) / 100;
+      if ((int)std::floor(r2 * 255 + 0.5) == c.a) a = r2;
+      else a = std::floor(a * 1000 + 0.5) / 1000;
+      snprintf(buf, sizeof buf, "rgba(%d, %d, %d, %g)", c.r, c.g, c.b, a);
+    }
     return NewStr(ctx, buf);
   }
   if (prop == "opacity") {

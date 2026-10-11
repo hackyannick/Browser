@@ -410,6 +410,8 @@ void CopyPropertyImpl(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropBackgroundSize:
       d.backgroundSizeMode = s.backgroundSizeMode; d.backgroundSizeW = s.backgroundSizeW;
       d.backgroundSizeH = s.backgroundSizeH; break;
+    case kPropContainerType: d.containerType = s.containerType; break;
+    case kPropContainerName: d.containerName = s.containerName; break;
     case kPropMaskImage: d.maskImage = s.maskImage; break;
     case kPropMaskRepeat: d.maskRepeat = s.maskRepeat; break;
     case kPropMaskPositionX: d.maskPosX = s.maskPosX; break;
@@ -784,6 +786,11 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
     out.push_back(std::make_pair((int)kPropRowGap, value));
   } else if (name == "grid-column-gap") {
     out.push_back(std::make_pair((int)kPropColumnGap, value));
+  } else if (name == "container") {
+    std::vector<std::string> p = SplitSlash(value);
+    out.push_back(std::make_pair((int)kPropContainerName, global ? value : p[0]));
+    out.push_back(std::make_pair((int)kPropContainerType,
+                                 global ? value : p.size() > 1 ? p[1] : std::string("normal")));
   } else if (name == "mask" || name == "mask-position") {
     // Same syntax as background / background-position (mode, origin and
     // composite keywords are ignored by that parser).
@@ -1124,10 +1131,8 @@ bool IsCssPropertySupported(const std::string& prop, const std::string& value) {
   std::string v = AsciiLower(Trim(value));
   if (prop == "display") return v != "ruby" && v != "subgrid";
   if (prop == "position") return v != "-webkit-sticky";
-  if (v.find("subgrid") != std::string::npos || v.find("masonry") != std::string::npos || v.find("color-mix") != std::string::npos ||
-      v.find("oklch") != std::string::npos || v.find("lab(") != std::string::npos ||
-      v.find("anchor") != std::string::npos || v.find("dvh") != std::string::npos ||
-      v.find("svh") != std::string::npos)
+  if (v.find("subgrid") != std::string::npos || v.find("masonry") != std::string::npos ||
+      v.find("anchor") != std::string::npos)
     return false;
   return true;
 }
@@ -1656,6 +1661,12 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       }
       return;
     }
+    case kPropContainerType:
+      s.containerType = v == "inline-size" ? 1 : v == "size" ? 2 : 0;
+      return;
+    case kPropContainerName:
+      s.containerName = v == "none" ? std::string() : value;
+      return;
     case kPropMaskImage: case kPropMaskRepeat: case kPropMaskPositionX: case kPropMaskPositionY:
     case kPropMaskSize: {
       // Parsed like the background counterpart, in the background fields.

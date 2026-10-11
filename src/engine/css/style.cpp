@@ -202,6 +202,8 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   backgroundSizeMode = o.backgroundSizeMode;
   backgroundSizeW = o.backgroundSizeW;
   backgroundSizeH = o.backgroundSizeH;
+  containerType = o.containerType;
+  containerName = o.containerName;
   maskImage = o.maskImage;
   maskRepeat = o.maskRepeat;
   maskPosX = o.maskPosX;
@@ -285,6 +287,9 @@ namespace {
 struct CalcValue {
   float px, pct, num;
   bool isNumber;  // unitless
+  // Bounds from min()/max()/clamp() with percentages (see Length).
+  bool hasLo = false, hasHi = false;
+  float loPx = 0, loPct = 0, hiPx = 0, hiPct = 0;
   CalcValue() : px(0), pct(0), num(0), isNumber(false) {}
 };
 
@@ -437,11 +442,20 @@ class CalcParser {
         }
         return best;
       }
-      // Mixed: min() prefers the relative value (never overflows), max()
-      // prefers the fixed one.
-      for (size_t i = 0; i < a.size(); ++i)
-        if ((a[i].pct != 0) == (fn == "min")) return a[i];
-      return a[0];
+      // Mixed units: decided when the percentage base is known. The first
+      // argument is the value, the second its bound (further arguments are
+      // folded in only when they are of the same kind).
+      CalcValue v = a[0];
+      for (size_t i = 1; i < a.size(); ++i) {
+        if (fn == "min") {
+          if (!v.hasHi) { v.hasHi = true; v.hiPx = a[i].px; v.hiPct = a[i].pct; }
+          else if (a[i].pct == v.hiPct) v.hiPx = std::min(v.hiPx, a[i].px);
+        } else {
+          if (!v.hasLo) { v.hasLo = true; v.loPx = a[i].px; v.loPct = a[i].pct; }
+          else if (a[i].pct == v.loPct) v.loPx = std::max(v.loPx, a[i].px);
+        }
+      }
+      return v;
     }
     if (fn == "clamp" && a.size() == 3) {
       if (a[0].pct == 0 && a[1].pct == 0 && a[2].pct == 0) {
@@ -450,7 +464,14 @@ class CalcParser {
         if (v.px > a[2].px) v = a[2];
         return v;
       }
-      return a[1];
+      CalcValue v = a[1];
+      v.hasLo = true;
+      v.loPx = a[0].px;
+      v.loPct = a[0].pct;
+      v.hasHi = true;
+      v.hiPx = a[2].px;
+      v.hiPct = a[2].pct;
+      return v;
     }
     if (fn == "env" || fn == "var") {
       ok_ = false;
@@ -565,7 +586,117 @@ float HueToRgb(float p, float q, float t) {
   return p;
 }
 
+float ParseHue(const std::string& s, bool& ok) {
+  size_t used;
+  float h = (float)ParseDoublePrefix(s, used);
+  if (used == 0) {
+    if (s != "none") ok = false;
+    return 0;
+  }
+  std::string unit = s.substr(used);
+  if (unit == "rad") h = h * 180 / 3.14159265f;
+  else if (unit == "turn") h *= 360;
+  else if (unit == "grad") h *= 0.9f;
+  h = std::fmod(h, 360.0f);
+  return h < 0 ? h + 360 : h;
+}
+
+// Linear-light sRGB component to the gamma-encoded 0..1 value.
+float Gamma(float c) {
+  float a = std::fabs(c);
+  float g = a <= 0.0031308f ? 12.92f * a : 1.055f * std::pow(a, 1 / 2.4f) - 0.055f;
+  return std::max(0.0f, std::min(1.0f, c < 0 ? -g : g));
+}
+
+float Linear(float c) { return c <= 0.04045f ? c / 12.92f : std::pow((c + 0.055f) / 1.055f, 2.4f); }
+
+void OklabToLinear(float L, float a, float b, float out[3]) {
+  float l = L + 0.3963377774f * a + 0.2158037573f * b;
+  float m = L - 0.1055613458f * a - 0.0638541728f * b;
+  float s = L - 0.0894841775f * a - 1.2914855480f * b;
+  l = l * l * l;
+  m = m * m * m;
+  s = s * s * s;
+  out[0] = 4.0767416621f * l - 3.3077115913f * m + 0.2309699292f * s;
+  out[1] = -1.2684380046f * l + 2.6097574011f * m - 0.3413193965f * s;
+  out[2] = -0.0041960863f * l - 0.7034186147f * m + 1.7076147010f * s;
+}
+
+// CIE Lab (D50) to linear sRGB (D65, Bradford adapted).
+void LabToLinear(float L, float a, float b, float out[3]) {
+  const float e = 216.0f / 24389, k = 24389.0f / 27;
+  float fy = (L + 16) / 116, fx = fy + a / 500, fz = fy - b / 200;
+  float x = fx * fx * fx > e ? fx * fx * fx : (116 * fx - 16) / k;
+  float y = L > k * e ? fy * fy * fy : L / k;
+  float z = fz * fz * fz > e ? fz * fz * fz : (116 * fz - 16) / k;
+  x *= 0.3457f / 0.3585f;
+  z *= (1 - 0.3457f - 0.3585f) / 0.3585f;
+  out[0] = 3.1341359569958707f * x - 1.6173863321612538f * y - 0.4906619460083532f * z;
+  out[1] = -0.978795502912089f * x + 1.916254567259524f * y + 0.03344273116131949f * z;
+  out[2] = 0.07195537988411677f * x - 0.2289768264158322f * y + 1.405386058324125f * z;
+}
+
 }  // namespace
+
+// color-mix(in <space>, <color> [<pct>], <color> [<pct>]): mixed in sRGB or
+// linear sRGB / OKLab-like spaces approximated by linear light.
+bool ParseColorMix(const std::string& args, Color& out, const Color& currentColor) {
+  std::vector<std::string> parts;
+  int depth = 0;
+  size_t start = 0;
+  for (size_t i = 0; i < args.size(); ++i) {
+    if (args[i] == '(') ++depth;
+    else if (args[i] == ')') --depth;
+    else if (args[i] == ',' && depth == 0) {
+      parts.push_back(Trim(args.substr(start, i - start)));
+      start = i + 1;
+    }
+  }
+  parts.push_back(Trim(args.substr(start)));
+  if (parts.size() != 3 || !StartsWith(parts[0], "in ")) return false;
+  std::string space = Trim(parts[0].substr(3));
+  Color c[2];
+  float pct[2] = {-1, -1};
+  for (int k = 0; k < 2; ++k) {
+    std::string p = parts[k + 1];
+    // A trailing or leading percentage.
+    size_t sp = p.find_last_of(' ');
+    if (sp != std::string::npos && !p.empty() && p[p.size() - 1] == '%' && p.find(')', sp) == std::string::npos) {
+      size_t used;
+      pct[k] = (float)ParseDoublePrefix(p.substr(sp + 1), used) / 100;
+      p = Trim(p.substr(0, sp));
+    } else if (!p.empty() && IsAsciiDigit((unsigned char)p[0]) && (sp = p.find(' ')) != std::string::npos) {
+      size_t used;
+      pct[k] = (float)ParseDoublePrefix(p.substr(0, sp), used) / 100;
+      p = Trim(p.substr(sp + 1));
+    }
+    if (!ParseColor(p, c[k], currentColor)) return false;
+  }
+  if (pct[0] < 0 && pct[1] < 0) pct[0] = pct[1] = 0.5f;
+  else if (pct[0] < 0) pct[0] = 1 - pct[1];
+  else if (pct[1] < 0) pct[1] = 1 - pct[0];
+  float sum = pct[0] + pct[1];
+  if (sum <= 0) return false;
+  float alphaMul = std::min(1.0f, sum);
+  float w0 = pct[0] / sum, w1 = pct[1] / sum;
+  bool linear = space != "srgb" && !StartsWith(space, "hsl") && !StartsWith(space, "hwb");
+  float a0 = c[0].a / 255.0f, a1 = c[1].a / 255.0f;
+  float a = a0 * w0 + a1 * w1;
+  float ch[3];
+  const uint8_t* comp0[3] = {&c[0].r, &c[0].g, &c[0].b};
+  const uint8_t* comp1[3] = {&c[1].r, &c[1].g, &c[1].b};
+  for (int i = 0; i < 3; ++i) {
+    float x0 = *comp0[i] / 255.0f, x1 = *comp1[i] / 255.0f;
+    if (linear) {
+      x0 = Linear(x0);
+      x1 = Linear(x1);
+    }
+    float v = a > 0 ? (x0 * a0 * w0 + x1 * a1 * w1) / a : 0;  // premultiplied
+    ch[i] = linear ? Gamma(v) : v;
+  }
+  out = Color(Clamp255(ch[0] * 255), Clamp255(ch[1] * 255), Clamp255(ch[2] * 255), Clamp255(a * alphaMul * 255));
+  return true;
+}
 
 bool ParseLength(const std::string& raw, const LengthContext& ctx, Length& out,
                  bool allowNegative) {
@@ -600,6 +731,12 @@ bool ParseLength(const std::string& raw, const LengthContext& ctx, Length& out,
   out.kind = Length::kFixed;
   out.px = cv.px;
   out.pct = cv.pct;
+  out.hasLo = cv.hasLo;
+  out.hasHi = cv.hasHi;
+  out.loPx = cv.loPx;
+  out.loPct = cv.loPct;
+  out.hiPx = cv.hiPx;
+  out.hiPct = cv.hiPct;
   if (!allowNegative && (out.px < 0 || out.pct < 0) && !(out.px > 0 || out.pct > 0)) return false;
   return true;
 }
@@ -635,6 +772,28 @@ bool ParseColor(const std::string& raw, Color& out, const Color& currentColor) {
       return true;
     }
     return false;
+  }
+  if (StartsWith(v, "color-mix(") && v[v.size() - 1] == ')') return ParseColorMix(v.substr(10, v.size() - 11), out, currentColor);
+  if (StartsWith(v, "color(") && v[v.size() - 1] == ')') {
+    // color(srgb r g b / a) and wide-gamut spaces (shown as sRGB).
+    std::string args = v.substr(6, v.size() - 7);
+    std::string alphaPart;
+    size_t slash = args.find('/');
+    if (slash != std::string::npos) {
+      alphaPart = Trim(args.substr(slash + 1));
+      args = args.substr(0, slash);
+    }
+    std::vector<std::string> parts = SplitWhitespace(args);
+    if (parts.size() != 4) return false;
+    bool ok = true;
+    float c[3];
+    for (int i = 0; i < 3; ++i) c[i] = ParseComponent(parts[i + 1], 1, ok);
+    float alpha = alphaPart.empty() ? 1 : ParseComponent(alphaPart, 1, ok);
+    if (!ok) return false;
+    if (parts[0] == "srgb-linear" || parts[0] == "xyz" || parts[0] == "xyz-d65")
+      for (int i = 0; i < 3; ++i) c[i] = Gamma(c[i]);
+    out = Color(Clamp255(c[0] * 255), Clamp255(c[1] * 255), Clamp255(c[2] * 255), Clamp255(alpha * 255));
+    return true;
   }
   size_t paren = v.find('(');
   if (paren != std::string::npos && v[v.size() - 1] == ')') {
@@ -695,14 +854,44 @@ bool ParseColor(const std::string& raw, Color& out, const Color& currentColor) {
                   Clamp255(alpha * 255));
       return true;
     }
-    // oklch()/lab()/color() etc: unsupported -> approximate grey by lightness
-    if (fn == "oklch" || fn == "oklab" || fn == "lab" || fn == "lch") {
-      float l = ParseComponent(parts[0], 1, ok);
+    if (fn == "hwb") {
+      float h = ParseHue(parts[0], ok);
+      float w = ParseComponent(parts[1], 1, ok), bl = ParseComponent(parts[2], 1, ok);
       if (!ok) return false;
-      if (parts[0].find('%') == std::string::npos && (fn == "lab" || fn == "lch")) l /= 100;
-      if (parts[0].find('%') != std::string::npos && (fn == "oklch" || fn == "oklab")) {}
-      uint8_t g = Clamp255(l * 255);
-      out = Color(g, g, g, Clamp255(alpha * 255));
+      if (parts[1].find('%') == std::string::npos) w /= 100;
+      if (parts[2].find('%') == std::string::npos) bl /= 100;
+      if (w + bl >= 1) {
+        uint8_t g = Clamp255(w / (w + bl) * 255);
+        out = Color(g, g, g, Clamp255(alpha * 255));
+        return true;
+      }
+      float rgb[3] = {HueToRgb(0, 1, h / 360 + 1.0f / 3), HueToRgb(0, 1, h / 360), HueToRgb(0, 1, h / 360 - 1.0f / 3)};
+      for (int i = 0; i < 3; ++i) rgb[i] = rgb[i] * (1 - w - bl) + w;
+      out = Color(Clamp255(rgb[0] * 255), Clamp255(rgb[1] * 255), Clamp255(rgb[2] * 255), Clamp255(alpha * 255));
+      return true;
+    }
+    if (fn == "oklab" || fn == "oklch" || fn == "lab" || fn == "lch") {
+      bool ok2 = true;
+      float L, A, B;
+      bool okSpace = fn == "oklab" || fn == "oklch";
+      L = ParseComponent(parts[0], okSpace ? 1 : 100, ok2);
+      if (okSpace && parts[0].find('%') == std::string::npos && L > 1.0001f) L /= 100;  // tolerate 0-100
+      if (fn == "oklab" || fn == "lab") {
+        float scale = fn == "oklab" ? 0.4f : 125;
+        A = ParseComponent(parts[1], scale, ok2);
+        B = ParseComponent(parts[2], scale, ok2);
+      } else {
+        float c = ParseComponent(parts[1], fn == "oklch" ? 0.4f : 150, ok2);
+        float h = ParseHue(parts[2], ok2) * 3.14159265f / 180;
+        A = c * std::cos(h);
+        B = c * std::sin(h);
+      }
+      if (!ok2) return false;
+      float lin[3];
+      if (okSpace) OklabToLinear(L, A, B, lin);
+      else LabToLinear(L, A, B, lin);
+      out = Color(Clamp255(Gamma(lin[0]) * 255), Clamp255(Gamma(lin[1]) * 255), Clamp255(Gamma(lin[2]) * 255),
+                  Clamp255(alpha * 255));
       return true;
     }
     return false;

@@ -69,6 +69,8 @@ class Page {
   // Rebuilds the box tree and lays out + paints. Call after Restyle or when
   // images finish loading.
   void Relayout(float viewportW, float viewportH);
+  // Stores the content sizes of query containers; true if one changed.
+  bool UpdateContainerSizes();
   // Re-runs only the painter (e.g. after a form control value changed).
   void Repaint();
 

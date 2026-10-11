@@ -46,6 +46,9 @@ class StyleResolver {
   // @keyframes rule with |name| from the author sheets (last one wins).
   const KeyframesRule* FindKeyframes(const std::string& name) const;
   float rootFontSize() const { return rootFontSize_; }
+  // The author sheets contain @container rules (resolved per element
+  // against the last layout; see Node::containerW).
+  bool hasContainerRules() const { return hasContainerRules_; }
 
  private:
   struct SheetEntry {
@@ -73,10 +76,12 @@ class StyleResolver {
                       const std::string& docUrl, const ElementState& state);
   void CollectMatches(const Node* el, const ElementState& state,
                       std::vector<IndexedRule>& out);
+  bool ContainerMatches(const StyleRule& rule, const Node* el, float viewportW, float viewportH);
 
   std::vector<SheetEntry> sheets_;
   RuleIndex index_;
   float rootFontSize_;
+  bool hasContainerRules_ = false;
 };
 
 }  // namespace kite

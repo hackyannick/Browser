@@ -1,5 +1,6 @@
 #include "page/page.h"
 
+#include <cmath>
 #include <set>
 
 #include "base/strings.h"
@@ -486,6 +487,24 @@ int Page::TickAnimations() {
   return r;
 }
 
+bool Page::UpdateContainerSizes() {
+  bool changed = false;
+  std::vector<Node*> stack(1, doc_->root.get());
+  while (!stack.empty()) {
+    Node* n = stack.back();
+    stack.pop_back();
+    for (size_t i = 0; i < n->children.size(); ++i) stack.push_back(n->children[i].get());
+    if (n->shadowRoot) stack.push_back(n->shadowRoot.get());
+    if (!n->IsElement() || !n->style || n->style->containerType == 0) continue;
+    float w = n->layoutBox ? n->layoutBox->ContentW() : -1, h = n->layoutBox ? n->layoutBox->ContentH() : -1;
+    if (std::fabs(w - n->containerW) > 0.5f || (n->style->containerType == 2 && std::fabs(h - n->containerH) > 0.5f))
+      changed = true;
+    n->containerW = w;
+    n->containerH = h;
+  }
+  return changed;
+}
+
 void Page::Relayout(float viewportW, float viewportH) {
   if (!doc_) return;
   UpdateMediaElements(doc_->root.get(), baseUrl_.Spec(), doc_.get());
@@ -493,6 +512,14 @@ void Page::Relayout(float viewportW, float viewportH) {
   engine_.Layout(root_.get(), viewportW, viewportH);
   lastViewportW_ = viewportW;
   lastViewportH_ = viewportH;
+  if (resolver_.hasContainerRules() && UpdateContainerSizes()) {
+    // Container queries saw other sizes than the layout produced: style
+    // once more with the real sizes (once only, so feedback cannot loop).
+    Restyle(viewportW, viewportH);
+    root_ = BuildLayoutTree(*doc_, baseUrl_.Spec());
+    engine_.Layout(root_.get(), viewportW, viewportH);
+    UpdateContainerSizes();
+  }
   Painter p(&engine_, images_);
   p.Paint(root_.get(), viewportW, viewportH, display_);
 }
