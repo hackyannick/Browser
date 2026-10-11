@@ -385,7 +385,7 @@ Network& Network::Get() {
 }
 
 Network::Network()
-    : userAgent_("Mozilla/5.0 (Windows NT 5.0) Kite/1.0 (like Gecko)") {}
+    : userAgent_("Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0") {}
 
 FetchResponse Network::Fetch(const FetchRequest& req) {
   FetchResponse resp;

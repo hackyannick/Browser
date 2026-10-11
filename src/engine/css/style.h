@@ -92,12 +92,49 @@ struct BorderSide {
   }
 };
 
+// One grid track sizing function (the min or max part of a track size).
+struct GridSize {
+  enum Type { kLength, kFr, kAuto, kMinContent, kMaxContent };
+  Type type = kAuto;
+  Length len;    // kLength (may contain percentages)
+  float fr = 0;  // kFr
+};
+
+// A track: minmax(min, max); plain sizes use the same function twice (a
+// flexible "1fr" is minmax(auto, 1fr)); fit-content(limit) is
+// minmax(auto, max-content) clamped to |fitLimit|.
 struct GridTrack {
-  enum Kind { kFixedTrack, kFr, kAutoTrack, kMinMax };
-  Kind kind;
-  Length size;   // kFixedTrack / minmax min
-  float fr;      // kFr / minmax max as fr
-  GridTrack() : kind(kAutoTrack), fr(0) {}
+  GridSize min, max;
+  bool fitContent = false;
+  Length fitLimit;
+};
+
+// grid-template-columns / -rows.
+struct GridTemplate {
+  std::vector<GridTrack> tracks;
+  // Line names before each track and after the last (tracks.size() + 1).
+  std::vector<std::vector<std::string> > names;
+  // repeat(auto-fill | auto-fit, ...): inserted before tracks[repeatAt].
+  int repeatAt = -1;
+  bool autoFit = false;
+  std::vector<GridTrack> repeat;
+  std::vector<std::vector<std::string> > repeatNames;  // repeat.size() + 1
+  bool empty() const { return tracks.empty() && repeatAt < 0; }
+};
+
+// grid-row-start and friends: a line number (negative counts from the
+// end), "span N", a line or area name (with an optional count), or auto.
+struct GridLine {
+  int line = 0;  // 0 = auto / by name
+  int span = 0;  // > 0: span
+  std::string name;
+  bool IsAuto() const { return line == 0 && span == 0 && name.empty(); }
+};
+
+// A named area from grid-template-areas (0-based, end exclusive).
+struct GridArea {
+  std::string name;
+  int r0, r1, c0, c1;
 };
 
 struct BoxShadow {
@@ -225,12 +262,14 @@ struct ComputedStyle {
   Length flexBasis;  // auto = use width
   int order;
   Length rowGap, columnGap;
-  std::vector<GridTrack> gridColumns;
-  int gridAutoRepeat;   // >0 when repeat(auto-fill/auto-fit, ...) was used
-  Length gridAutoMin;   // minimum track size for auto-fill
-  int gridColumnSpan;   // grid-column: span N
-  int gridColumnStart;  // explicit start line (1-based), 0 = auto
-  int gridColumnEnd;    // explicit end line (1-based, may be -1), 0 = auto
+  GridTemplate gridColumns, gridRows;
+  std::vector<GridTrack> gridAutoColumns, gridAutoRows;  // implicit tracks (cycled)
+  bool gridFlowColumn;  // grid-auto-flow: column
+  bool gridFlowDense;
+  std::vector<GridArea> gridAreas;
+  int gridAreaRows, gridAreaCols;
+  GridLine gridRowStart, gridRowEnd, gridColumnStart, gridColumnEnd;
+  FlexAlign justifyItems, justifySelf;
 
   // Generated content (for ::before / ::after styles).
   std::string content;

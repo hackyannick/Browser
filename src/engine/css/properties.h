@@ -96,8 +96,17 @@ namespace kite {
   X(RowGap, "row-gap", false)                              \
   X(ColumnGap, "column-gap", false)                        \
   X(GridTemplateColumns, "grid-template-columns", false)   \
+  X(GridTemplateRows, "grid-template-rows", false)         \
+  X(GridTemplateAreas, "grid-template-areas", false)       \
+  X(GridAutoColumns, "grid-auto-columns", false)           \
+  X(GridAutoRows, "grid-auto-rows", false)                 \
+  X(GridAutoFlow, "grid-auto-flow", false)                 \
   X(GridColumnStart, "grid-column-start", false)           \
   X(GridColumnEnd, "grid-column-end", false)               \
+  X(GridRowStart, "grid-row-start", false)                 \
+  X(GridRowEnd, "grid-row-end", false)                     \
+  X(JustifyItems, "justify-items", false)                  \
+  X(JustifySelf, "justify-self", false)                    \
   X(Content, "content", false)                             \
   X(Filter, "filter", false)                               \
   X(Clip, "clip", false)                                   \

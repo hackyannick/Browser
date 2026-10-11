@@ -37,8 +37,10 @@ den Internet Explorer oder Systembibliotheken angewiesen zu sein.
   Revalidierung per ETag/Last-Modified – spart auf langsamen Leitungen viel Zeit
 - **Popup-Blocker**: `window.open` öffnet nur direkt nach einem Klick einen
   neuen Tab
-- Tabs beim Start wiederherstellen (auch nach einem Absturz), optional
-  „Als Firefox ausgeben“ für Seiten, die nach dem Browser filtern
+- Tabs beim Start wiederherstellen (auch nach einem Absturz)
+- Kite meldet sich standardmäßig als aktueller Firefox, damit Seiten ihre
+  moderne Fassung ausliefern statt einer Alt-Version für unbekannte Browser
+  (abschaltbar: „Als Firefox ausgeben“ in den Einstellungen)
 - JavaScript (abschaltbar unter Extras → Einstellungen), JavaScript-Konsole
   (Strg+Umschalt+J), `alert`/`confirm`/`prompt` als Windows-Dialoge
 - Portabel: Einstellungen liegen in `kite.ini` neben `kite.exe`

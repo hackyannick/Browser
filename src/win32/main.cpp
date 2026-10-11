@@ -91,7 +91,9 @@ void App::Init(HINSTANCE inst) {
   settings.blockAds = IniGet(L"BlockAds", "1") != "0";
   settings.blockPopups = IniGet(L"BlockPopups", "1") != "0";
   settings.restoreSession = IniGet(L"RestoreSession", "0") != "0";
-  settings.compatUa = IniGet(L"CompatUserAgent", "0") != "0";
+  // Many sites serve stripped-down legacy pages (or nothing) to browsers
+  // they do not know, so Kite presents itself as Firefox unless told not to.
+  settings.compatUa = IniGet(L"UserAgent", "firefox") != "kite";
   if (ParseInt(IniGet(L"CacheMB", "50"), v) && v >= 0 && v <= 2000) settings.cacheMb = (int)v;
 
   NetInit();
@@ -122,7 +124,7 @@ void App::ApplyNetworkSettings() {
   SetTls13Enabled(settings.tls13);
   ContentBlocker::Get().SetEnabled(settings.blockAds);
   Network::Get().SetUserAgent(settings.compatUa
-                                  ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:128.0) Gecko/20100101 Firefox/128.0"
+                                  ? "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:140.0) Gecko/20100101 Firefox/140.0"
                                   : "Mozilla/5.0 (Windows NT 5.0) Kite/1.0 (like Gecko)");
   long long cacheBytes = (long long)settings.cacheMb * 1024 * 1024;
   std::shared_ptr<HttpCache> cache = Network::Get().cache();
@@ -147,7 +149,7 @@ void App::SaveSettings() {
   IniSet(L"BlockAds", settings.blockAds ? "1" : "0");
   IniSet(L"BlockPopups", settings.blockPopups ? "1" : "0");
   IniSet(L"RestoreSession", settings.restoreSession ? "1" : "0");
-  IniSet(L"CompatUserAgent", settings.compatUa ? "1" : "0");
+  IniSet(L"UserAgent", settings.compatUa ? "firefox" : "kite");
   IniSet(L"CacheMB", IntToString(settings.cacheMb));
 }
 

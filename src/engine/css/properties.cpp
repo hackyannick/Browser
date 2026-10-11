@@ -133,102 +133,183 @@ FlexAlign ParseFlexAlign(const std::string& raw, FlexAlign fallback) {
   return fallback;
 }
 
-void ParseGridTemplate(const std::string& raw, const LengthContext& lc, ComputedStyle& s) {
-  s.gridColumns.clear();
-  s.gridAutoRepeat = 0;
-  std::string v = AsciiLower(Trim(raw));
-  if (v == "none" || v.empty()) return;
-  std::vector<std::string> toks = SplitValueTokens(v);
-  // Expand repeat() into a flat track list.
-  std::vector<std::string> flat;
+bool ParseGridSize(const std::string& t, const LengthContext& lc, GridSize& out) {
+  if (t == "auto") out.type = GridSize::kAuto;
+  else if (t == "min-content") out.type = GridSize::kMinContent;
+  else if (t == "max-content") out.type = GridSize::kMaxContent;
+  else if (EndsWith(t, "fr") && !t.empty() && (IsAsciiDigit((unsigned char)t[0]) || t[0] == '.')) {
+    size_t used;
+    out.type = GridSize::kFr;
+    out.fr = (float)ParseDoublePrefix(t, used);
+    if (used + 2 != t.size() || out.fr < 0) return false;
+  } else {
+    Length l;
+    if (!ParseLength(t, lc, l) || !l.IsFixed()) return false;
+    out.type = GridSize::kLength;
+    out.len = l;
+  }
+  return true;
+}
+
+bool ParseGridTrack(const std::string& t, const LengthContext& lc, GridTrack& tr) {
+  if (StartsWith(t, "minmax(") && EndsWith(t, ")")) {
+    std::vector<std::string> a = SplitValueCommas(t.substr(7, t.size() - 8));
+    if (a.size() != 2) return false;
+    if (!ParseGridSize(Trim(a[0]), lc, tr.min) || !ParseGridSize(Trim(a[1]), lc, tr.max)) return false;
+    if (tr.min.type == GridSize::kFr) tr.min.type = GridSize::kAuto;  // a flexible minimum is invalid
+    return true;
+  }
+  if (StartsWith(t, "fit-content(") && EndsWith(t, ")")) {
+    Length l;
+    if (!ParseLength(Trim(t.substr(12, t.size() - 13)), lc, l) || !l.IsFixed()) return false;
+    tr.min.type = GridSize::kAuto;
+    tr.max.type = GridSize::kMaxContent;
+    tr.fitContent = true;
+    tr.fitLimit = l;
+    return true;
+  }
+  if (!ParseGridSize(t, lc, tr.max)) return false;
+  tr.min = tr.max;
+  if (tr.min.type == GridSize::kFr) tr.min.type = GridSize::kAuto;
+  return true;
+}
+
+void AddLineNames(const std::string& tok, std::vector<std::string>& names) {
+  std::vector<std::string> n = SplitWhitespace(tok.substr(1, tok.size() - 2));
+  names.insert(names.end(), n.begin(), n.end());
+}
+
+// A track list without auto repetition into |tracks| / |names|.
+bool ParseTrackList(const std::vector<std::string>& toks, const LengthContext& lc, std::vector<GridTrack>& tracks,
+                    std::vector<std::vector<std::string> >& names, GridTemplate* tpl) {
+  if (names.empty()) names.resize(1);
   for (size_t i = 0; i < toks.size(); ++i) {
     const std::string& t = toks[i];
-    if (!t.empty() && t[0] == '[') continue;  // line names
-    if (!StartsWith(t, "repeat(")) {
-      flat.push_back(t);
+    if (t[0] == '[') {
+      AddLineNames(t, names.back());
       continue;
     }
-    std::string inner = t.substr(7, t.size() - 8);
-    size_t comma = inner.find(',');
-    if (comma == std::string::npos) continue;
-    std::string countStr = Trim(inner.substr(0, comma));
-    std::vector<std::string> trackToks = SplitValueTokens(Trim(inner.substr(comma + 1)));
-    std::vector<std::string> tracks;
-    for (size_t j = 0; j < trackToks.size(); ++j)
-      if (!trackToks[j].empty() && trackToks[j][0] != '[') tracks.push_back(trackToks[j]);
-    if (tracks.empty()) continue;
-    if (countStr == "auto-fill" || countStr == "auto-fit") {
-      s.gridAutoRepeat = 1;
-      std::string first = tracks[0];
-      Length l;
-      if (StartsWith(first, "minmax(")) {
-        std::vector<std::string> a = SplitValueCommas(first.substr(7, first.size() - 8));
-        if (!a.empty() && ParseLength(a[0], lc, l)) s.gridAutoMin = l;
-      } else if (ParseLength(first, lc, l)) {
-        s.gridAutoMin = l;
+    if (StartsWith(t, "repeat(") && EndsWith(t, ")")) {
+      std::string inner = t.substr(7, t.size() - 8);
+      size_t comma = inner.find(',');
+      if (comma == std::string::npos) return false;
+      std::string countStr = Trim(inner.substr(0, comma));
+      std::vector<GridTrack> sub;
+      std::vector<std::vector<std::string> > subNames;
+      if (!ParseTrackList(SplitValueTokens(Trim(inner.substr(comma + 1))), lc, sub, subNames, 0) || sub.empty())
+        return false;
+      if (countStr == "auto-fill" || countStr == "auto-fit") {
+        if (!tpl || tpl->repeatAt >= 0) return false;
+        tpl->repeatAt = (int)tracks.size();
+        tpl->autoFit = countStr == "auto-fit";
+        tpl->repeat = sub;
+        tpl->repeatNames = subNames;
+        continue;
       }
-      if (!s.gridAutoMin.IsFixed() || s.gridAutoMin.Resolve(1000) <= 0)
-        s.gridAutoMin = Length::Px(200);
-      flat.push_back("1fr");
-      continue;
-    }
-    long long n = 1;
-    ParseInt(countStr, n);
-    if (n < 1) n = 1;
-    if (n > 64) n = 64;
-    for (long long k = 0; k < n; ++k)
-      for (size_t j = 0; j < tracks.size(); ++j) flat.push_back(tracks[j]);
-  }
-  for (size_t i = 0; i < flat.size(); ++i) {
-    const std::string& t = flat[i];
-    GridTrack tr;
-    if (EndsWith(t, "fr")) {
-      tr.kind = GridTrack::kFr;
-      size_t used;
-      tr.fr = (float)ParseDoublePrefix(t, used);
-    } else if (StartsWith(t, "minmax(")) {
-      std::vector<std::string> a = SplitValueCommas(t.substr(7, t.size() - 8));
-      tr.kind = GridTrack::kMinMax;
-      tr.fr = 0;
-      if (!a.empty()) ParseLength(a[0], lc, tr.size);
-      if (a.size() > 1 && EndsWith(Trim(a[1]), "fr")) {
-        size_t used;
-        tr.fr = (float)ParseDoublePrefix(Trim(a[1]), used);
-      } else if (a.size() > 1) {
-        Length mx;
-        if (ParseLength(a[1], lc, mx) && mx.IsFixed()) {
-          tr.kind = GridTrack::kFixedTrack;
-          tr.size = mx;
-        } else {
-          tr.kind = GridTrack::kAutoTrack;
+      long long n = 0;
+      if (!ParseInt(countStr, n) || n < 1) return false;
+      if (n > 200) n = 200;
+      for (long long k = 0; k < n; ++k) {
+        names.back().insert(names.back().end(), subNames[0].begin(), subNames[0].end());
+        for (size_t j = 0; j < sub.size(); ++j) {
+          tracks.push_back(sub[j]);
+          names.push_back(subNames[j + 1]);
         }
       }
-    } else if (t == "auto" || t == "min-content" || t == "max-content" ||
-               StartsWith(t, "fit-content")) {
-      tr.kind = GridTrack::kAutoTrack;
-    } else {
-      Length l;
-      if (!ParseLength(t, lc, l) || !l.IsFixed()) continue;
-      tr.kind = GridTrack::kFixedTrack;
-      tr.size = l;
+      continue;
     }
-    s.gridColumns.push_back(tr);
+    GridTrack tr;
+    if (!ParseGridTrack(t, lc, tr)) return false;
+    tracks.push_back(tr);
+    names.push_back(std::vector<std::string>());
+  }
+  return true;
+}
+
+void ParseGridTemplate(const std::string& raw, const LengthContext& lc, GridTemplate& out) {
+  out = GridTemplate();
+  std::string v = AsciiLower(Trim(raw));
+  if (v == "none" || v.empty() || StartsWith(v, "subgrid") || v == "masonry") return;
+  GridTemplate t;
+  if (ParseTrackList(SplitValueTokens(v), lc, t.tracks, t.names, &t)) out = t;
+}
+
+void ParseAutoTracks(const std::string& raw, const LengthContext& lc, std::vector<GridTrack>& out) {
+  out.clear();
+  std::vector<std::string> toks = SplitValueTokens(AsciiLower(Trim(raw)));
+  for (size_t i = 0; i < toks.size(); ++i) {
+    GridTrack tr;
+    if (!ParseGridTrack(toks[i], lc, tr)) {
+      out.clear();
+      return;
+    }
+    out.push_back(tr);
   }
 }
 
-void ParseGridLine(const std::string& raw, int& line, int& span) {
-  std::string v = AsciiLower(Trim(raw));
-  line = 0;
-  if (v == "auto" || v.empty()) return;
-  std::vector<std::string> t = SplitWhitespace(v);
-  if (t[0] == "span") {
-    long long n = 1;
-    if (t.size() > 1) ParseInt(t[1], n);
-    span = (int)(n < 1 ? 1 : n);
-    return;
+void ParseGridAreas(const std::string& raw, ComputedStyle& s) {
+  s.gridAreas.clear();
+  s.gridAreaRows = s.gridAreaCols = 0;
+  std::vector<std::vector<std::string> > rows;
+  for (size_t i = 0; i < raw.size(); ++i) {
+    char q = raw[i];
+    if (q != '"' && q != '\'') continue;
+    size_t e = raw.find(q, i + 1);
+    if (e == std::string::npos) break;
+    rows.push_back(SplitWhitespace(raw.substr(i + 1, e - i - 1)));
+    i = e;
   }
-  long long n;
-  if (ParseInt(t[0], n)) line = (int)n;
+  if (rows.empty()) return;
+  size_t cols = rows[0].size();
+  for (size_t r = 0; r < rows.size(); ++r)
+    if (rows[r].size() != cols) return;  // invalid: rows of different length
+  std::map<std::string, GridArea> areas;
+  std::vector<std::string> order;
+  for (size_t r = 0; r < rows.size(); ++r)
+    for (size_t c = 0; c < cols; ++c) {
+      const std::string& n = rows[r][c];
+      if (n.empty() || n[0] == '.') continue;
+      std::map<std::string, GridArea>::iterator it = areas.find(n);
+      if (it == areas.end()) {
+        GridArea a;
+        a.name = n;
+        a.r0 = (int)r;
+        a.r1 = (int)r + 1;
+        a.c0 = (int)c;
+        a.c1 = (int)c + 1;
+        areas[n] = a;
+        order.push_back(n);
+      } else {
+        GridArea& a = it->second;
+        a.r0 = std::min(a.r0, (int)r);
+        a.r1 = std::max(a.r1, (int)r + 1);
+        a.c0 = std::min(a.c0, (int)c);
+        a.c1 = std::max(a.c1, (int)c + 1);
+      }
+    }
+  for (size_t i = 0; i < order.size(); ++i) s.gridAreas.push_back(areas[order[i]]);
+  s.gridAreaRows = (int)rows.size();
+  s.gridAreaCols = (int)cols;
+}
+
+void ParseGridLine(const std::string& raw, GridLine& out) {
+  out = GridLine();
+  std::string v = Trim(raw);
+  if (v.empty() || AsciiLower(v) == "auto") return;
+  std::vector<std::string> t = SplitWhitespace(v);
+  bool span = false;
+  long long n = 0;
+  bool haveNum = false;
+  for (size_t i = 0; i < t.size(); ++i) {
+    if (AsciiLower(t[i]) == "span") span = true;
+    else if (ParseInt(t[i], n)) haveNum = true;
+    else out.name = t[i];
+  }
+  if (span) {
+    out.span = (int)(haveNum && n > 0 ? std::min(n, 1000LL) : 1);
+  } else if (haveNum) {
+    out.line = (int)std::max(-1000LL, std::min(1000LL, n));
+  }
 }
 
 ListStyle ParseListStyleType(const std::string& v) {
@@ -351,9 +432,19 @@ void CopyPropertyImpl(int id, ComputedStyle& d, const ComputedStyle& s) {
     case kPropRowGap: d.rowGap = s.rowGap; break;
     case kPropColumnGap: d.columnGap = s.columnGap; break;
     case kPropGridTemplateColumns:
-      d.gridColumns = s.gridColumns; d.gridAutoRepeat = s.gridAutoRepeat; d.gridAutoMin = s.gridAutoMin; break;
-    case kPropGridColumnStart: d.gridColumnStart = s.gridColumnStart; d.gridColumnSpan = s.gridColumnSpan; break;
+      d.gridColumns = s.gridColumns; break;
+    case kPropGridTemplateRows: d.gridRows = s.gridRows; break;
+    case kPropGridTemplateAreas:
+      d.gridAreas = s.gridAreas; d.gridAreaRows = s.gridAreaRows; d.gridAreaCols = s.gridAreaCols; break;
+    case kPropGridAutoColumns: d.gridAutoColumns = s.gridAutoColumns; break;
+    case kPropGridAutoRows: d.gridAutoRows = s.gridAutoRows; break;
+    case kPropGridAutoFlow: d.gridFlowColumn = s.gridFlowColumn; d.gridFlowDense = s.gridFlowDense; break;
+    case kPropGridColumnStart: d.gridColumnStart = s.gridColumnStart; break;
     case kPropGridColumnEnd: d.gridColumnEnd = s.gridColumnEnd; break;
+    case kPropGridRowStart: d.gridRowStart = s.gridRowStart; break;
+    case kPropGridRowEnd: d.gridRowEnd = s.gridRowEnd; break;
+    case kPropJustifyItems: d.justifyItems = s.justifyItems; break;
+    case kPropJustifySelf: d.justifySelf = s.justifySelf; break;
     case kPropContent: d.content = s.content; d.hasContent = s.hasContent; break;
     case kPropFilter: d.blur = s.blur; break;
     case kPropClip: case kPropClipPath: d.clippedAway = s.clippedAway; break;
@@ -493,8 +584,8 @@ std::vector<std::string> SplitValueTokens(const std::string& value) {
       cur += c;
       continue;
     }
-    if (c == '(') ++depth;
-    if (c == ')' && depth > 0) --depth;
+    if (c == '(' || c == '[') ++depth;  // [line names] stay one token
+    if ((c == ')' || c == ']') && depth > 0) --depth;
     if (depth == 0 && IsAsciiSpace((unsigned char)c)) {
       if (!cur.empty()) out.push_back(cur);
       cur.clear();
@@ -546,6 +637,43 @@ int LookupProperty(const std::string& name) {
 
 const char* PropertyName(int id) { return kProps[id].name; }
 bool IsInheritedProperty(int id) { return kProps[id].inherited; }
+
+namespace {
+// Splits at top-level '/' (outside parentheses and quotes).
+std::vector<std::string> SplitSlash(const std::string& v) {
+  std::vector<std::string> out;
+  int depth = 0;
+  char quote = 0;
+  size_t start = 0;
+  for (size_t i = 0; i < v.size(); ++i) {
+    char c = v[i];
+    if (quote) {
+      if (c == quote) quote = 0;
+    } else if (c == '"' || c == '\'') {
+      quote = c;
+    } else if (c == '(') {
+      ++depth;
+    } else if (c == ')') {
+      if (depth > 0) --depth;
+    } else if (c == '/' && depth == 0) {
+      out.push_back(Trim(v.substr(start, i - start)));
+      start = i + 1;
+    }
+  }
+  out.push_back(Trim(v.substr(start)));
+  return out;
+}
+
+// The omitted end of grid-row / grid-column / grid-area: the same name for
+// a custom identifier, else auto.
+std::string GridEndDefault(const std::string& start) {
+  std::string t = Trim(start);
+  if (t.empty() || t.find(' ') != std::string::npos) return "auto";
+  std::string l = AsciiLower(t);
+  if (l == "auto" || l == "span" || IsAsciiDigit((unsigned char)l[0]) || l[0] == '-' || l[0] == '+') return "auto";
+  return t;
+}
+}  // namespace
 
 bool ExpandProperty(const std::string& rawName, const std::string& value,
                     std::vector<std::pair<int, std::string> >& out) {
@@ -856,25 +984,105 @@ bool ExpandProperty(const std::string& rawName, const std::string& value,
     out.push_back(std::make_pair((int)kPropListStyleType, type));
     out.push_back(std::make_pair((int)kPropListStylePosition, pos));
   } else if (name == "place-items") {
-    if (!t.empty()) out.push_back(std::make_pair((int)kPropAlignItems, t[0]));
+    if (!t.empty()) {
+      out.push_back(std::make_pair((int)kPropAlignItems, t[0]));
+      out.push_back(std::make_pair((int)kPropJustifyItems, t.size() > 1 ? t[1] : t[0]));
+    }
   } else if (name == "place-self") {
-    if (!t.empty()) out.push_back(std::make_pair((int)kPropAlignSelf, t[0]));
+    if (!t.empty()) {
+      out.push_back(std::make_pair((int)kPropAlignSelf, t[0]));
+      out.push_back(std::make_pair((int)kPropJustifySelf, t.size() > 1 ? t[1] : t[0]));
+    }
   } else if (name == "place-content") {
     if (!t.empty()) {
       out.push_back(std::make_pair((int)kPropAlignContent, t[0]));
       out.push_back(std::make_pair((int)kPropJustifyContent, t.size() > 1 ? t[1] : t[0]));
     }
-  } else if (name == "grid-column") {
-    size_t slash = value.find('/');
-    out.push_back(std::make_pair((int)kPropGridColumnStart,
-                                 Trim(value.substr(0, slash))));
-    out.push_back(std::make_pair((int)kPropGridColumnEnd,
-                                 slash == std::string::npos ? std::string("auto")
-                                                            : Trim(value.substr(slash + 1))));
-  } else if (name == "grid-template") {
-    size_t slash = value.find('/');
-    if (slash != std::string::npos)
-      out.push_back(std::make_pair((int)kPropGridTemplateColumns, Trim(value.substr(slash + 1))));
+  } else if (name == "grid-column" || name == "grid-row") {
+    bool col = name == "grid-column";
+    std::vector<std::string> parts = SplitSlash(value);
+    std::string start = parts[0], end = parts.size() > 1 ? parts[1] : GridEndDefault(parts[0]);
+    if (global) start = end = value;
+    out.push_back(std::make_pair((int)(col ? kPropGridColumnStart : kPropGridRowStart), start));
+    out.push_back(std::make_pair((int)(col ? kPropGridColumnEnd : kPropGridRowEnd), end));
+  } else if (name == "grid-area") {
+    std::vector<std::string> p = SplitSlash(value);
+    std::string rs = p[0];
+    std::string cs = p.size() > 1 ? p[1] : GridEndDefault(rs);
+    std::string re = p.size() > 2 ? p[2] : GridEndDefault(rs);
+    std::string ce = p.size() > 3 ? p[3] : GridEndDefault(cs);
+    if (global) rs = cs = re = ce = value;
+    out.push_back(std::make_pair((int)kPropGridRowStart, rs));
+    out.push_back(std::make_pair((int)kPropGridColumnStart, cs));
+    out.push_back(std::make_pair((int)kPropGridRowEnd, re));
+    out.push_back(std::make_pair((int)kPropGridColumnEnd, ce));
+  } else if (name == "grid-template" || name == "grid") {
+    std::string rows = "none", cols = "none", areas = "none";
+    std::string flow, autoRows = "auto", autoCols = "auto";
+    if (global) {
+      rows = cols = areas = flow = autoRows = autoCols = value;
+    } else {
+      std::vector<std::string> p = SplitSlash(value);
+      std::string l = AsciiLower(value);
+      if (name == "grid" && l.find("auto-flow") != std::string::npos) {
+        // grid: auto-flow [dense] <auto-rows> / <columns>  or  <rows> / auto-flow [dense] <auto-cols>
+        std::string a = p[0], b = p.size() > 1 ? p[1] : std::string();
+        bool rowFlow = AsciiLower(a).find("auto-flow") != std::string::npos;
+        std::string flowPart = rowFlow ? a : b;
+        bool dense = AsciiLower(flowPart).find("dense") != std::string::npos;
+        std::vector<std::string> ft = SplitValueTokens(flowPart);
+        std::string sizes;
+        for (size_t i = 0; i < ft.size(); ++i) {
+          std::string fl = AsciiLower(ft[i]);
+          if (fl != "auto-flow" && fl != "dense") sizes += (sizes.empty() ? "" : " ") + ft[i];
+        }
+        if (sizes.empty()) sizes = "auto";
+        flow = std::string(rowFlow ? "row" : "column") + (dense ? " dense" : "");
+        if (rowFlow) {
+          autoRows = sizes;
+          cols = Trim(b).empty() ? "none" : b;
+        } else {
+          autoCols = sizes;
+          rows = Trim(a).empty() ? "none" : a;
+        }
+      } else if (value.find('"') != std::string::npos || value.find('\'') != std::string::npos) {
+        // "a a" 40px "b c" auto / 1fr 2fr
+        std::vector<std::string> toks = SplitValueTokens(p[0]);
+        areas.clear();
+        rows.clear();
+        std::string pendingNames;
+        bool lastWasArea = false;
+        for (size_t i = 0; i < toks.size(); ++i) {
+          const std::string& tk = toks[i];
+          if (tk[0] == '"' || tk[0] == '\'') {
+            if (lastWasArea) rows += " auto";
+            areas += (areas.empty() ? "" : " ") + tk;
+            if (!pendingNames.empty()) rows += " " + pendingNames;
+            pendingNames.clear();
+            lastWasArea = true;
+          } else if (tk[0] == '[') {
+            rows += " " + tk;
+          } else {
+            rows += " " + tk;
+            lastWasArea = false;
+          }
+        }
+        if (lastWasArea) rows += " auto";
+        rows = Trim(rows);
+        if (p.size() > 1) cols = p[1];
+      } else if (AsciiLower(Trim(value)) != "none") {
+        rows = p[0];
+        if (p.size() > 1) cols = p[1];
+      }
+    }
+    out.push_back(std::make_pair((int)kPropGridTemplateRows, rows));
+    out.push_back(std::make_pair((int)kPropGridTemplateColumns, cols));
+    out.push_back(std::make_pair((int)kPropGridTemplateAreas, areas));
+    if (name == "grid") {
+      out.push_back(std::make_pair((int)kPropGridAutoFlow, flow.empty() ? std::string("row") : flow));
+      out.push_back(std::make_pair((int)kPropGridAutoRows, autoRows));
+      out.push_back(std::make_pair((int)kPropGridAutoColumns, autoCols));
+    }
   } else if (name == "border-radius") {
     std::string first = value.substr(0, value.find('/'));
     std::vector<std::string> r = SplitValueTokens(first);
@@ -914,13 +1122,9 @@ bool IsCssPropertySupported(const std::string& prop, const std::string& value) {
   std::vector<std::pair<int, std::string> > out;
   if (!ExpandProperty(prop, value, out)) return false;
   std::string v = AsciiLower(Trim(value));
-  if (prop == "display") {
-    return !(v.find("grid") != std::string::npos || v == "contents" || v == "subgrid" ||
-             v == "ruby");
-  }
+  if (prop == "display") return v != "ruby" && v != "subgrid";
   if (prop == "position") return v != "-webkit-sticky";
-  if (StartsWith(prop, "grid")) return false;
-  if (v.find("subgrid") != std::string::npos || v.find("color-mix") != std::string::npos ||
+  if (v.find("subgrid") != std::string::npos || v.find("masonry") != std::string::npos || v.find("color-mix") != std::string::npos ||
       v.find("oklch") != std::string::npos || v.find("lab(") != std::string::npos ||
       v.find("anchor") != std::string::npos || v.find("dvh") != std::string::npos ||
       v.find("svh") != std::string::npos)
@@ -1564,22 +1768,34 @@ void ApplyProperty(int id, const std::string& rawValue, ComputedStyle& s,
       else s.columnGap = len;
       return;
     case kPropGridTemplateColumns:
-      ParseGridTemplate(value, lc, s);
+      ParseGridTemplate(value, lc, s.gridColumns);
       return;
-    case kPropGridColumnStart: {
-      int span = 1;
-      ParseGridLine(v, s.gridColumnStart, span);
-      s.gridColumnSpan = span;
+    case kPropGridTemplateRows:
+      ParseGridTemplate(value, lc, s.gridRows);
       return;
-    }
-    case kPropGridColumnEnd: {
-      int span = s.gridColumnSpan;
-      int line = 0;
-      ParseGridLine(v, line, span);
-      s.gridColumnEnd = line;
-      s.gridColumnSpan = span;
+    case kPropGridTemplateAreas:
+      ParseGridAreas(value, s);
       return;
-    }
+    case kPropGridAutoColumns:
+      ParseAutoTracks(value, lc, s.gridAutoColumns);
+      return;
+    case kPropGridAutoRows:
+      ParseAutoTracks(value, lc, s.gridAutoRows);
+      return;
+    case kPropGridAutoFlow:
+      s.gridFlowColumn = v.find("column") != std::string::npos;
+      s.gridFlowDense = v.find("dense") != std::string::npos;
+      return;
+    case kPropGridColumnStart: ParseGridLine(value, s.gridColumnStart); return;
+    case kPropGridColumnEnd: ParseGridLine(value, s.gridColumnEnd); return;
+    case kPropGridRowStart: ParseGridLine(value, s.gridRowStart); return;
+    case kPropGridRowEnd: ParseGridLine(value, s.gridRowEnd); return;
+    case kPropJustifyItems:
+      if (v != "legacy") s.justifyItems = ParseFlexAlign(StartsWith(v, "legacy ") ? v.substr(7) : v, s.justifyItems);
+      return;
+    case kPropJustifySelf:
+      s.justifySelf = ParseFlexAlign(v, s.justifySelf);
+      return;
     case kPropClip: {
       s.clippedAway = false;
       if (StartsWith(v, "rect(")) {

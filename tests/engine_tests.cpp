@@ -196,7 +196,7 @@ void TestCssParser() {
   }
   CHECK(hasMedia);
   CHECK(hasFlex);
-  CHECK(!hasGrid);  // grid layout reported as unsupported for @supports
+  CHECK(hasGrid);  // @supports (display: grid) holds
   CHECK(hasNested);
   CHECK(hasStar);   // unknown pseudo-elements keep the rule valid
   CHECK_EQ(sheet.imports.size(), 1u);
@@ -1632,6 +1632,44 @@ void TestScrollContainers() {
 
 }  // namespace
 
+void TestGridLayout() {
+  TestPage p("<style>body{margin:0}div{box-sizing:border-box}"
+             "#g{display:grid;grid-template:'head head' 40px 'nav main' 100px / 150px 1fr;gap:10px}"
+             "#h{grid-area:head}#n{grid-area:nav}#m{grid-area:main}"
+             "#c{display:grid;grid-template-columns:repeat(auto-fill,minmax(180px,1fr));gap:20px}#c div{height:10px}"
+             "#d{display:grid;grid-template-columns:repeat(3,100px);grid-auto-flow:dense;grid-auto-rows:20px}"
+             "#d1{grid-column:span 2}#d2{grid-column:span 2}"
+             "#k{display:grid;grid-template-rows:30px 30px;grid-auto-flow:column;grid-auto-columns:60px}"
+             "#l{display:grid;grid-template-columns:[a] 100px [b] 1fr [c];justify-items:center}#l1{grid-column:b / c;width:50px;height:5px}"
+             "</style><div id=g><div id=h></div><div id=n></div><div id=m></div></div>"
+             "<div id=c><div id=c1></div><div id=c2></div><div id=c3></div><div id=c4></div><div id=c5></div></div>"
+             "<div id=d><div id=d1></div><div id=d2></div><div id=d3></div></div>"
+             "<div id=k><div></div><div></div><div id=k3></div></div>"
+             "<div id=l><div id=l1></div></div>",
+             800);
+  Rect h = p.RectOf("h"), n = p.RectOf("n"), m = p.RectOf("m");
+  CHECK_NEAR(h.w, 800, 0.5);
+  CHECK_NEAR(n.y - h.y, 50, 0.5);
+  CHECK_NEAR(n.w, 150, 0.5);
+  CHECK_NEAR(m.x, 160, 0.5);
+  CHECK_NEAR(m.w, 640, 0.5);
+  CHECK_NEAR(m.h, 100, 0.5);
+  // auto-fill: four 185px columns in 800px, the fifth card wraps.
+  Rect c1 = p.RectOf("c1"), c4 = p.RectOf("c4"), c5 = p.RectOf("c5");
+  CHECK_NEAR(c1.w, 185, 0.5);
+  CHECK_NEAR(c4.x, 615, 0.5);
+  CHECK_NEAR(c5.y - c1.y, 30, 0.5);
+  // dense: the 1-column item fills the hole after the first 2-span item.
+  Rect d1 = p.RectOf("d1"), d3 = p.RectOf("d3");
+  CHECK_NEAR(d3.x, 200, 0.5);
+  CHECK_NEAR(d3.y, d1.y, 0.5);
+  Rect k3 = p.RectOf("k3");
+  CHECK_NEAR(k3.x, 60, 0.5);
+  CHECK_NEAR(k3.w, 60, 0.5);
+  Rect l1 = p.RectOf("l1");
+  CHECK_NEAR(l1.x, 100 + (700 - 50) / 2.0f, 0.5);
+}
+
 void TestMaskImage() {
   TestPage p("<style>.i{display:inline-block;width:20px;height:20px;background-color:#123456;"
              "-webkit-mask:url(icons/menu.svg) no-repeat center / 16px}</style><span class=i></span>");
@@ -1709,6 +1747,7 @@ int main() {
   TestScrollContainers();
   TestDns();
   TestMaskImage();
+  TestGridLayout();
   printf("%d checks, %d failures\n", g_checks, g_failures);
   return g_failures ? 1 : 0;
 }

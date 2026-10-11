@@ -92,10 +92,12 @@ ComputedStyle::ComputedStyle()
       order(0),
       rowGap(Length::Px(0)),
       columnGap(Length::Px(0)),
-      gridAutoRepeat(0),
-      gridColumnSpan(1),
-      gridColumnStart(0),
-      gridColumnEnd(0),
+      gridFlowColumn(false),
+      gridFlowDense(false),
+      gridAreaRows(0),
+      gridAreaCols(0),
+      justifyItems(kFlexNormal),
+      justifySelf(kFlexAuto),
       hasContent(false) {
   rotateAxis[0] = rotateAxis[1] = 0;
   rotateAxis[2] = 1;
@@ -257,11 +259,20 @@ void ComputedStyle::CopyFrom(const ComputedStyle& o) {
   rowGap = o.rowGap;
   columnGap = o.columnGap;
   gridColumns = o.gridColumns;
-  gridAutoRepeat = o.gridAutoRepeat;
-  gridAutoMin = o.gridAutoMin;
-  gridColumnSpan = o.gridColumnSpan;
+  gridRows = o.gridRows;
+  gridAutoColumns = o.gridAutoColumns;
+  gridAutoRows = o.gridAutoRows;
+  gridFlowColumn = o.gridFlowColumn;
+  gridFlowDense = o.gridFlowDense;
+  gridAreas = o.gridAreas;
+  gridAreaRows = o.gridAreaRows;
+  gridAreaCols = o.gridAreaCols;
+  gridRowStart = o.gridRowStart;
+  gridRowEnd = o.gridRowEnd;
   gridColumnStart = o.gridColumnStart;
   gridColumnEnd = o.gridColumnEnd;
+  justifyItems = o.justifyItems;
+  justifySelf = o.justifySelf;
   content = o.content;
   hasContent = o.hasContent;
 }
